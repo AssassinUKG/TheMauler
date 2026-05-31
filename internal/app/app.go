@@ -1248,6 +1248,14 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		return
 	}
 	run.addEvent("model", "Model ready", modelLoadKey(profile))
+	if err := saveRuntimeLockSnapshot(profile); err != nil {
+		run.addEvent("runtime_lock", "Could not save runtime lock", err.Error())
+	} else {
+		lock := buildRuntimeLock(profile)
+		if data, err := json.Marshal(lock); err == nil {
+			run.addEvent("runtime_lock", "Saved runtime lock", string(data))
+		}
+	}
 	if applyWorkingContextBudget(a, mode.ContextBudget, profile.CtxTokens) {
 		run.addEvent("context_budget", "Applied agent working context budget", fmt.Sprintf("budget=%d profile_ctx=%d", mode.ContextBudget, profile.CtxTokens))
 	}

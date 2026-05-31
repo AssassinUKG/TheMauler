@@ -14,6 +14,10 @@ export function ApplySafetyPreset(arg1) {
   return window['go']['app']['App']['ApplySafetyPreset'](arg1);
 }
 
+export function BenchmarkProfile(arg1, arg2) {
+  return window['go']['app']['App']['BenchmarkProfile'](arg1, arg2);
+}
+
 export function ClearHistory() {
   return window['go']['app']['App']['ClearHistory']();
 }

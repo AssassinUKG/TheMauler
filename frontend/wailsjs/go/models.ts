@@ -164,6 +164,52 @@ export namespace app {
 	        this.last_used_at = source["last_used_at"];
 	    }
 	}
+	export class ProfileBenchmarkResult {
+	    status: string;
+	    summary: string;
+	    notes: string[];
+	    recommended_profile: settings.Profile;
+	    prompt_tokens?: number;
+	    completion_tokens?: number;
+	    ttf_ms?: number;
+	    total_ms?: number;
+	    tokens_per_second?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProfileBenchmarkResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = source["status"];
+	        this.summary = source["summary"];
+	        this.notes = source["notes"];
+	        this.recommended_profile = this.convertValues(source["recommended_profile"], settings.Profile);
+	        this.prompt_tokens = source["prompt_tokens"];
+	        this.completion_tokens = source["completion_tokens"];
+	        this.ttf_ms = source["ttf_ms"];
+	        this.total_ms = source["total_ms"];
+	        this.tokens_per_second = source["tokens_per_second"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class SessionChatMessage {
 	    role: string;
 	    content: string;

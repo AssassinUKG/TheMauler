@@ -15,6 +15,8 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - [x] SQLite/state inspection tools (`sqlite_schema`, `sqlite_query`).
 - [x] Gemma/InferenceBridge inline tool-call diagnostics and repair hardening.
 - [x] Malformed inline tool-call retry brake to prevent repeat loops.
+- [x] Runtime registry skeleton for Qwen3.6/Gemma4 capability profiles.
+- [x] Runtime lock snapshots for last active model/profile/backend launch.
 - [ ] Memory/task-run dedicated inspection helpers.
 - [ ] Structural code intelligence tools (`symbol_search`, `find_references`, Go/TS symbol indexes).
 - [ ] Visual feedback loop for frontend/Wails verification.
@@ -38,15 +40,34 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - New read-only state tools: `sqlite_schema` and `sqlite_query`. Queries are limited to single SELECT/WITH statements and open databases read-only.
 - Tool-call protocol diagnostics now record request protocol, structured backend `tool_calls`, repaired inline markup, and unrepaired raw markup tails in task-run events.
 - Gemma/InferenceBridge compatibility repair now handles self-closing named tool calls with `parameters={...}`, `parameters="{...}"`, and escaped `parameters="{\"...\"}"` forms. Malformed-protocol retries are capped separately from normal auto-continue.
+- Runtime registry files live under `runtime/`, with built-in Go metadata in `internal/runtimeprofile` so Doctor can warn on adapter, tool-protocol, thinking, MTP, and context mismatches even before external registry loading is added.
+- Successful agent runs write `runtime-lock.json` to the Mauler config directory, capturing active profile/backend/model/context/spec settings for reproducibility.
 
 ## Next Capability Tracks
 
-1. Doctor/health checks: surface live context mismatch, offline mode blocking web tools, profile names pointing at the wrong model family, InferenceBridge content-only tool output, and preset budget vs launch context clearly.
-2. State inspection: expose read-only SQLite/memory/task-run inspection without ad hoc shell queries.
-3. Code intelligence: add AST/symbol/reference tools for Go and TypeScript before broader language support.
-4. Visual loop: start with browser/dev screenshots for frontend verification, then investigate true desktop capture for Wails.
-5. Git helpers: structured wrappers around log/diff/branch history when `.git` metadata is present.
-6. Monitoring: later background watchers for builds/logs/processes with opt-in notifications.
+1. Runtime foundation: keep a reproducible runtime registry (`runtime/models`, `runtime/templates`, `runtime/profiles`, `runtime/benchmarks`) plus runtime-lock snapshots for backend/model/template/profile facts. Status: started.
+2. Model adapters: Qwen3.6 and Gemma4 compatibility layers for think cleanup, role normalization, stop tokens, JSON repair, and tool-call extraction. Status: started for inline tool repair; adapter package still planned.
+3. Agent core state machine: make Plan -> Act -> Observe -> Reflect -> Continue an explicit loop contract, with loop protection for repeated tool calls/responses, no progress, empty output, and infinite planning. Status: partial via run state and retry brakes.
+4. Tool calling: harden JSON extraction/repair/schema validation, retry invalid calls with bounded prompts, and keep strict tool schemas. Status: partial; JSON repair engine/eval suite still planned.
+5. Memory system: maintain short-term, working, project, long-term, and future embedding memory layers; build prompts from relevant memory/current files/recent actions instead of dumping everything. Status: partial.
+6. Router: add capability registry and automatic model/profile selection, for example Qwen for tool-heavy coding and Gemma for writing/planning when stable. Status: registry started; router planned.
+7. MTP integration: detect MTP-capable artifacts, benchmark `draft-mtp` launch/profile settings, and avoid enabling MTP on normal GGUFs. Status: Doctor warnings started; benchmark UI in progress.
+8. Evaluation harness: add coding/tool-use/json/memory/reasoning/writing eval suites and a `mauler eval` style command/report. Status: planned.
+9. UI intelligence: add model/context/VRAM/token/TPS telemetry, agent phase visualizer, and richer tool timeline. Status: partial via status bar/logs; telemetry planned.
+10. Frontier layer: add planner/worker/critic/consensus flows for critical tasks. Status: bounded subagents started; orchestration planned.
+
+## Steps Left
+
+1. Load external runtime registry JSON from `runtime/` and merge it over built-in defaults.
+2. Add first-class Qwen/Gemma adapter package around response normalization and tool-call repair.
+3. Add Settings > Profiles benchmark/recommendation workflow and persist benchmark results under `runtime/benchmarks/`.
+4. Add MTP launch validation against live backend props and selected model artifact name.
+5. Add JSON repair engine with schema validation metrics and failing examples in task logs.
+6. Add explicit Plan/Act/Observe/Reflect loop events and UI phase visualizer.
+7. Add capability router for automatic profile selection per task mode.
+8. Add eval harness for tool-call validity, JSON validity, loop count, latency, and task success.
+9. Add richer runtime telemetry from InferenceBridge/llama.cpp/LM Studio where available.
+10. Build planner/worker/critic orchestration on top of bounded subagents.
 
 ## Verification
 

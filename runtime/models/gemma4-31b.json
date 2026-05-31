@@ -1,0 +1,24 @@
+{
+  "name": "gemma4-31b",
+  "family": "gemma4",
+  "backend": "llama.cpp",
+  "quant": "Q4_K_S",
+  "adapter": "gemma4",
+  "tool_protocol": "repair-text",
+  "supports": {
+    "tools": true,
+    "thinking": false,
+    "mtp": false
+  },
+  "defaults": {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "min_p": 0.0,
+    "repeat_penalty": 1.05
+  },
+  "recommended_ctx": 65536,
+  "kv_type_k": "q8_0",
+  "kv_type_v": "q8_0",
+  "notes": "Current Gemma tool behavior may arrive as text markup through llama.cpp/InferenceBridge, so TheMauler keeps repair-text compatibility enabled."
+}

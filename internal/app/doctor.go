@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"mauler/internal/runtimeprofile"
 	"mauler/internal/settings"
 	"mauler/internal/tools"
 )
@@ -296,6 +297,7 @@ func (a *App) RunDoctor() DoctorResult {
 	}
 
 	// ── 4. Thinking mode + no-think threshold ────────────────────────────────
+	addRuntimeProfileChecks(add, activeProfile)
 	addProfileIdentityChecks(add, cfg.ActiveProfile, activeProfile)
 	addAgentPresetBudgetChecks(add, cfg, activeProfile)
 	addProfileSanityChecks(add, activeProfile)
@@ -342,6 +344,8 @@ func (a *App) RunDoctor() DoctorResult {
 	}
 
 	// ── 6. Shell backend ─────────────────────────────────────────────────────
+	addRuntimeLockChecks(add)
+
 	shellBackend := cfg.Tools.ShellBackend
 	if shellBackend == "" {
 		shellBackend = "auto"
@@ -792,6 +796,91 @@ func providerHostLabel(baseURL string) string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+func addRuntimeProfileChecks(add func(DoctorCheck), profile settings.Profile) {
+	rp, ok := runtimeprofile.Match(profile)
+	if !ok {
+		add(DoctorCheck{
+			Name:    "Runtime registry",
+			Status:  "info",
+			Message: "No built-in runtime profile matched the active model",
+			Detail:  "TheMauler will use generic OpenAI-compatible behavior. Add a runtime profile before relying on model-specific routing or eval gates.",
+		})
+		return
+	}
+	add(DoctorCheck{
+		Name:    "Runtime registry",
+		Status:  "ok",
+		Message: fmt.Sprintf("%s adapter=%s tool_protocol=%s", rp.Name, rp.Adapter, rp.ToolProtocol),
+	})
+	if profile.Thinking && !rp.Supports.Thinking {
+		add(DoctorCheck{
+			Name:    "Runtime adapter",
+			Status:  "warn",
+			Message: fmt.Sprintf("%s is not marked as thinking-capable but this profile has thinking=true", rp.Name),
+			Detail:  "Disable thinking for this profile unless the specific backend/template exposes a known reasoning channel.",
+		})
+	}
+	if profile.SpecType != "" && !rp.Supports.MTP {
+		add(DoctorCheck{
+			Name:    "MTP compatibility",
+			Status:  "warn",
+			Message: fmt.Sprintf("%s is not marked as MTP-capable but spec_type=%s is enabled", rp.Name, profile.SpecType),
+			Detail:  "Disable draft-mtp or switch to a known MTP GGUF.",
+		})
+	} else if profile.SpecType != "" && !runtimeprofile.LooksMTPModel(profile) {
+		add(DoctorCheck{
+			Name:    "MTP compatibility",
+			Status:  "warn",
+			Message: "Profile enables draft-mtp but model_id/name does not include MTP",
+			Detail:  "Use an MTP GGUF artifact for draft-mtp. Normal Qwen/Gemma GGUFs should leave spec_type empty.",
+		})
+	} else if profile.SpecType == "" && rp.Supports.MTP && runtimeprofile.LooksMTPModel(profile) {
+		add(DoctorCheck{
+			Name:    "MTP compatibility",
+			Status:  "info",
+			Message: "Model looks MTP-capable but draft-mtp is disabled",
+			Detail:  "For recent llama.cpp builds, try spec_type=draft-mtp and spec_draft_n_max=2 or 3, then benchmark.",
+		})
+	}
+	if rp.RecommendedCtx > 0 && profile.CtxTokens > rp.RecommendedCtx*2 {
+		add(DoctorCheck{
+			Name:    "Runtime context profile",
+			Status:  "warn",
+			Message: fmt.Sprintf("%s recommends around %d ctx, profile requests %d", rp.Name, rp.RecommendedCtx, profile.CtxTokens),
+			Detail:  "Large contexts are allowed, but verify VRAM/KV cache and latency before treating this profile as stable.",
+		})
+	}
+}
+
+func addRuntimeLockChecks(add func(DoctorCheck)) {
+	cfgDir, err := settings.ConfigDir()
+	if err != nil {
+		add(DoctorCheck{Name: "Runtime lock", Status: "warn", Message: "Could not locate config directory", Detail: err.Error()})
+		return
+	}
+	path := filepath.Join(cfgDir, "runtime-lock.json")
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		add(DoctorCheck{
+			Name:    "Runtime lock",
+			Status:  "info",
+			Message: "No runtime-lock.json yet",
+			Detail:  "The next successful agent run will write the active model/profile/backend launch snapshot.",
+		})
+		return
+	}
+	if err != nil {
+		add(DoctorCheck{Name: "Runtime lock", Status: "warn", Message: "Could not inspect runtime-lock.json", Detail: err.Error()})
+		return
+	}
+	add(DoctorCheck{
+		Name:    "Runtime lock",
+		Status:  "ok",
+		Message: fmt.Sprintf("Last runtime snapshot: %s", info.ModTime().Format(time.RFC3339)),
+		Detail:  path,
+	})
 }
 
 func addProfileIdentityChecks(add func(DoctorCheck), profileName string, profile settings.Profile) {

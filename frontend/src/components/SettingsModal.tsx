@@ -6,12 +6,14 @@ import {
   UpdateProfiles,
   PingProvider,
   ListModelsForProvider,
+  BenchmarkProfile,
   UseProfile,
   type Settings,
   type ProfilesFile,
   type Profile,
   type Provider,
   type GenerationParams,
+  type ProfileBenchmarkResult,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
 import './SettingsModal.css'
@@ -95,6 +97,8 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedProfile, setSelectedProfile] = useState('')
   const [deleteProfileConfirm, setDeleteProfileConfirm] = useState<string | null>(null)
+  const [benchmarking, setBenchmarking] = useState(false)
+  const [benchmarkResult, setBenchmarkResult] = useState<ProfileBenchmarkResult | null>(null)
 
   useEffect(() => {
     void Promise.all([GetSettings(), GetProfiles()]).then(([s, pf]) => {
@@ -192,6 +196,20 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         profiles: {
           ...prev.profiles,
           [name]: { ...prev.profiles[name], [field]: val },
+        },
+      }
+    })
+    markDirty()
+  }
+
+  const replaceProfile = (name: string, next: Profile) => {
+    setProfilesFile(prev => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        profiles: {
+          ...prev.profiles,
+          [name]: { ...next, name },
         },
       }
     })
@@ -390,6 +408,42 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     }
   }
 
+  const handleBenchmarkProfile = async () => {
+    if (!profile || !profilesFile || !selectedProfile) return
+    const prov = profilesFile.providers[profile.provider]
+    if (!prov) {
+      setBenchmarkResult({
+        status: 'warn',
+        summary: `Provider ${profile.provider} was not found.`,
+        notes: [],
+        recommended_profile: profile,
+      })
+      return
+    }
+    setBenchmarking(true)
+    setBenchmarkResult(null)
+    try {
+      const res = await BenchmarkProfile({ ...profile, name: selectedProfile }, prov)
+      setBenchmarkResult(res)
+    } catch (e) {
+      setBenchmarkResult({
+        status: 'warn',
+        summary: `Benchmark failed: ${e}`,
+        notes: [],
+        recommended_profile: profile,
+      })
+    } finally {
+      setBenchmarking(false)
+    }
+  }
+
+  const applyBenchmarkRecommendation = () => {
+    if (!benchmarkResult || !selectedProfile) return
+    replaceProfile(selectedProfile, benchmarkResult.recommended_profile)
+    setBenchmarkResult(null)
+    setSaveStatus('Benchmark recommendations applied')
+  }
+
   return (
     <div className="overlay" onClick={e => { if (e.target === e.currentTarget) void close() }}>
       <div className="settings-modal">
@@ -541,8 +595,34 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       </button>
                       <button onClick={newProfile} title="Create a blank profile">New</button>
                       <button onClick={duplicateProfile} title="Clone this profile">Duplicate</button>
+                      <button onClick={() => void handleBenchmarkProfile()} disabled={benchmarking} title="Probe the selected provider and recommend model settings">
+                        {benchmarking ? 'Benchmarking...' : 'Benchmark LLM'}
+                      </button>
                       <button onClick={deleteProfile} disabled={profileNames.length <= 1} title="Delete this profile">Delete</button>
                     </div>
+
+                    {benchmarkResult && (
+                      <div className={`benchmark-card benchmark-${benchmarkResult.status}`}>
+                        <div className="benchmark-card-head">
+                          <div>
+                            <div className="benchmark-title">{benchmarkResult.summary}</div>
+                            <div className="benchmark-metrics">
+                              {benchmarkResult.ttf_ms ? `TTFT ${benchmarkResult.ttf_ms} ms` : 'TTFT n/a'}
+                              {' · '}
+                              {benchmarkResult.tokens_per_second ? `${benchmarkResult.tokens_per_second.toFixed(1)} tok/s` : 'tok/s n/a'}
+                              {' · '}
+                              {benchmarkResult.completion_tokens ?? 0} output tokens
+                            </div>
+                          </div>
+                          <button onClick={applyBenchmarkRecommendation}>Apply</button>
+                        </div>
+                        {benchmarkResult.notes.length > 0 && (
+                          <ul className="benchmark-notes">
+                            {benchmarkResult.notes.map((note, idx) => <li key={idx}>{note}</li>)}
+                          </ul>
+                        )}
+                      </div>
+                    )}
 
                     <Field label="Provider">
                       <select

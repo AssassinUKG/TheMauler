@@ -11,6 +11,8 @@ export function AddToolSafeRule(arg1:string,arg2:string):Promise<void>;
 
 export function ApplySafetyPreset(arg1:string):Promise<void>;
 
+export function BenchmarkProfile(arg1:settings.Profile,arg2:settings.Provider):Promise<app.ProfileBenchmarkResult>;
+
 export function ClearHistory():Promise<void>;
 
 export function ClearMemoryEntries():Promise<void>;

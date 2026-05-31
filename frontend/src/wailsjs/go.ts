@@ -450,6 +450,21 @@ export const PingProvider = (provider: Provider): Promise<string> =>
 export const ListModelsForProvider = (provider: Provider): Promise<string[]> =>
   call('app.App.ListModelsForProvider', provider)
 
+export interface ProfileBenchmarkResult {
+  status: string
+  summary: string
+  notes: string[]
+  recommended_profile: Profile
+  prompt_tokens?: number
+  completion_tokens?: number
+  ttf_ms?: number
+  total_ms?: number
+  tokens_per_second?: number
+}
+
+export const BenchmarkProfile = (profile: Profile, provider: Provider): Promise<ProfileBenchmarkResult> =>
+  call('app.App.BenchmarkProfile', profile, provider)
+
 export interface DoctorCheck {
   name: string
   status: string  // ok | warn | fail | info
