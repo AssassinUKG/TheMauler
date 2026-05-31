@@ -1,0 +1,120 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg0: #1e1e1e;
+  --bg1: #252526;
+  --bg2: #2d2d30;
+  --bg3: #3c3c3c;
+  --border: #3e3e42;
+  --text: #d4d4d4;
+  --text-dim: #858585;
+  --text-bright: #ffffff;
+  --accent: #007acc;
+  --accent-hover: #1a8ad4;
+  --accent-glow: rgba(0, 122, 204, 0.18);
+  --accent-text: #ffffff;
+  --btn-primary: #007acc;
+  --btn-primary-text: #ffffff;
+  --green: #4ec9b0;
+  --yellow: #dcdcaa;
+  --red: #f44747;
+  --orange: #ce9178;
+  --purple: #c586c0;
+  --blue: #9cdcfe;
+  --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --radius: 6px;
+  --radius-lg: 12px;
+  --scrollbar-w: 6px;
+  --transition: 0.15s ease;
+  --shadow-sm: 0 2px 8px rgba(0,0,0,0.35);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.5);
+}
+
+/* ── Light theme ─────────────────────────────────────── */
+[data-theme="light"] {
+  --bg0: #f3f3f3;
+  --bg1: #ffffff;
+  --bg2: #f0f0f0;
+  --bg3: #e2e2e2;
+  --border: #cccccc;
+  --text: #1e1e1e;
+  --text-dim: #6e6e6e;
+  --text-bright: #000000;
+  --green: #14a472;
+  --yellow: #b5941a;
+  --red: #c72e2e;
+  --orange: #a3522a;
+  --purple: #7c3aed;
+  --blue: #0066cc;
+  --shadow-sm: 0 2px 8px rgba(0,0,0,0.12);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.2);
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg0);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+::-webkit-scrollbar { width: var(--scrollbar-w); height: var(--scrollbar-w); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+button {
+  cursor: pointer;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  transition: background var(--transition), border-color var(--transition), color var(--transition), box-shadow var(--transition);
+}
+button:hover { background: var(--bg3); filter: brightness(1.12); }
+button.primary {
+  background: var(--btn-primary);
+  border-color: var(--btn-primary);
+  color: var(--btn-primary-text);
+}
+button.primary:hover { filter: brightness(1.12); }
+button.danger { background: #6e2020; border-color: var(--red); color: #fff; }
+button.danger:hover { filter: brightness(1.15); }
+button:disabled { opacity: 0.4; cursor: default; filter: none; }
+
+/* Consistent focus ring */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input, select, textarea {
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+}
+select option { background: var(--bg2); }
+
+code, pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }

@@ -1,0 +1,53 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules/
+
+# Frontend build output
+frontend/dist/
+frontend/dist-ssr/
+
+# Wails / local build output
+build/bin/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.env.local
+*.local
+*.token
+*.tokens
+*.secret
+*.secrets
+token.txt
+tokens.txt
+
+# Local app/user config that can contain endpoints or credentials
+profiles.toml
+settings.toml
+
+# Local tool/editor state
+.claude/settings.local.json
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~

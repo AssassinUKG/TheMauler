@@ -1,0 +1,328 @@
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: #111;
+}
+
+/* ── Titlebar ───────────────────────────────────────── */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 14px;
+  background: #171717;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.titlebar-logo {
+  width: 24px;
+  height: 24px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: -0.5px;
+  flex-shrink: 0;
+}
+
+.titlebar-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  letter-spacing: 0.2px;
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.titlebar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.titlebar-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
+.titlebar-actions button {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  padding: 4px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  height: 28px;
+}
+.titlebar-actions button:hover {
+  color: var(--text);
+  background: var(--bg3);
+  border-color: var(--border);
+}
+.titlebar-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.session-select {
+  height: 28px;
+  max-width: 160px;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+/* ── Three-pane workspace ───────────────────────────── */
+.workspace {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  gap: 0;
+  padding: 0;
+  background: var(--border);
+}
+
+.pane-slot {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #151515;
+}
+
+.pane-slot.closed {
+  pointer-events: auto;
+  background: #181818;
+  border-inline: 1px solid var(--border);
+}
+
+.collapsed-rail {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background: #181818;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.collapsed-rail:hover {
+  color: var(--text);
+  background: #202020;
+}
+
+.collapsed-rail span {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.collapsed-rail-left span {
+  transform: rotate(180deg);
+}
+
+.resize-handle {
+  z-index: 4;
+  min-width: 4px;
+  cursor: col-resize;
+  background: var(--border);
+  transition: background var(--transition);
+}
+
+.resize-handle:hover {
+  background: var(--accent);
+}
+
+.resize-handle.disabled {
+  min-width: 0;
+  cursor: default;
+  background: transparent;
+}
+
+/* ── Terminal panel (bottom, above status bar) ──────── */
+.terminal-panel {
+  flex-shrink: 0;
+  min-height: 100px;
+  max-height: 600px;
+  overflow: hidden;
+  background: #111820;
+  border-top: 1px solid var(--border);
+}
+
+.terminal-resize-handle {
+  flex-shrink: 0;
+  height: 4px;
+  background: var(--border);
+  cursor: row-resize;
+  z-index: 4;
+  transition: background var(--transition);
+}
+.terminal-resize-handle:hover {
+  background: var(--accent);
+}
+
+/* ── Center pane & tabs ─────────────────────────────── */
+.center-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #151515;
+}
+
+.center-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: #181818;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.center-tabs button {
+  height: 28px;
+  max-width: 180px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color var(--transition), background var(--transition), border-color var(--transition);
+}
+
+.center-tabs button:hover {
+  color: var(--text);
+  background: var(--bg2);
+}
+
+.center-tabs button.active {
+  color: var(--text-bright);
+  background: var(--bg2);
+  border-color: var(--border);
+}
+
+.center-tabs button:disabled {
+  opacity: 0.35;
+}
+
+.center-file-tab {
+  display: flex;
+  align-items: center;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.center-file-tab:hover {
+  background: var(--bg2);
+}
+
+.center-file-tab.active {
+  background: var(--bg2);
+  border-color: var(--border);
+}
+
+.center-file-tab button {
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.center-file-tab.active button {
+  color: var(--text-bright) !important;
+}
+
+.tab-close {
+  padding: 0 7px !important;
+  min-width: unset !important;
+  color: var(--text-dim);
+  font-size: 15px !important;
+  opacity: 0;
+  transition: opacity var(--transition) !important;
+}
+
+.center-file-tab:hover .tab-close {
+  opacity: 0.7;
+}
+
+.tab-close:hover {
+  opacity: 1 !important;
+  color: var(--text) !important;
+}
+
+.center-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Session save dialog ────────────────────────────── */
+.save-session-form {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.save-session-form input {
+  height: 34px;
+  min-width: 360px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg1);
+  color: var(--text);
+  font: inherit;
+}
+
+@media (max-width: 1100px) {
+  .titlebar-name { display: none; }
+  .titlebar-actions button { padding: 4px 6px; }
+}

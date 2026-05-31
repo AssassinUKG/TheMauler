@@ -1,0 +1,31 @@
+# MAULER.md — project context file
+#
+# Place this file at the root of any project directory.
+# TheMauler discovers it by walking up from CWD and uses it as a system
+# prompt prefix for every request made while inside this directory.
+#
+# Rename to MAULER.md (remove .example) to activate.
+
+# Context
+
+This is a Go project targeting WSL2 on Windows 11.
+Use `bash` tool commands that are Unix/bash compatible (not PowerShell).
+Prefer standard library solutions before reaching for external packages.
+When editing files, always read them first to understand the current state.
+
+# Tools
+
+# Uncomment to disable specific tools for this project:
+# disable = ["web_search", "code_run"]
+
+# Profile
+
+# Uncomment to override the active model profile for this project:
+# profile = "qwen3.6-think"
+
+# Ignore
+
+# Files/dirs to exclude from the file tree and context injection.
+# Uses gitignore-style patterns (in addition to .maulerignore):
+# vendor/
+# *.pb.go

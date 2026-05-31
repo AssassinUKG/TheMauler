@@ -1,0 +1,103 @@
+# TheMauler — profiles.toml example
+# Copy to ~/.config/mauler/profiles.toml and edit as needed.
+# If this file is absent, built-in defaults are used (see defaults.go).
+
+# ── RTX 3090 24 GB — recommended: UD-Q4_K_XL ──────────────────────────────
+# Model fits in ~17 GB, leaving ~7 GB for KV cache at 32K context.
+# Do NOT use Q6_K as default — it will OOM mid-session at 32K context.
+
+[profiles.qwen3-6-think]
+name             = "qwen3.6-think"
+backend          = "llamacpp"          # llamacpp | lmstudio | anthropic
+base_url         = "http://localhost:8080/v1"
+model_id         = "qwen3.6-27b"
+ctx_tokens       = 32768
+thinking         = true
+preserve_thinking = true
+mmproj           = ""  # auto-detect mmproj-F16.gguf in same dir as model
+
+  [profiles.qwen3-6-think.thinking_general]
+  temperature      = 1.0
+  top_p            = 0.95
+  top_k            = 20
+  min_p            = 0.0
+  presence_penalty = 1.5
+  max_tokens       = 4096
+  seed             = -1
+
+  [profiles.qwen3-6-think.thinking_coding]
+  temperature      = 0.6
+  top_p            = 0.95
+  top_k            = 20
+  min_p            = 0.0
+  presence_penalty = 0.0
+  max_tokens       = 8192
+  seed             = -1
+
+  [profiles.qwen3-6-think.nothinking]
+  temperature      = 0.7
+  top_p            = 0.8
+  top_k            = 20
+  min_p            = 0.0
+  presence_penalty = 1.5
+  max_tokens       = 4096
+  seed             = -1
+
+# ── No-thinking variant (faster, lower temperature) ────────────────────────
+
+[profiles.qwen3-6-nothink]
+name             = "qwen3.6-nothink"
+backend          = "llamacpp"
+base_url         = "http://localhost:8080/v1"
+model_id         = "qwen3.6-27b"
+ctx_tokens       = 32768
+thinking         = false
+preserve_thinking = false
+
+  [profiles.qwen3-6-nothink.nothinking]
+  temperature      = 0.7
+  top_p            = 0.8
+  top_k            = 20
+  min_p            = 0.0
+  presence_penalty = 1.5
+  max_tokens       = 4096
+  seed             = -1
+
+# ── LM Studio (uses whatever model is loaded) ───────────────────────────────
+
+[profiles.lmstudio-default]
+name       = "lmstudio-default"
+backend    = "lmstudio"
+base_url   = "http://localhost:1234/v1"
+model_id   = ""      # empty = use whatever LM Studio has loaded
+ctx_tokens = 16384
+thinking   = false
+
+  [profiles.lmstudio-default.nothinking]
+  temperature      = 0.7
+  top_p            = 0.8
+  top_k            = 20
+  min_p            = 0.0
+  presence_penalty = 1.5
+  max_tokens       = 4096
+  seed             = -1
+
+# ── Anthropic Claude (requires ANTHROPIC_API_KEY env var) ──────────────────
+
+[profiles.claude-sonnet]
+name        = "claude-sonnet"
+backend     = "anthropic"
+base_url    = "https://api.anthropic.com"
+model_id    = "claude-sonnet-4-6"
+ctx_tokens  = 200000
+thinking    = false
+api_key_env = "ANTHROPIC_API_KEY"
+
+  [profiles.claude-sonnet.nothinking]
+  temperature      = 0.7
+  top_p            = 0.9
+  top_k            = 0
+  min_p            = 0.0
+  presence_penalty = 0.0
+  max_tokens       = 8192
+  seed             = -1
