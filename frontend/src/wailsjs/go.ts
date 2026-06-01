@@ -452,9 +452,19 @@ export const ListModelsForProvider = (provider: Provider): Promise<string[]> =>
 
 export interface ProfileBenchmarkResult {
   status: string
+  id?: string
+  created_at?: string
+  profile_name?: string
+  provider_name?: string
+  model_id?: string
+  ctx_tokens?: number
+  context_tier?: string
+  context_role?: string
+  score?: number
   summary: string
   notes: string[]
   recommended_profile: Profile
+  scenarios: BenchmarkCase[]
   prompt_tokens?: number
   completion_tokens?: number
   ttf_ms?: number
@@ -462,8 +472,33 @@ export interface ProfileBenchmarkResult {
   tokens_per_second?: number
 }
 
+export interface BenchmarkCase {
+  name: string
+  status: string
+  summary: string
+  prompt_tokens?: number
+  completion_tokens?: number
+  ttf_ms?: number
+  total_ms?: number
+  tokens_per_second?: number
+  structured_tools?: number
+  repaired_tools?: number
+  inline_tool_markup?: boolean
+  output_leak?: boolean
+  valid_json?: boolean
+  expected_json?: boolean
+  response_chars?: number
+  error?: string
+}
+
 export const BenchmarkProfile = (profile: Profile, provider: Provider): Promise<ProfileBenchmarkResult> =>
   call('app.App.BenchmarkProfile', profile, provider)
+
+export const ListBenchmarkRuns = (): Promise<ProfileBenchmarkResult[]> =>
+  call('app.App.ListBenchmarkRuns')
+
+export const ClearBenchmarkRuns = (): Promise<void> =>
+  call('app.App.ClearBenchmarkRuns')
 
 export interface DoctorCheck {
   name: string

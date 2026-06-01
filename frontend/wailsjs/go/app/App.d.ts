@@ -13,6 +13,8 @@ export function ApplySafetyPreset(arg1:string):Promise<void>;
 
 export function BenchmarkProfile(arg1:settings.Profile,arg2:settings.Provider):Promise<app.ProfileBenchmarkResult>;
 
+export function ClearBenchmarkRuns():Promise<void>;
+
 export function ClearHistory():Promise<void>;
 
 export function ClearMemoryEntries():Promise<void>;
@@ -60,6 +62,8 @@ export function GetSkill(arg1:string):Promise<app.Skill>;
 export function GetUserProfile():Promise<string>;
 
 export function GetWorkingDir():Promise<string>;
+
+export function ListBenchmarkRuns():Promise<Array<app.ProfileBenchmarkResult>>;
 
 export function ListMemory():Promise<Array<app.MemoryEntry>>;
 

@@ -416,6 +416,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         status: 'warn',
         summary: `Provider ${profile.provider} was not found.`,
         notes: [],
+        scenarios: [],
         recommended_profile: profile,
       })
       return
@@ -430,6 +431,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         status: 'warn',
         summary: `Benchmark failed: ${e}`,
         notes: [],
+        scenarios: [],
         recommended_profile: profile,
       })
     } finally {
@@ -620,6 +622,28 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                           <ul className="benchmark-notes">
                             {benchmarkResult.notes.map((note, idx) => <li key={idx}>{note}</li>)}
                           </ul>
+                        )}
+                        {benchmarkResult.scenarios?.length > 0 && (
+                          <div className="benchmark-scenarios">
+                            {benchmarkResult.scenarios.map(sc => (
+                              <div key={sc.name} className={`benchmark-scenario scenario-${sc.status}`}>
+                                <div className="scenario-name">{sc.name}</div>
+                                <div className="scenario-summary">{sc.summary}</div>
+                                <div className="scenario-metrics">
+                                  TTFT {sc.ttf_ms ?? 0} ms
+                                  {' · '}
+                                  {sc.tokens_per_second ? sc.tokens_per_second.toFixed(1) : '0.0'} tok/s
+                                  {' · '}
+                                  {sc.completion_tokens ?? 0} out
+                                  {sc.structured_tools || sc.repaired_tools || sc.inline_tool_markup
+                                    ? ` · tools native ${sc.structured_tools ?? 0}, repaired ${sc.repaired_tools ?? 0}`
+                                    : ''}
+                                  {sc.output_leak ? ' · output leak' : ''}
+                                </div>
+                                {sc.error && <div className="scenario-error">{sc.error}</div>}
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     )}

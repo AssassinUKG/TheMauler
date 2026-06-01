@@ -1,5 +1,47 @@
 export namespace app {
 	
+	export class BenchmarkCase {
+	    name: string;
+	    status: string;
+	    summary: string;
+	    prompt_tokens?: number;
+	    completion_tokens?: number;
+	    ttf_ms?: number;
+	    total_ms?: number;
+	    tokens_per_second?: number;
+	    structured_tools?: number;
+	    repaired_tools?: number;
+	    inline_tool_markup?: boolean;
+	    output_leak?: boolean;
+	    valid_json?: boolean;
+	    expected_json?: boolean;
+	    response_chars?: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BenchmarkCase(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.summary = source["summary"];
+	        this.prompt_tokens = source["prompt_tokens"];
+	        this.completion_tokens = source["completion_tokens"];
+	        this.ttf_ms = source["ttf_ms"];
+	        this.total_ms = source["total_ms"];
+	        this.tokens_per_second = source["tokens_per_second"];
+	        this.structured_tools = source["structured_tools"];
+	        this.repaired_tools = source["repaired_tools"];
+	        this.inline_tool_markup = source["inline_tool_markup"];
+	        this.output_leak = source["output_leak"];
+	        this.valid_json = source["valid_json"];
+	        this.expected_json = source["expected_json"];
+	        this.response_chars = source["response_chars"];
+	        this.error = source["error"];
+	    }
+	}
 	export class ChatAttachment {
 	    id?: string;
 	    name: string;
@@ -166,9 +208,19 @@ export namespace app {
 	}
 	export class ProfileBenchmarkResult {
 	    status: string;
+	    id?: string;
+	    created_at?: string;
+	    profile_name?: string;
+	    provider_name?: string;
+	    model_id?: string;
+	    ctx_tokens?: number;
+	    context_tier?: string;
+	    context_role?: string;
+	    score?: number;
 	    summary: string;
 	    notes: string[];
 	    recommended_profile: settings.Profile;
+	    scenarios: BenchmarkCase[];
 	    prompt_tokens?: number;
 	    completion_tokens?: number;
 	    ttf_ms?: number;
@@ -182,9 +234,19 @@ export namespace app {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.status = source["status"];
+	        this.id = source["id"];
+	        this.created_at = source["created_at"];
+	        this.profile_name = source["profile_name"];
+	        this.provider_name = source["provider_name"];
+	        this.model_id = source["model_id"];
+	        this.ctx_tokens = source["ctx_tokens"];
+	        this.context_tier = source["context_tier"];
+	        this.context_role = source["context_role"];
+	        this.score = source["score"];
 	        this.summary = source["summary"];
 	        this.notes = source["notes"];
 	        this.recommended_profile = this.convertValues(source["recommended_profile"], settings.Profile);
+	        this.scenarios = this.convertValues(source["scenarios"], BenchmarkCase);
 	        this.prompt_tokens = source["prompt_tokens"];
 	        this.completion_tokens = source["completion_tokens"];
 	        this.ttf_ms = source["ttf_ms"];

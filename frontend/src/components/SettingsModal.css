@@ -252,6 +252,40 @@
   line-height: 1.45;
 }
 
+.benchmark-scenarios {
+  display: grid;
+  gap: 6px;
+}
+
+.benchmark-scenario {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+}
+
+.scenario-name {
+  color: var(--text-bright);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.scenario-summary,
+.scenario-metrics,
+.scenario-error {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.scenario-error {
+  color: var(--red);
+}
+
+.scenario-warn {
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+}
+
 .benchmark-warn {
   border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
 }

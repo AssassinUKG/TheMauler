@@ -53,3 +53,67 @@ func TestRecommendProfileSettingsDisablesThinkingForGemma(t *testing.T) {
 		t.Fatalf("gemma recommendation should disable thinking/MTP: %#v", rec)
 	}
 }
+
+func TestBenchmarkCasesIncludeGeneralCodingAndToolProtocol(t *testing.T) {
+	cases := benchmarkCases(settings.Profile{Name: "qwen3.6-think", ModelID: "qwen"})
+	if len(cases) != 4 {
+		t.Fatalf("benchmark case count = %d, want 4", len(cases))
+	}
+	if cases[0].Name != "General chat" || cases[1].Name != "Coding" || cases[2].Name != "JSON discipline" || cases[3].Name != "Tool protocol" {
+		t.Fatalf("unexpected benchmark cases: %#v", cases)
+	}
+	if !cases[2].ExpectJSON {
+		t.Fatalf("json discipline case should expect JSON: %#v", cases[2])
+	}
+	if len(cases[3].Tools) == 0 || cases[3].ToolChoice != "auto" {
+		t.Fatalf("tool protocol case should expose tools: %#v", cases[3])
+	}
+}
+
+func TestLooksLikeBenchmarkOutputLeak(t *testing.T) {
+	if !looksLikeBenchmarkOutputLeak("<start_of_turn>system") {
+		t.Fatalf("expected template token leak")
+	}
+	if !looksLikeBenchmarkOutputLeak("Thinking process:\n1. analyze") {
+		t.Fatalf("expected reasoning text leak")
+	}
+	if looksLikeBenchmarkOutputLeak("Local models are useful for privacy.") {
+		t.Fatalf("plain answer should not be marked as leaked output")
+	}
+}
+
+func TestContextTierAndRole(t *testing.T) {
+	tests := []struct {
+		ctx  int
+		tier string
+		role string
+	}{
+		{32768, "fast", "Fast daily"},
+		{65536, "balanced", "Large-code"},
+		{98304, "large", "Wide-context"},
+		{120000, "ceiling", "Max-context"},
+	}
+	for _, tt := range tests {
+		if got := contextTier(tt.ctx); got != tt.tier {
+			t.Fatalf("contextTier(%d)=%q, want %q", tt.ctx, got, tt.tier)
+		}
+		if got := contextRole(tt.ctx); got != tt.role {
+			t.Fatalf("contextRole(%d)=%q, want %q", tt.ctx, got, tt.role)
+		}
+	}
+}
+
+func TestBenchmarkScorePenalizesLeaksAndMissingTools(t *testing.T) {
+	result := ProfileBenchmarkResult{
+		TokensPerSecond: 30,
+		Scenarios: []BenchmarkCase{
+			{Name: "General chat", Status: "ok"},
+			{Name: "JSON discipline", Status: "warn", ExpectedJSON: true, ValidJSON: false},
+			{Name: "Tool protocol", Status: "warn"},
+			{Name: "Coding", Status: "ok", OutputLeak: true},
+		},
+	}
+	if got := benchmarkScore(result); got >= 100 || got <= 0 {
+		t.Fatalf("benchmarkScore should be penalized but positive, got %d", got)
+	}
+}

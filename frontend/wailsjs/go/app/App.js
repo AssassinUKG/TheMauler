@@ -18,6 +18,10 @@ export function BenchmarkProfile(arg1, arg2) {
   return window['go']['app']['App']['BenchmarkProfile'](arg1, arg2);
 }
 
+export function ClearBenchmarkRuns() {
+  return window['go']['app']['App']['ClearBenchmarkRuns']();
+}
+
 export function ClearHistory() {
   return window['go']['app']['App']['ClearHistory']();
 }
@@ -112,6 +116,10 @@ export function GetUserProfile() {
 
 export function GetWorkingDir() {
   return window['go']['app']['App']['GetWorkingDir']();
+}
+
+export function ListBenchmarkRuns() {
+  return window['go']['app']['App']['ListBenchmarkRuns']();
 }
 
 export function ListMemory() {

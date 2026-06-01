@@ -17,11 +17,14 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - [x] Malformed inline tool-call retry brake to prevent repeat loops.
 - [x] Runtime registry skeleton for Qwen3.6/Gemma4 capability profiles.
 - [x] Runtime lock snapshots for last active model/profile/backend launch.
+- [x] Dedicated Benchmarks tab for profile/model tests, saved runs, comparisons, and applying recommended settings.
+- [x] Context sweep benchmarking for 32k/65k/96k/current-ceiling candidates with fast/balanced/max-context scoring.
 - [ ] Memory/task-run dedicated inspection helpers.
 - [ ] Structural code intelligence tools (`symbol_search`, `find_references`, Go/TS symbol indexes).
 - [ ] Visual feedback loop for frontend/Wails verification.
 - [ ] Structured Git helpers for commit history, branch diffs, and change provenance.
 - [ ] Proactive monitoring/watchers for builds, logs, and long-running processes.
+- [ ] InferenceBridge raw-log integration in TheMauler logs/benchmark views for backend parser failures.
 
 ## Notes
 
@@ -42,6 +45,10 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - Gemma/InferenceBridge compatibility repair now handles self-closing named tool calls with `parameters={...}`, `parameters="{...}"`, and escaped `parameters="{\"...\"}"` forms. Malformed-protocol retries are capped separately from normal auto-continue.
 - Runtime registry files live under `runtime/`, with built-in Go metadata in `internal/runtimeprofile` so Doctor can warn on adapter, tool-protocol, thinking, MTP, and context mismatches even before external registry loading is added.
 - Successful agent runs write `runtime-lock.json` to the Mauler config directory, capturing active profile/backend/model/context/spec settings for reproducibility.
+- Benchmark runs are persisted in the Mauler config directory, shown in the Benchmarks tab, compared by model/profile/context, and can apply a recommended profile back to `profiles.toml`.
+- Context benchmarks now classify runs as Fast daily, Large-code, Wide-context, or Max-context, with score penalties for slow throughput, high TTFT, JSON failure, output leaks, and missing or repaired-only tools.
+- InferenceBridge now has source-side safety nets for Gemma content-only fenced JSON tool calls and explicit no-thinking guidance for `enable_thinking=false` / `reasoning_effort=none`.
+- InferenceBridge now strips Gemma-style `<|channel>thought ... <channel|>` markers in the shared normalizer and buffers streamed tool-request content until it can return clean OpenAI `tool_calls` or cleaned visible content.
 
 ## Next Capability Tracks
 
@@ -51,7 +58,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 4. Tool calling: harden JSON extraction/repair/schema validation, retry invalid calls with bounded prompts, and keep strict tool schemas. Status: partial; JSON repair engine/eval suite still planned.
 5. Memory system: maintain short-term, working, project, long-term, and future embedding memory layers; build prompts from relevant memory/current files/recent actions instead of dumping everything. Status: partial.
 6. Router: add capability registry and automatic model/profile selection, for example Qwen for tool-heavy coding and Gemma for writing/planning when stable. Status: registry started; router planned.
-7. MTP integration: detect MTP-capable artifacts, benchmark `draft-mtp` launch/profile settings, and avoid enabling MTP on normal GGUFs. Status: Doctor warnings started; benchmark UI in progress.
+7. MTP integration: detect MTP-capable artifacts, benchmark `draft-mtp` launch/profile settings, and avoid enabling MTP on normal GGUFs. Status: Doctor warnings started; benchmark UI landed; MTP-specific probes still planned.
 8. Evaluation harness: add coding/tool-use/json/memory/reasoning/writing eval suites and a `mauler eval` style command/report. Status: planned.
 9. UI intelligence: add model/context/VRAM/token/TPS telemetry, agent phase visualizer, and richer tool timeline. Status: partial via status bar/logs; telemetry planned.
 10. Frontier layer: add planner/worker/critic/consensus flows for critical tasks. Status: bounded subagents started; orchestration planned.
@@ -60,7 +67,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 
 1. Load external runtime registry JSON from `runtime/` and merge it over built-in defaults.
 2. Add first-class Qwen/Gemma adapter package around response normalization and tool-call repair.
-3. Add Settings > Profiles benchmark/recommendation workflow and persist benchmark results under `runtime/benchmarks/`.
+3. Extend the Benchmarks tab with live InferenceBridge/LM Studio telemetry capture, backend raw-output links, VRAM/KV fit snapshots, and MTP-specific probes.
 4. Add MTP launch validation against live backend props and selected model artifact name.
 5. Add JSON repair engine with schema validation metrics and failing examples in task logs.
 6. Add explicit Plan/Act/Observe/Reflect loop events and UI phase visualizer.

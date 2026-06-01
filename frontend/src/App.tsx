@@ -6,6 +6,7 @@ import { FileViewer, type OpenFile } from './components/FileViewer'
 import { AgentPanel } from './components/AgentPanel'
 import { LogsPage } from './components/LogsPage'
 import { MemoryPage } from './components/MemoryPage'
+import { BenchmarkPage } from './components/BenchmarkPage'
 import { StatusBar } from './components/StatusBar'
 import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -123,7 +124,7 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'file' | 'logs' | 'memory'>('chat')
+  const [centerTab, setCenterTab] = useState<'chat' | 'file' | 'logs' | 'memory' | 'benchmarks'>('chat')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
   const [artifactOutput, setArtifactOutput] = useState('')
@@ -629,6 +630,7 @@ export default function App() {
             <button onClick={() => setCenterTab('chat')} title="Open chat" style={centerTab === 'chat' ? { color: 'var(--text)' } : {}}>Chat</button>
             <button onClick={() => setCenterTab('logs')} title="Open full-page logs" style={centerTab === 'logs' ? { color: 'var(--text)' } : {}}>Logs</button>
             <button onClick={() => setCenterTab('memory')} title="Open full-page memory" style={centerTab === 'memory' ? { color: 'var(--text)' } : {}}>Memory</button>
+            <button onClick={() => setCenterTab('benchmarks')} title="Open model benchmarks" style={centerTab === 'benchmarks' ? { color: 'var(--text)' } : {}}>Benchmarks</button>
             <button onClick={() => setLeftOpen(v => !v)} title="Toggle explorer" style={leftOpen ? { color: 'var(--text)' } : {}}>Explorer</button>
             <button onClick={() => setRightOpen(v => !v)} title="Toggle agent panel" style={rightOpen ? { color: 'var(--text)' } : {}}>Agent</button>
           </div>
@@ -673,6 +675,7 @@ export default function App() {
             <button className={centerTab === 'chat' ? 'active' : ''} onClick={() => setCenterTab('chat')}>Chat</button>
             <button className={centerTab === 'logs' ? 'active' : ''} onClick={() => setCenterTab('logs')}>Logs</button>
             <button className={centerTab === 'memory' ? 'active' : ''} onClick={() => setCenterTab('memory')}>Memory</button>
+            <button className={centerTab === 'benchmarks' ? 'active' : ''} onClick={() => setCenterTab('benchmarks')}>Benchmarks</button>
             {openFiles.map((f, i) => (
               <span key={`${f.path || f.name}-${i}`} className={`center-file-tab ${centerTab === 'file' && activeFileIdx === i ? 'active' : ''}`}>
                 <button onClick={() => { setActiveFileIdx(i); setCenterTab('file') }}>{f.name}</button>
@@ -703,6 +706,8 @@ export default function App() {
               <LogsPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'memory' ? (
               <MemoryPage version={taskRunVersion + statsVersion} />
+            ) : centerTab === 'benchmarks' ? (
+              <BenchmarkPage version={statsVersion} onProfilesChanged={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
             ) : (
               <FileViewer
                 file={openFiles[activeFileIdx] ?? null}
