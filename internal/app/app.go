@@ -4,11 +4,13 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -28,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -62,6 +65,11 @@ type App struct {
 	autoAgents     bool
 	modeOverride   string
 
+	// cached loaded-context length; keyed by model load key so it auto-invalidates
+	// on model change. Avoids an HTTP /props (or LM Studio) query every agent turn.
+	ctxLimitKey string
+	ctxLimitVal int
+
 	// terminal shell session (at most one active at a time)
 	shellMu   sync.Mutex
 	shellSess *shellSession
@@ -85,7 +93,48 @@ func New() *App {
 		autoAgents: true,
 	}
 	app.registerAppTools()
+	tools.SetConfigSnapshot(cfg.Tools)
 	return app
+}
+
+// syncToolConfig pushes the current tool-relevant settings into the tools package so
+// shell/protected-path tools read from memory instead of re-loading settings.toml on
+// every call. Call after any in-memory settings mutation. Assumes a.mu is not required
+// (a.cfg pointer is stable; callers already hold the lock where needed).
+func (a *App) syncToolConfig() {
+	tools.SetConfigSnapshot(a.cfg.Tools)
+}
+
+// cloneToolsConfigRefs deep-copies the map/slice fields a run reads so that in-place
+// mutations from the UI thread (e.g. ApplySafetyPreset writing EnabledTools) cannot
+// race with the running agent's snapshot.
+func cloneToolsConfigRefs(t *settings.ToolsConfig) {
+	if t.EnabledTools != nil {
+		m := make(map[string]bool, len(t.EnabledTools))
+		for k, v := range t.EnabledTools {
+			m[k] = v
+		}
+		t.EnabledTools = m
+	}
+	if t.Toolsets != nil {
+		m := make(map[string][]string, len(t.Toolsets))
+		for k, v := range t.Toolsets {
+			cp := make([]string, len(v))
+			copy(cp, v)
+			m[k] = cp
+		}
+		t.Toolsets = m
+	}
+	if t.ProtectedPaths != nil {
+		cp := make([]string, len(t.ProtectedPaths))
+		copy(cp, t.ProtectedPaths)
+		t.ProtectedPaths = cp
+	}
+	if t.SafeRules != nil {
+		cp := make([]settings.ToolSafeRule, len(t.SafeRules))
+		copy(cp, t.SafeRules)
+		t.SafeRules = cp
+	}
 }
 
 // OnStartup is called by Wails when the window is ready.
@@ -154,12 +203,17 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		}
 		cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
 	}
+	cfg.Context.OpenFolders = normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, cfg.Context.WorkspaceDir)
+	cfg.Context.Lab.Target = strings.TrimSpace(cfg.Context.Lab.Target)
+	cfg.Context.Lab.VPNInterface = strings.TrimSpace(cfg.Context.Lab.VPNInterface)
+	cfg.Context.Lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(cfg.Context.Lab.LatestArtifact))
 	if err := settings.Save(&cfg); err != nil {
 		return err
 	}
 	a.mu.Lock()
 	previousKey := modelLoadKey(activeProfile(a.cfg, a.profiles))
 	*a.cfg = cfg
+	a.syncToolConfig()
 	active := activeProfile(a.cfg, a.profiles)
 	a.history.SetBudget(active.CtxTokens)
 	if workspaceChanged {
@@ -249,6 +303,7 @@ func (a *App) UseProfile(name string, cfg settings.Settings, pf settings.Profile
 	a.mu.Lock()
 	*a.cfg = cfg
 	*a.profiles = pf
+	a.syncToolConfig()
 	active := applyProvider(profile, a.profiles)
 	a.history.SetBudget(active.CtxTokens)
 	if modelLoadKey(active) != a.loadedModelKey {
@@ -264,6 +319,23 @@ type HistoryStats struct {
 	Budget      int     `json:"budget"`
 	Fraction    float64 `json:"fraction"`
 	RollbackLen int     `json:"rollback_len"`
+}
+
+type LabStatus struct {
+	AgentRoot      string                     `json:"agent_root"`
+	ShellBackend   string                     `json:"shell_backend"`
+	ShellDistro    string                     `json:"shell_distro"`
+	ShellUser      string                     `json:"shell_user"`
+	Target         string                     `json:"target"`
+	VPNInterface   string                     `json:"vpn_interface"`
+	LatestArtifact string                     `json:"latest_artifact"`
+	OpenFolders    []settings.WorkspaceFolder `json:"open_folders"`
+}
+
+// MaintenanceResult is returned by one-click local runtime recovery actions.
+type MaintenanceResult struct {
+	Summary string   `json:"summary"`
+	Lines   []string `json:"lines"`
 }
 
 // GetHistoryStats returns token usage info for the status bar.
@@ -470,12 +542,13 @@ func (a *App) SendMessage(text string, images []string, attachments []ChatAttach
 	}
 	a.agentRunning = true
 	cfg := *a.cfg
+	cloneToolsConfigRefs(&cfg.Tools)
 	profiles := *a.profiles
+	autonomous := a.autonomous
+	autoAgents := a.autoAgents
 	a.mu.Unlock()
 
 	profile := activeProfile(&cfg, &profiles)
-	autonomous := a.autonomous
-	autoAgents := a.autoAgents
 	messageText := composeUserTextWithAttachments(text, attachments)
 	mode := selectAgentMode(messageText, cfg)
 	if !autoAgents {
@@ -634,6 +707,7 @@ func (a *App) ApplySafetyPreset(name string) error {
 		a.cfg.Tools.ConfirmReads = false
 		a.cfg.Tools.ConfirmWrites = false
 		a.cfg.Tools.ConfirmExec = false
+		a.cfg.Tools.ProtectedPaths = nil
 		defaults := settings.DefaultSettings()
 		if a.cfg.Tools.EnabledTools == nil {
 			a.cfg.Tools.EnabledTools = map[string]bool{}
@@ -682,6 +756,7 @@ func (a *App) ApplySafetyPreset(name string) error {
 	default:
 		return fmt.Errorf("unknown safety preset %q", name)
 	}
+	a.syncToolConfig()
 	return settings.Save(a.cfg)
 }
 
@@ -898,6 +973,11 @@ func (a *App) SetWorkingDir(dir string) error {
 	changed := !sameFilesystemPath(oldWD, abs)
 	a.mu.Lock()
 	a.cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
+	a.cfg.Context.OpenFolders = mergeWorkspaceFolders(a.cfg.Context.OpenFolders, settings.WorkspaceFolder{
+		Path: filepath.ToSlash(abs),
+		Name: filepath.Base(abs),
+		Role: "root",
+	})
 	cfg := *a.cfg
 	if changed {
 		a.history.Clear()
@@ -909,6 +989,153 @@ func (a *App) SetWorkingDir(dir string) error {
 		wailsruntime.EventsEmit(a.ctx, "mauler:workspace_changed", filepath.ToSlash(abs))
 	}
 	return nil
+}
+
+func (a *App) ListWorkspaceFolders() []settings.WorkspaceFolder {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return normaliseAppWorkspaceFolders(a.cfg.Context.OpenFolders, a.cfg.Context.WorkspaceDir)
+}
+
+func (a *App) AddWorkspaceFolder(path, role string) ([]settings.WorkspaceFolder, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return a.ListWorkspaceFolders(), nil
+	}
+	abs, err := filepath.Abs(tools.NormalizeHostPath(path))
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory", abs)
+	}
+	a.mu.Lock()
+	a.cfg.Context.OpenFolders = mergeWorkspaceFolders(a.cfg.Context.OpenFolders, settings.WorkspaceFolder{
+		Path: filepath.ToSlash(abs),
+		Name: filepath.Base(abs),
+		Role: strings.TrimSpace(role),
+	})
+	a.cfg.Context.OpenFolders = normaliseAppWorkspaceFolders(a.cfg.Context.OpenFolders, a.cfg.Context.WorkspaceDir)
+	cfg := *a.cfg
+	a.mu.Unlock()
+	if err := settings.Save(&cfg); err != nil {
+		return nil, err
+	}
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "mauler:workspace_folders_changed", cfg.Context.OpenFolders)
+	}
+	return cfg.Context.OpenFolders, nil
+}
+
+func (a *App) RemoveWorkspaceFolder(path string) ([]settings.WorkspaceFolder, error) {
+	path = filepath.ToSlash(tools.NormalizeHostPath(strings.TrimSpace(path)))
+	a.mu.Lock()
+	agentRoot := filepath.ToSlash(a.cfg.Context.WorkspaceDir)
+	var next []settings.WorkspaceFolder
+	for _, folder := range a.cfg.Context.OpenFolders {
+		if sameFilesystemPath(folder.Path, path) {
+			continue
+		}
+		next = append(next, folder)
+	}
+	if agentRoot != "" {
+		next = mergeWorkspaceFolders(next, settings.WorkspaceFolder{Path: agentRoot, Name: filepath.Base(agentRoot), Role: "root"})
+	}
+	a.cfg.Context.OpenFolders = normaliseAppWorkspaceFolders(next, a.cfg.Context.WorkspaceDir)
+	cfg := *a.cfg
+	a.mu.Unlock()
+	if err := settings.Save(&cfg); err != nil {
+		return nil, err
+	}
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "mauler:workspace_folders_changed", cfg.Context.OpenFolders)
+	}
+	return cfg.Context.OpenFolders, nil
+}
+
+func (a *App) SelectWorkspaceFolder(defaultDir string) (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("app is not ready")
+	}
+	if defaultDir == "" {
+		defaultDir = a.GetWorkingDir()
+	}
+	defaultDir = tools.NormalizeHostPath(defaultDir)
+	if info, err := os.Stat(defaultDir); err == nil && !info.IsDir() {
+		defaultDir = filepath.Dir(defaultDir)
+	}
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:            "Add folder to Explorer",
+		DefaultDirectory: defaultDir,
+	})
+}
+
+func (a *App) UpdateLabContext(target, vpnInterface, latestArtifact string) (LabStatus, error) {
+	a.mu.Lock()
+	a.cfg.Context.Lab.Target = strings.TrimSpace(target)
+	a.cfg.Context.Lab.VPNInterface = strings.TrimSpace(vpnInterface)
+	a.cfg.Context.Lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(latestArtifact))
+	cfg := *a.cfg
+	a.mu.Unlock()
+	if err := settings.Save(&cfg); err != nil {
+		return LabStatus{}, err
+	}
+	return a.GetLabStatus(), nil
+}
+
+func (a *App) GetLabStatus() LabStatus {
+	a.mu.Lock()
+	cfg := *a.cfg
+	a.mu.Unlock()
+	wd, _ := os.Getwd()
+	latest := strings.TrimSpace(cfg.Context.Lab.LatestArtifact)
+	if latest == "" {
+		latest = latestWorkspaceArtifact(normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, cfg.Context.WorkspaceDir))
+	}
+	return LabStatus{
+		AgentRoot:      filepath.ToSlash(wd),
+		ShellBackend:   cfg.Tools.ShellBackend,
+		ShellDistro:    cfg.Tools.ShellDistro,
+		ShellUser:      cfg.Tools.ShellUser,
+		Target:         cfg.Context.Lab.Target,
+		VPNInterface:   cfg.Context.Lab.VPNInterface,
+		LatestArtifact: filepath.ToSlash(latest),
+		OpenFolders:    normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, filepath.ToSlash(wd)),
+	}
+}
+
+func (a *App) ScaffoldWorkspaceFolders(root string, names []string) ([]string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = a.GetWorkingDir()
+	}
+	abs, err := filepath.Abs(tools.NormalizeHostPath(root))
+	if err != nil {
+		return nil, err
+	}
+	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s is not a directory", abs)
+	}
+	var created []string
+	for _, name := range names {
+		name = strings.Trim(strings.TrimSpace(name), `/\`)
+		if name == "" || strings.Contains(name, "..") {
+			continue
+		}
+		path := filepath.Join(abs, filepath.FromSlash(name))
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			return created, err
+		}
+		created = append(created, filepath.ToSlash(path))
+	}
+	return created, nil
 }
 
 // PickSaveFilePath opens a native save-file dialog and returns the chosen path,
@@ -953,6 +1180,106 @@ func (a *App) SelectWorkingDir(defaultDir string) (string, error) {
 		return "", err
 	}
 	return a.GetWorkingDir(), nil
+}
+
+// SelectProjectInstructionFile opens a native file picker for a MAULER/master skill file.
+func (a *App) SelectProjectInstructionFile(defaultPath string) (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("app is not ready")
+	}
+	defaultDir := strings.TrimSpace(defaultPath)
+	if defaultDir == "" {
+		defaultDir = a.GetWorkingDir()
+	}
+	defaultDir = tools.NormalizeHostPath(defaultDir)
+	if info, err := os.Stat(defaultDir); err == nil && !info.IsDir() {
+		defaultDir = filepath.Dir(defaultDir)
+	}
+	return wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:            "Select project workflow file",
+		DefaultDirectory: defaultDir,
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "Markdown (*.md)", Pattern: "*.md"},
+			{DisplayName: "All files (*.*)", Pattern: "*.*"},
+		},
+	})
+}
+
+// SelectProjectInstructionDirectory opens a native directory picker for a folder
+// of Markdown workflow/instruction files.
+func (a *App) SelectProjectInstructionDirectory(defaultPath string) (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("app is not ready")
+	}
+	defaultDir := strings.TrimSpace(defaultPath)
+	if defaultDir == "" {
+		defaultDir = a.GetWorkingDir()
+	}
+	defaultDir = tools.NormalizeHostPath(defaultDir)
+	if info, err := os.Stat(defaultDir); err == nil && !info.IsDir() {
+		defaultDir = filepath.Dir(defaultDir)
+	}
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title:            "Select project workflow folder",
+		DefaultDirectory: defaultDir,
+	})
+}
+
+// UseProjectInstructionFile registers an explicit workflow/instruction source
+// as the "master" skill and injects it into the current chat for this turn.
+func (a *App) UseProjectInstructionFile(path string) (settings.Settings, error) {
+	a.mu.Lock()
+	cfg := *a.cfg
+	a.mu.Unlock()
+
+	normalized := ""
+	prompt := ""
+	var err error
+	if strings.TrimSpace(path) == "" {
+		if err := deleteMasterSkillSource(); err != nil {
+			return cfg, err
+		}
+	} else {
+		var skill Skill
+		skill, prompt, err = saveMasterSkillSource(path)
+		if err != nil {
+			return cfg, err
+		}
+		normalized = skill.SourcePath
+	}
+	if isMasterSkillSourceName(cfg.Context.MAULERMDPath) {
+		cfg.Context.MAULERMDPath = ""
+	}
+	if err := settings.Save(&cfg); err != nil {
+		return cfg, err
+	}
+
+	a.mu.Lock()
+	*a.cfg = cfg
+	if prompt != "" {
+		a.history.Append(llm.Message{Role: llm.RoleSystem, Content: prompt})
+	}
+	a.mu.Unlock()
+
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "mauler:project_instructions_changed", normalized)
+	}
+	return cfg, nil
+}
+
+// GetProjectInstructionsSummary returns the instruction sources currently active.
+func (a *App) GetProjectInstructionsSummary() string {
+	a.mu.Lock()
+	cfg := a.cfg.Context
+	a.mu.Unlock()
+	summary := instructionDocsSummary(cfg)
+	if skill, err := loadSkill("master"); err == nil && strings.TrimSpace(skill.SourcePath) != "" {
+		if summary == "" || summary == "no project instruction files loaded" {
+			summary = "no project instruction files loaded"
+		}
+		summary += "\n\nmaster skill: registered for lazy use (" + filepath.Base(tools.NormalizeHostPath(skill.SourcePath)) + ")"
+	}
+	return summary
 }
 
 // RenameFile renames or moves a file or directory.
@@ -1169,6 +1496,114 @@ func (a *App) ListModelsForProvider(provider settings.Provider) ([]string, error
 	return client.Models(ctx)
 }
 
+// ListWSLDistros returns installed WSL distribution names.
+func (a *App) ListWSLDistros() ([]string, error) {
+	if runtime.GOOS != "windows" {
+		return nil, nil
+	}
+	out, err := exec.Command("wsl.exe", "-l", "-v").CombinedOutput()
+	cleaned := cleanWSLOutput(string(out))
+	if err != nil {
+		return nil, fmt.Errorf("list WSL distros: %w: %s", err, strings.TrimSpace(cleaned))
+	}
+	return parseWSLDistros(cleaned), nil
+}
+
+// KillLocalInferenceServers stops stale InferenceBridge-managed llama.cpp
+// processes that can keep VRAM/ports wedged after a failed load.
+func (a *App) KillLocalInferenceServers() (MaintenanceResult, error) {
+	if runtime.GOOS != "windows" {
+		return MaintenanceResult{}, fmt.Errorf("local inference cleanup is currently implemented for Windows")
+	}
+	targets := []string{
+		"llama-server.exe",
+		"InferenceBridge.exe",
+		"inference-bridge.exe",
+	}
+	var lines []string
+	killed := 0
+	for _, target := range targets {
+		cmd := exec.Command("taskkill.exe", "/F", "/T", "/IM", target)
+		out, err := cmd.CombinedOutput()
+		text := strings.TrimSpace(cleanWSLOutput(string(out)))
+		if text == "" {
+			text = errString(err)
+		}
+		if err != nil {
+			if strings.Contains(strings.ToLower(text), "not found") || strings.Contains(strings.ToLower(text), "no running instance") {
+				lines = append(lines, fmt.Sprintf("%s: not running", target))
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", target, text))
+			continue
+		}
+		killed++
+		lines = append(lines, fmt.Sprintf("%s: stopped", target))
+	}
+	summary := fmt.Sprintf("Stopped %d inference process group(s)", killed)
+	if killed == 0 {
+		summary = "No matching inference processes were running"
+	}
+	return MaintenanceResult{Summary: summary, Lines: lines}, nil
+}
+
+// RestartWSL shuts down all WSL distributions so hung network/shell state can
+// restart cleanly on the next WSL command.
+func (a *App) RestartWSL() (MaintenanceResult, error) {
+	if runtime.GOOS != "windows" {
+		return MaintenanceResult{}, fmt.Errorf("WSL restart is only available on Windows")
+	}
+	cmd := exec.Command("wsl.exe", "--shutdown")
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(cleanWSLOutput(string(out)))
+	if err != nil {
+		if text == "" {
+			text = errString(err)
+		}
+		return MaintenanceResult{Summary: "WSL shutdown failed", Lines: []string{text}}, err
+	}
+	lines := []string{"wsl.exe --shutdown completed"}
+	if text != "" {
+		lines = append(lines, text)
+	}
+	return MaintenanceResult{Summary: "WSL stopped; it will restart on next use", Lines: lines}, nil
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func cleanWSLOutput(text string) string {
+	return strings.ReplaceAll(text, "\x00", "")
+}
+
+func parseWSLDistros(text string) []string {
+	lines := strings.Split(cleanWSLOutput(text), "\n")
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range lines {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
+		if line == "" || strings.HasPrefix(strings.ToUpper(line), "NAME ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		name := strings.TrimSpace(fields[0])
+		key := strings.ToLower(name)
+		if name == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Internal agent loop
 // ---------------------------------------------------------------------------
@@ -1192,6 +1627,16 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			run.stop(reason, detail)
 			run.addEvent("stop", reason, detail)
 		}
+		if finalStatus == "done" && isBlockingStopReason(run.StopReason) {
+			finalStatus = "stopped"
+			run.addEvent("stop", "Run ended with unresolved blocking stop reason", run.StopDetail)
+		}
+		if finalStatus == "done" && requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) {
+			finalStatus = "stopped"
+			detail := "The user asked for a README/writeup/docs update, but the run completed without write_file or edit_file. Update the requested document before marking the task done."
+			run.stopTerminal("documentation_missing", detail)
+			run.addEvent("blocked", "Documentation update missing", detail)
+		}
 		if finalStatus == "done" {
 			a.setRunState(&run, "done", "Run completed successfully.")
 			run.addEvent("finish", "Run completed", "")
@@ -1203,6 +1648,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		run.finish(finalStatus, finalSummary)
 		_ = saveTaskRun(run, &cfg.Logging)
+		_ = a.saveRunMilestoneMemory(&run)
 		if a.ctx != nil {
 			wailsruntime.EventsEmit(a.ctx, "mauler:task_run", run)
 			if suggestion := buildLearningSuggestion(&run); suggestion != nil {
@@ -1233,16 +1679,20 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	if err != nil {
 		finalStatus = "error"
 		finalSummary = err.Error()
-		run.stop("client_error", err.Error())
+		run.stopTerminal("client_error", err.Error())
 		run.addEvent("error", "Client setup failed", err.Error())
 		wailsruntime.EventsEmit(a.ctx, "mauler:stream_error", err.Error())
 		return
 	}
 	a.setRunState(&run, "model_loading", modelLoadKey(profile))
-	if err := a.ensureModelLoaded(ctx, client, profile); err != nil {
+	if err := a.ensureModelLoaded(ctx, client, profile, func(attempt int, err error) {
+		detail := fmt.Sprintf("attempt=%d error=%v", attempt, err)
+		run.addEvent("retry", "Retrying model load", detail)
+		a.setRunState(&run, "recovering", detail)
+	}); err != nil {
 		finalStatus = "error"
 		finalSummary = err.Error()
-		run.stop("model_load_error", err.Error())
+		run.stopTerminal("model_load_error", err.Error())
 		run.addEvent("error", "Model load failed", err.Error())
 		wailsruntime.EventsEmit(a.ctx, "mauler:stream_error", err.Error())
 		return
@@ -1259,23 +1709,55 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	if applyWorkingContextBudget(a, mode.ContextBudget, profile.CtxTokens) {
 		run.addEvent("context_budget", "Applied agent working context budget", fmt.Sprintf("budget=%d profile_ctx=%d", mode.ContextBudget, profile.CtxTokens))
 	}
-	budget := newTaskBudget(cfg.Tools)
+	firstUserText := messageText(firstMsg) // for toolChoiceFor heuristic and research budgets
+	budget := newTaskBudget(cfg.Tools, firstUserText)
 	autoContinues := 0
-	noToolContinues := 0                   // consecutive auto-continues where the model made zero tool calls
-	malformedToolContinues := 0            // consecutive retries caused by unparsed inline tool markup
-	totalToolCallsMade := 0                // cumulative tool calls across all turns this task
-	firstUserText := messageText(firstMsg) // for toolChoiceFor heuristic
+	noToolContinues := 0           // consecutive auto-continues where the model made zero tool calls
+	malformedToolContinues := 0    // consecutive retries caused by unparsed inline tool markup
+	totalToolCallsMade := 0        // cumulative tool calls across all turns this task
+	preOutputInferenceRetries := 0 // one-shot retry for backend failures before any model output
+	toolBudgetSummaryRequested := false
+	docRecoveryRequested := false
+	docRecoveryPromptSent := false
 	const maxAutoContinues = 8
 	const maxMalformedToolContinues = 2
 	logCfg := cfg.Logging
 	var respBuf strings.Builder // accumulated response text for log_responses
 
+agentLoop:
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
+		toolBudgetExhausted := agentToolBudgetExhausted(cfg.Agents, len(run.Tools))
 		toolDefs, toolChoice := toolDefsAndChoiceForTurn(a.registry, cfg.Tools, firstUserText, autoContinues, totalToolCallsMade)
+		if toolBudgetExhausted {
+			toolDefs = nil
+			toolChoice = "none"
+			if !toolBudgetSummaryRequested {
+				toolBudgetSummaryRequested = true
+				prompt := agentToolBudgetSummaryPrompt(cfg.Agents.MaxToolCalls)
+				run.addEvent("continue", "Tool budget exhausted; requesting final text-only summary", prompt)
+				a.setRunState(&run, "blocked", fmt.Sprintf("tool budget exhausted (%d calls)", cfg.Agents.MaxToolCalls))
+				a.mu.Lock()
+				a.history.Append(llm.NewTextMessage(llm.RoleUser, prompt))
+				a.mu.Unlock()
+			}
+		}
+		if docRecoveryRequested && requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) && !toolBudgetExhausted {
+			toolDefs = filterToolDefsByName(toolDefs, "read_file", "write_file", "edit_file", "glob", "grep")
+			toolChoice = "auto"
+			if !docRecoveryPromptSent {
+				docRecoveryPromptSent = true
+				prompt := documentationRecoveryPrompt(run.Prompt, run.StopReason, run.StopDetail)
+				run.addEvent("continue", "Forcing documentation recovery turn", prompt)
+				a.setRunState(&run, "editing", "Documentation update required before continuing.")
+				a.mu.Lock()
+				a.history.Append(llm.NewTextMessage(llm.RoleUser, prompt))
+				a.mu.Unlock()
+			}
+		}
 		a.mu.Lock()
 		needsCompact := a.history.NeedsCompactionWithReserve(cfg.Context.CompactionAt, compactionReserveTokens(toolDefs))
 		a.mu.Unlock()
@@ -1297,6 +1779,12 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.mu.Lock()
 		msgs := a.history.Messages()
 		a.mu.Unlock()
+		if compacted := a.ensureRequestContextRoom(ctx, client, profile, cfg, toolDefs, &run); compacted != nil {
+			run.addEvent("compaction", compacted.Message(), compacted.Detail())
+			a.mu.Lock()
+			msgs = a.history.Messages()
+			a.mu.Unlock()
+		}
 
 		// After the configured threshold of tool calls, disable thinking for the
 		// remainder of the run. Qwen3 tends to place tool calls inside the <think>
@@ -1307,17 +1795,29 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			noThinkThreshold = 3
 		}
 		forceNoThink := profile.Thinking && (totalToolCallsMade >= noThinkThreshold || noToolContinues > 0)
-		req := buildChatRequest(profile, msgs, toolDefs, toolChoice, forceNoThink)
+		req := buildChatRequest(profile, msgs, toolDefs, toolChoice, forceNoThink, shouldUseCodingParams(firstUserText, mode))
 		a.setRunState(&run, "thinking", fmt.Sprintf("tool_choice=%s messages=%d tools=%d no_think=%v", toolChoice, len(msgs), len(toolDefs), forceNoThink))
 		if len(toolDefs) > 0 {
 			run.addEvent("tool_protocol_request", "Chat request tool protocol", fmt.Sprintf("client=%s model=%s tool_choice=%s tools=%d thinking=%v preserve_thinking=%v force_no_think=%v", client.Name(), profile.ModelID, toolChoice, len(toolDefs), req.EnableThinking, req.PreserveThinking, forceNoThink))
 		}
+		a.recordBackendRuntimeMismatch(ctx, client, profile, &run)
 
 		ch, err := client.Chat(ctx, req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if preOutputInferenceRetries < 1 && isRecoverableInferenceFailure(err.Error()) {
+				preOutputInferenceRetries++
+				run.addEvent("inference_retry", "Retrying chat request after pre-output backend failure", err.Error())
+				if !sleepBeforeInferenceRetry(ctx) {
+					return
+				}
+				continue agentLoop
+			}
 			finalStatus = "error"
 			finalSummary = err.Error()
-			run.stop("chat_error", err.Error())
+			run.stopTerminal("chat_error", err.Error())
 			run.addEvent("error", "Chat request failed", err.Error())
 			wailsruntime.EventsEmit(a.ctx, "mauler:stream_error", err.Error())
 			return
@@ -1332,9 +1832,20 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 
 		for delta := range ch {
 			if delta.Error != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				if preOutputInferenceRetries < 1 && rawTextBuf.Len() == 0 && thinkBuf.Len() == 0 && len(toolCalls) == 0 && isRecoverableInferenceFailure(delta.Error.Error()) {
+					preOutputInferenceRetries++
+					run.addEvent("inference_retry", "Retrying stream after pre-output backend failure", delta.Error.Error())
+					if !sleepBeforeInferenceRetry(ctx) {
+						return
+					}
+					continue agentLoop
+				}
 				finalStatus = "error"
 				finalSummary = delta.Error.Error()
-				run.stop("stream_error", delta.Error.Error())
+				run.stopTerminal("stream_error", delta.Error.Error())
 				run.addEvent("error", "Stream failed", delta.Error.Error())
 				wailsruntime.EventsEmit(a.ctx, "mauler:stream_error", delta.Error.Error())
 				return
@@ -1385,22 +1896,37 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		if len(toolCalls) == 0 && strings.TrimSpace(repairText) != "" {
 			repairDefs := toolDefs
-			if len(repairDefs) == 0 && containsInlineToolMarkup(repairText) {
+			if len(repairDefs) == 0 && containsInlineToolMarkup(repairText) && toolChoice != "none" && !toolBudgetExhausted {
 				repairDefs = a.registry.ToEnabledToolDefs(settings.EffectiveEnabledTools(cfg.Tools))
 			}
 			if repaired := parseInlineToolMarkup(repairText, repairDefs); len(repaired) > 0 {
 				toolCalls = repaired
 				textBuf.Reset()
+				if prefix := visibleTextBeforeInlineToolMarkup(repairText); prefix != "" {
+					textBuf.WriteString(prefix)
+				}
 				a.setRunState(&run, "recovering", "Model emitted tool markup as text; converting to structured tool calls.")
 				run.addEvent("tool_protocol_repair", "Converted inline tool markup", toolProtocolDebugDetail(rawText, textBuf.String(), repaired, repairDefs))
 				wailsruntime.EventsEmit(a.ctx, "mauler:tool_protocol_repair")
 			}
 		}
-		unrepairedToolMarkup := len(toolCalls) == 0 && containsInlineToolMarkup(repairText)
+		if toolBudgetExhausted && len(toolCalls) > 0 {
+			run.addEvent("blocked", "Ignored tool calls after agent tool budget was exhausted", toolProtocolDebugDetail(rawText, textBuf.String(), toolCalls, nil))
+			toolCalls = nil
+		}
+		unrepairedToolMarkup := len(toolCalls) == 0 && containsInlineToolMarkup(repairText) && !toolBudgetExhausted && toolChoice != "none"
 		if unrepairedToolMarkup {
 			a.setRunState(&run, "recovering", "Model emitted tool markup text that could not be converted.")
 			run.addEvent("tool_protocol_unrepaired", "Could not convert inline tool markup", toolProtocolDebugDetail(rawText, textBuf.String(), nil, toolDefs))
 			wailsruntime.EventsEmit(a.ctx, "mauler:stream_replace", "")
+		}
+
+		// Normalize shell commands (HTML-unescape operators) BEFORE storing in history,
+		// so the model never re-reads its own escaped commands and re-learns the
+		// &amp;amp; escalation pattern. This also cleans what the UI shows and what the
+		// executor receives (the per-call normalize below is then a no-op).
+		for i := range toolCalls {
+			toolCalls[i] = normalizeToolCallArguments(toolCalls[i])
 		}
 
 		visibleText := strings.TrimSpace(textBuf.String())
@@ -1481,7 +2007,10 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 					return
 				}
 				var prompt string
-				if needsInspectionTool(firstUserText) {
+				thinkingText := strings.TrimSpace(thinkBuf.String())
+				if looksAboutToAct(thinkingText) {
+					prompt = buildDirectivePrompt(thinkingText)
+				} else if needsInspectionTool(firstUserText) {
 					prompt = "You produced no visible output and made no tool call. " +
 						"The user explicitly asked you to inspect the repository/codebase/files. " +
 						"Call an inspection tool RIGHT NOW, preferably glob with pattern \"**/*\" in the current workspace, then read files that actually appear in the result. " +
@@ -1619,6 +2148,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		var toolResultMsgs []llm.Message
 		for _, tc := range toolCalls {
+			tc = normalizeToolCallArguments(tc)
 			a.setRunState(&run, stateForTool(tc.Function.Name), tc.Function.Name)
 			if cfg.Agents.MaxToolCalls > 0 && len(run.Tools) >= cfg.Agents.MaxToolCalls {
 				result := fmt.Sprintf("agent tool-call budget exhausted (%d calls). Stop tools now, summarize progress, and ask before continuing.", cfg.Agents.MaxToolCalls)
@@ -1671,9 +2201,13 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			if blocked := budget.before(tc.Function.Name); blocked != "" {
 				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, blocked))
 				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(blocked), "blocked", 0)
-				run.stop(stopReasonForBudgetBlock(tc.Function.Name, blocked), blocked)
+				stopReason := stopReasonForBudgetBlock(tc.Function.Name, blocked)
+				run.stop(stopReason, blocked)
 				a.setRunState(&run, "blocked", blocked)
 				run.addEvent("blocked", "Tool budget blocked call", blocked)
+				if requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) && isBlockingStopReason(stopReason) {
+					docRecoveryRequested = true
+				}
 				wailsruntime.EventsEmit(a.ctx, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": blocked,
 				})
@@ -1688,7 +2222,24 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			}
 
 			toolStart := time.Now()
-			result, runErr := a.registry.Run(ctx, tc)
+			var result string
+			var runErr error
+			if isShellTool(tc.Function.Name) &&
+				shouldUseSharedTerminal(cfg.Tools, tc.Function.Name) &&
+				shellRequestsSession(tc.Function.Arguments) {
+				// Persistence explicitly requested (interactive/reverse shell, persistent
+				// cd/env) — use the live shared terminal.
+				result, runErr = a.runSharedTerminalShell(ctx, tc.Function.Name, tc.Function.Arguments, cfg.Tools.BashTimeout)
+				if errors.Is(runErr, errSharedTerminalUnsupported) {
+					result, runErr = a.runIsolatedShellEcho(ctx, tc, cfg.Tools.BashTimeout)
+				}
+			} else if isShellTool(tc.Function.Name) {
+				// Default: isolated per-command exec — deterministic, cannot hang the
+				// session — mirrored to the visible terminal so the user still sees it.
+				result, runErr = a.runIsolatedShellEcho(ctx, tc, cfg.Tools.BashTimeout)
+			} else {
+				result, runErr = a.registry.Run(ctx, tc)
+			}
 			toolDurMs := time.Since(toolStart).Milliseconds()
 			if runErr != nil {
 				result = toolErrorResult(result, runErr)
@@ -1700,12 +2251,16 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 					result = result + "\n" + verification
 				}
 			}
-			if guarded, findings := guardToolResult(tc.Function.Name, result); len(findings) > 0 {
+			if guarded, findings := guardToolResult(tc.Function.Name, result, cfg.Tools.RedactSecrets); len(findings) > 0 {
 				result = guarded
 				run.addEvent("guardrail", "Tool result guardrail applied", fmt.Sprintf("%s: %s", tc.Function.Name, strings.Join(findings, ", ")))
 			}
 			budget.after(tc.Function.Name, result, runErr)
-			toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
+			historyResult := result
+			if isShellTool(tc.Function.Name) {
+				historyResult = summarizeShellResultForContext(result, cfg.Tools.MaxToolResultChars)
+			}
+			toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, historyResult))
 			status := "done"
 			if runErr != nil {
 				status = "error"
@@ -1796,6 +2351,92 @@ func (r compactionResult) Detail() string {
 	return strings.Join(parts, "\n")
 }
 
+func (a *App) ensureRequestContextRoom(ctx context.Context, client llm.Client, profile settings.Profile, cfg *settings.Settings, toolDefs []llm.ToolDef, run *TaskRun) *compactionResult {
+	limit := a.requestContextLimit(ctx, client, profile)
+	if limit <= 0 {
+		return nil
+	}
+
+	a.mu.Lock()
+	msgs := a.history.Messages()
+	beforeMessages := len(msgs)
+	beforeTokens := a.history.TokenCount()
+	a.mu.Unlock()
+
+	estimated := estimateChatPromptTokens(msgs, toolDefs)
+	if estimated+contextOverflowMargin(limit) < limit {
+		return nil
+	}
+
+	a.mu.Lock()
+	cleared := a.history.ClearOldToolResults(0)
+	msgs = a.history.Messages()
+	a.mu.Unlock()
+	if cleared.Cleared > 0 && run != nil {
+		run.addEvent("context_clear", "Cleared all stale tool results before request overflow", fmt.Sprintf("cleared=%d\nbefore_estimated_tokens=%d\nafter_estimated_tokens=%d\nrequest_estimate=%d\ncontext_limit=%d", cleared.Cleared, cleared.BeforeTokens, cleared.AfterTokens, estimated, limit))
+	}
+	estimated = estimateChatPromptTokens(msgs, toolDefs)
+	if estimated+contextOverflowMargin(limit) < limit {
+		return &compactionResult{
+			BeforeMessages:  beforeMessages,
+			AfterMessages:   len(msgs),
+			BeforeTokens:    beforeTokens,
+			AfterTokens:     cleared.AfterTokens,
+			OmittedMessages: 0,
+			Fallback:        true,
+		}
+	}
+
+	omitted := 0
+	summary := ""
+	for _, keep := range []struct {
+		first int
+		last  int
+	}{
+		{first: 1, last: 4},
+		{first: 1, last: 2},
+		{first: 0, last: 2},
+		{first: 0, last: 1},
+	} {
+		summaryMsgs := compactionSummaryMessages(msgs, keep.first, keep.last)
+		if len(summaryMsgs) == 0 {
+			continue
+		}
+		summary = deterministicCompactionSummary(summaryMsgs, fmt.Errorf("preflight context estimate %d plus safety margin would exceed loaded context %d", estimated, limit))
+		a.mu.Lock()
+		a.history.Compact(summary, keep.first, keep.last)
+		msgs = a.history.Messages()
+		a.mu.Unlock()
+		omitted += len(summaryMsgs)
+		estimated = estimateChatPromptTokens(msgs, toolDefs)
+		if estimated+contextOverflowMargin(limit) < limit {
+			break
+		}
+	}
+	a.mu.Lock()
+	afterMessages := len(a.history.Messages())
+	afterTokens := a.history.TokenCount()
+	a.mu.Unlock()
+	if summary != "" && a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "mauler:compact", summary)
+	}
+	if summary != "" {
+		a.rememberCompactionSummary(summary)
+	}
+	if omitted == 0 {
+		return nil
+	}
+	return &compactionResult{
+		BeforeMessages:  beforeMessages,
+		AfterMessages:   afterMessages,
+		BeforeTokens:    beforeTokens,
+		AfterTokens:     afterTokens,
+		OmittedMessages: omitted,
+		Fallback:        true,
+		Error:           "preflight context overflow avoided",
+	}
+}
+
 // doCompact summarises old history.
 func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings.Profile) *compactionResult {
 	a.mu.Lock()
@@ -1816,7 +2457,10 @@ func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings
 	var sb strings.Builder
 	var compactErr error
 	usedFallback := false
-	if ch, err := client.Chat(ctx, req); err != nil {
+	if limit := a.requestContextLimit(ctx, client, profile); limit > 0 && estimateChatPromptTokens(req.Messages, nil)+contextOverflowMargin(limit) >= limit {
+		usedFallback = true
+		compactErr = fmt.Errorf("compaction summary request would exceed loaded context %d", limit)
+	} else if ch, err := client.Chat(ctx, req); err != nil {
 		compactErr = err
 	} else {
 		for delta := range ch {
@@ -1839,13 +2483,14 @@ func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings
 	}
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.history.Compact(summary, 2, 8)
 	afterMessages := len(a.history.Messages())
 	afterTokens := a.history.TokenCount()
+	a.mu.Unlock()
 	if a.ctx != nil {
 		wailsruntime.EventsEmit(a.ctx, "mauler:compact", summary)
 	}
+	a.rememberCompactionSummary(summary)
 	result := &compactionResult{
 		BeforeMessages:  len(msgs),
 		AfterMessages:   afterMessages,
@@ -1858,6 +2503,27 @@ func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings
 		result.Error = compactErr.Error()
 	}
 	return result
+}
+
+func (a *App) rememberCompactionSummary(summary string) {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return
+	}
+	a.mu.Lock()
+	enabled := a.cfg != nil && a.cfg.Memory.Enabled
+	a.mu.Unlock()
+	if !enabled {
+		return
+	}
+	_, _ = a.SaveMemoryEntry(MemoryEntry{
+		Scope:      workspaceScope(),
+		Title:      "Compacted session state",
+		Content:    summary,
+		Tags:       []string{"compaction", "session-state"},
+		Kind:       "decision",
+		Importance: 4,
+	})
 }
 
 func structuredCompactionPrompt() string {
@@ -1889,14 +2555,82 @@ func structuredCompactionPrompt() string {
 }
 
 func compactionReserveTokens(toolDefs []llm.ToolDef) int {
-	reserve := 2000
+	reserve := 4096
 	for _, def := range toolDefs {
 		reserve += len(def.Function.Name)/4 + len(def.Function.Description)/4 + len(def.Function.Parameters)/4 + 20
 	}
-	if reserve > 10000 {
-		return 10000
+	if reserve > 14000 {
+		return 14000
 	}
 	return reserve
+}
+
+func (a *App) requestContextLimit(ctx context.Context, client llm.Client, profile settings.Profile) int {
+	limit := profile.CtxTokens
+	cq, ok := client.(interface {
+		ActualContextLength(context.Context) int
+	})
+	if !ok {
+		return limit
+	}
+	key := modelLoadKey(profile)
+	a.mu.Lock()
+	if a.ctxLimitKey == key && a.ctxLimitVal > 0 {
+		cached := a.ctxLimitVal
+		a.mu.Unlock()
+		return cached
+	}
+	a.mu.Unlock()
+
+	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	actual := cq.ActualContextLength(qctx)
+	cancel()
+	if actual <= 0 {
+		// Transient query failure — fall back to the profile budget but don't cache,
+		// so a later turn can pick up the real loaded context.
+		return limit
+	}
+	a.mu.Lock()
+	a.ctxLimitKey = key
+	a.ctxLimitVal = actual
+	a.mu.Unlock()
+	return actual
+}
+
+func contextOverflowMargin(limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	margin := limit / 12
+	if margin < 2048 {
+		margin = 2048
+	}
+	if margin > 6144 {
+		margin = 6144
+	}
+	return margin
+}
+
+func estimateChatPromptTokens(msgs []llm.Message, toolDefs []llm.ToolDef) int {
+	chars := 0
+	for _, msg := range msgs {
+		chars += len(msg.Role) + len(msg.Name) + len(msg.ToolCallID) + 24
+		chars += len(messageText(msg))
+		if len(msg.ToolCalls) > 0 {
+			if data, err := json.Marshal(msg.ToolCalls); err == nil {
+				chars += len(data)
+			}
+		}
+	}
+	if len(toolDefs) > 0 {
+		if data, err := json.Marshal(toolDefs); err == nil {
+			chars += len(data)
+		}
+	}
+	// Use a deliberately conservative chars/token ratio. llama.cpp applies the
+	// final chat template and tool grammar after our in-memory history estimate,
+	// and local models can reject requests that miss n_ctx by only a few tokens.
+	return chars/3 + 512
 }
 
 func compactionSummaryMessages(msgs []llm.Message, keepFirst, keepLast int) []llm.Message {
@@ -2057,6 +2791,193 @@ func truncateToolResult(result string, maxChars int) string {
 		head, len(result)-keep, tail)
 }
 
+func isShellTool(name string) bool {
+	return name == "shell" || name == "bash"
+}
+
+func normalizeToolCallArguments(tc llm.ToolCallDef) llm.ToolCallDef {
+	if !isShellTool(tc.Function.Name) {
+		return tc
+	}
+	var args map[string]interface{}
+	if err := json.Unmarshal(tc.Function.Arguments, &args); err != nil {
+		return tc
+	}
+	command, ok := args["command"].(string)
+	if !ok {
+		return tc
+	}
+	normalized := tools.NormalizeShellCommandText(command)
+	if normalized == command {
+		return tc
+	}
+	args["command"] = normalized
+	raw, err := marshalToolArgsNoHTMLEscape(args)
+	if err != nil {
+		return tc
+	}
+	tc.Function.Arguments = raw
+	return tc
+}
+
+func marshalToolArgsNoHTMLEscape(args map[string]interface{}) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(args); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(strings.TrimSpace(buf.String())), nil
+}
+
+func shouldUseSharedTerminal(cfg settings.ToolsConfig, toolName string) bool {
+	return isShellTool(toolName) && strings.EqualFold(strings.TrimSpace(cfg.ShellMode), "shared_terminal")
+}
+
+// shellRequestsSession reports whether a shell tool call opted into the persistent
+// shared terminal via session=true. Default (absent/false) routes to isolated exec.
+func shellRequestsSession(raw json.RawMessage) bool {
+	var p struct {
+		Session bool `json:"session"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	return p.Session
+}
+
+func shellCommandAndTimeout(raw json.RawMessage) (string, int) {
+	var p struct {
+		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	return strings.TrimSpace(p.Command), p.Timeout
+}
+
+// runIsolatedShellEcho runs a shell command in an isolated shell (via the registry)
+// and mirrors the command + output to the visible terminal pane, so isolated exec
+// keeps the live-terminal visibility users had under shared_terminal mode.
+func (a *App) runIsolatedShellEcho(ctx context.Context, tc llm.ToolCallDef, defaultTimeout int) (string, error) {
+	cmd, reqTimeout := shellCommandAndTimeout(tc.Function.Arguments)
+	timeout := defaultTimeout
+	if reqTimeout > 0 {
+		timeout = reqTimeout
+	}
+	runID := sharedTerminalRunID()
+	emit := a.ctx != nil && cmd != ""
+	if emit {
+		wailsruntime.EventsEmit(a.ctx, "mauler:terminal_command_start", map[string]string{
+			"id": runID, "session": "isolated", "command": cmd, "timeout": strconv.Itoa(timeout),
+		})
+	}
+	result, err := a.registry.Run(ctx, tc)
+	if emit {
+		lines := strings.Split(strings.TrimRight(result, "\n"), "\n")
+		if len(lines) > 500 {
+			lines = append(lines[:500], "[... output truncated in terminal view; full result in Logs ...]")
+		}
+		for _, line := range lines {
+			wailsruntime.EventsEmit(a.ctx, "mauler:shell_output", map[string]string{
+				"id": runID, "data": line, "stream": "stdout",
+			})
+		}
+		exit := "0"
+		if err != nil {
+			exit = "1"
+		}
+		wailsruntime.EventsEmit(a.ctx, "mauler:terminal_command_done", map[string]string{
+			"id": runID, "session": "isolated", "exit_code": exit,
+		})
+	}
+	return result, err
+}
+
+func summarizeShellResultForContext(result string, maxChars int) string {
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return result
+	}
+	capChars := maxChars
+	if capChars <= 0 || capChars > 5000 {
+		capChars = 5000
+	}
+	if len(result) <= capChars {
+		return result
+	}
+	lines := strings.Split(result, "\n")
+	var interesting []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(lower, "open") ||
+			strings.Contains(lower, "filtered") ||
+			strings.Contains(lower, "vulner") ||
+			strings.Contains(lower, "found") ||
+			strings.Contains(lower, "http") ||
+			strings.Contains(lower, "service") ||
+			strings.Contains(lower, "login") ||
+			strings.Contains(lower, "error") ||
+			strings.Contains(lower, "warning") ||
+			strings.Contains(lower, "timed out") ||
+			strings.Contains(lower, "exit ") {
+			interesting = append(interesting, trimmed)
+			if len(interesting) >= 60 {
+				break
+			}
+		}
+	}
+	headLines := firstNonEmptyLines(lines, 30)
+	tailLines := lastNonEmptyLines(lines, 30)
+	var sb strings.Builder
+	sb.WriteString("[shell output summarized for model context; full output is kept in the run log/activity]\n")
+	sb.WriteString(fmt.Sprintf("Original output: %d chars, %d lines.\n", len(result), len(lines)))
+	if len(interesting) > 0 {
+		sb.WriteString("\nLikely important lines:\n")
+		for _, line := range interesting {
+			sb.WriteString(line + "\n")
+		}
+	}
+	sb.WriteString("\nOutput head:\n")
+	sb.WriteString(strings.Join(headLines, "\n"))
+	sb.WriteString("\n\nOutput tail:\n")
+	sb.WriteString(strings.Join(tailLines, "\n"))
+	out := sb.String()
+	if len(out) > capChars {
+		return truncateToolResult(out, capChars)
+	}
+	return out
+}
+
+func firstNonEmptyLines(lines []string, limit int) []string {
+	var out []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		out = append(out, line)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func lastNonEmptyLines(lines []string, limit int) []string {
+	var out []string
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		out = append([]string{lines[i]}, out...)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 func shouldConfirmTool(tool tools.Tool, cfg *settings.Settings, tc llm.ToolCallDef) bool {
 	if !tool.Destructive() {
 		return false
@@ -2118,6 +3039,55 @@ func stopReasonForBudgetBlock(toolName, message string) string {
 	}
 }
 
+func isBlockingStopReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "search_budget_exhausted",
+		"fetch_budget_exhausted",
+		"browser_budget_exhausted",
+		"web_research_failed",
+		"tool_budget_exhausted",
+		"tool_denied",
+		"tool_disabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresLivingDocUpdate(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	for _, marker := range []string{
+		"update the doc",
+		"update doc",
+		"update documentation",
+		"document",
+		"writeup",
+		"write up",
+		"readme",
+		"notes",
+		"report",
+		".md",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func runHasFileMutation(run TaskRun) bool {
+	for _, tool := range run.Tools {
+		if tool.Status != "done" {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(tool.Name))
+		if name == "write_file" || name == "edit_file" {
+			return true
+		}
+	}
+	return false
+}
+
 type taskBudget struct {
 	maxSearches       int
 	maxFetches        int
@@ -2129,7 +3099,7 @@ type taskBudget struct {
 	browserActions    int
 }
 
-func newTaskBudget(cfg settings.ToolsConfig) *taskBudget {
+func newTaskBudget(cfg settings.ToolsConfig, taskText ...string) *taskBudget {
 	b := &taskBudget{
 		maxSearches:       cfg.MaxSearches,
 		maxFetches:        cfg.MaxFetches,
@@ -2137,18 +3107,41 @@ func newTaskBudget(cfg settings.ToolsConfig) *taskBudget {
 		maxBrowserActions: cfg.MaxBrowserActions,
 	}
 	if b.maxSearches <= 0 {
-		b.maxSearches = 4
+		b.maxSearches = 8
 	}
 	if b.maxFetches <= 0 {
-		b.maxFetches = 6
+		b.maxFetches = 12
 	}
 	if b.maxFailedFetches <= 0 {
-		b.maxFailedFetches = 3
+		b.maxFailedFetches = 5
 	}
 	if b.maxBrowserActions <= 0 {
-		b.maxBrowserActions = 20
+		b.maxBrowserActions = 35
+	}
+	if len(taskText) > 0 && isExploitResearchTask(strings.Join(taskText, " ")) {
+		b.maxSearches = max(b.maxSearches, 16)
+		b.maxFetches = max(b.maxFetches, 24)
+		b.maxFailedFetches = max(b.maxFailedFetches, 8)
+		b.maxBrowserActions = max(b.maxBrowserActions, 60)
 	}
 	return b
+}
+
+func isExploitResearchTask(text string) bool {
+	lower := strings.ToLower(text)
+	signals := []string{
+		"exploit", "exploits", "cve-", "poc", "proof of concept", "vulnerability", "vuln",
+		"rce", "lfi", "sqli", "xss", "ssrf", "auth bypass", "privilege escalation",
+		"exploit-db", "packet storm", "rapid7", "metasploit", "nuclei", "wpscan",
+		"hackthebox", "hack the box", "htb", "ctf", "freepbx", "searchsploit",
+		"get user", "get root", "root flag", "user flag", "privesc", "priv esc",
+	}
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *taskBudget) before(name string) string {
@@ -2268,17 +3261,17 @@ func classifyAgentMode(text string) AgentMode {
 			Description:  "Diagnose failures and patch them.",
 			Instructions: "Reproduce or inspect the failure first, identify the smallest likely cause, patch narrowly, and run focused verification.",
 		}
+	case hasAny(lower, "build", "add", "implement", "create", "make", "wire", "continue", "carry on", "write", "edit", "patch", "change", "update"):
+		return AgentMode{
+			Name:         "Builder",
+			Description:  "Implement features and verify them.",
+			Instructions: "Make the requested change end to end. Follow existing project patterns, keep edits scoped, and run relevant tests/builds.",
+		}
 	case hasAny(lower, "plan", "design", "architecture", "approach", "what should", "roadmap"):
 		return AgentMode{
 			Name:         "Planner",
 			Description:  "Plan architecture and next steps.",
 			Instructions: "Prefer read-only analysis, outline tradeoffs, and only edit files when the user asks to implement.",
-		}
-	case hasAny(lower, "build", "add", "implement", "create", "make", "wire", "continue", "carry on"):
-		return AgentMode{
-			Name:         "Builder",
-			Description:  "Implement features and verify them.",
-			Instructions: "Make the requested change end to end. Follow existing project patterns, keep edits scoped, and run relevant tests/builds.",
 		}
 	default:
 		return AgentMode{
@@ -2295,6 +3288,21 @@ func manualAgentMode() AgentMode {
 		Description:  "Auto agents are disabled.",
 		Instructions: "Use the base TheMauler behavior without task-specific mode routing.",
 	}
+}
+
+func shouldUseCodingParams(text string, mode AgentMode) bool {
+	switch strings.ToLower(strings.TrimSpace(mode.Name)) {
+	case "builder", "fixer", "reviewer":
+		return true
+	}
+	lower := strings.ToLower(text)
+	return hasAny(lower,
+		"script", "code", "function", "class", "module", "component",
+		"powershell", "bash", "shell", "python", "typescript", "javascript",
+		"html", "css", "json", "yaml", "sql", "go ", "golang",
+		"write_file", "edit_file", "full file", "complete file",
+		".ps1", ".sh", ".py", ".ts", ".tsx", ".js", ".jsx", ".go",
+	)
 }
 
 func hasAny(text string, needles ...string) bool {
@@ -2352,7 +3360,7 @@ func buildClient(p settings.Profile) (llm.Client, error) {
 	}
 }
 
-func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile settings.Profile) error {
+func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile settings.Profile, onRetry ...func(int, error)) error {
 	loader, ok := client.(interface{ LoadModel(context.Context) error })
 	if !ok {
 		return nil
@@ -2370,26 +3378,29 @@ func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile 
 
 	a.mu.Lock()
 	alreadyLoaded := key != "" && key == a.loadedModelKey
+	sameLoadedModel := key != "" && modelLoadKeySameRuntime(profile, a.loadedModelKey)
 	a.mu.Unlock()
 
-	if alreadyLoaded && profile.CtxTokens > 0 {
+	if (alreadyLoaded || sameLoadedModel) && profile.CtxTokens > 0 {
 		if cq, ok2 := client.(contextQuerier); ok2 {
 			qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			actual := cq.ActualContextLength(qctx)
 			cancel()
-			if actual > 0 && actual != profile.CtxTokens {
+			if actual > 0 && actual >= profile.CtxTokens {
+				alreadyLoaded = true
+				a.mu.Lock()
+				a.loadedModelKey = key
+				a.mu.Unlock()
+			} else if actual > 0 && actual < profile.CtxTokens {
 				alreadyLoaded = false
 			}
 		}
 	}
 
 	if !alreadyLoaded {
-		loadCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		if err := loader.LoadModel(loadCtx); err != nil {
-			cancel()
+		if err := a.loadModelWithRetry(ctx, loader, key, onRetry...); err != nil {
 			return err
 		}
-		cancel()
 		a.mu.Lock()
 		a.loadedModelKey = key
 		a.mu.Unlock()
@@ -2423,6 +3434,60 @@ func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile 
 	return nil
 }
 
+var (
+	modelLoadAttempts       = 3
+	modelLoadAttemptTimeout = 2 * time.Minute
+	modelLoadRetryDelays    = []time.Duration{2 * time.Second, 5 * time.Second}
+)
+
+func (a *App) loadModelWithRetry(ctx context.Context, loader interface{ LoadModel(context.Context) error }, key string, onRetry ...func(int, error)) error {
+	var lastErr error
+
+	for attempt := 1; attempt <= modelLoadAttempts; attempt++ {
+		loadCtx, cancel := context.WithTimeout(ctx, modelLoadAttemptTimeout)
+		err := loader.LoadModel(loadCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		a.clearLoadedModelKey(key)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(ctxErr, context.Canceled) {
+				return err
+			}
+			return fmt.Errorf("model load canceled after attempt %d: %w", attempt, ctxErr)
+		}
+		if attempt == modelLoadAttempts {
+			break
+		}
+		for _, cb := range onRetry {
+			if cb != nil {
+				cb(attempt, err)
+			}
+		}
+		delay := time.Duration(0)
+		if attempt-1 < len(modelLoadRetryDelays) {
+			delay = modelLoadRetryDelays[attempt-1]
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return fmt.Errorf("model load canceled before retry %d: %w", attempt+1, ctx.Err())
+		}
+	}
+
+	return fmt.Errorf("model load failed after %d attempts: %w", modelLoadAttempts, lastErr)
+}
+
+func (a *App) clearLoadedModelKey(key string) {
+	a.mu.Lock()
+	if a.loadedModelKey == key {
+		a.loadedModelKey = ""
+	}
+	a.mu.Unlock()
+}
+
 func modelLoadKey(profile settings.Profile) string {
 	return strings.Join([]string{
 		profile.Backend,
@@ -2433,8 +3498,49 @@ func modelLoadKey(profile settings.Profile) string {
 	}, "\x00")
 }
 
-func buildChatRequest(profile settings.Profile, msgs []llm.Message, toolDefs []llm.ToolDef, toolChoice string, forceNoThink bool) llm.Request {
-	params := profile.ActiveParams(false)
+func modelLoadKeySameRuntime(profile settings.Profile, loadedKey string) bool {
+	parts := strings.Split(loadedKey, "\x00")
+	if len(parts) != 5 {
+		return false
+	}
+	return parts[0] == profile.Backend &&
+		parts[1] == strings.TrimRight(profile.BaseURL, "/") &&
+		parts[2] == profile.ModelID &&
+		parts[4] == profile.APIKeyEnv
+}
+
+func (a *App) recordBackendRuntimeMismatch(ctx context.Context, client llm.Client, profile settings.Profile, run *TaskRun) {
+	if profile.CtxTokens <= 0 || run == nil {
+		return
+	}
+	cq, ok := client.(interface {
+		ActualContextLength(context.Context) int
+	})
+	if !ok {
+		return
+	}
+	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	actual := cq.ActualContextLength(qctx)
+	cancel()
+	if actual <= 0 || actual == profile.CtxTokens {
+		return
+	}
+	severity := "info"
+	if actual < profile.CtxTokens {
+		severity = "warn"
+	}
+	run.addEvent(
+		"backend_runtime_changed",
+		"Backend runtime differs from active profile",
+		fmt.Sprintf("severity=%s expected_ctx=%d actual_ctx=%d model=%s backend=%s base_url=%s", severity, profile.CtxTokens, actual, profile.ModelID, profile.Backend, profile.BaseURL),
+	)
+}
+
+func buildChatRequest(profile settings.Profile, msgs []llm.Message, toolDefs []llm.ToolDef, toolChoice string, forceNoThink bool, coding bool) llm.Request {
+	params := profile.ActiveParams(coding)
+	if coding && !profile.Thinking && profile.ThinkCoding.MaxTokens > 0 {
+		params = profile.ThinkCoding
+	}
 	enableThinking := profile.Thinking
 	preserveThinking := profile.PreserveThink
 	if forceNoThink {
@@ -2528,11 +3634,39 @@ type shellSession struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	cancel context.CancelFunc
+	output chan terminalOutput
+	runMu  sync.Mutex
 }
 
-// ansiEscape strips ANSI escape sequences from terminal output so the frontend
-// can render plain text without a full VT100 emulator.
-var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b[()][AB012]`)
+type terminalOutput struct {
+	data   string
+	stream string
+}
+
+// Terminal output is rendered as plain text in the frontend, not by a full VT
+// emulator. Strip title updates, colour/control escapes, and stray C0 controls
+// before events reach React.
+var (
+	oscEscape  = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?`)
+	ansiEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\x1b[=>]`)
+)
+
+func maulerBashInteractiveArgs() []string {
+	// Source the user's bashrc for PATH/aliases, then override the prompt bits
+	// that commonly emit OSC title sequences and Unicode-heavy Kali prompts, and
+	// force a non-interactive, no-pager environment. Pagers (git/systemctl/less/man)
+	// and credential prompts otherwise block the shared session until it times out,
+	// which is the main reason the agent finds the shared terminal "problematic".
+	rc := "exec bash --rcfile <(printf '%s\\n' " +
+		"'test -f ~/.bashrc && . ~/.bashrc' " +
+		"'PROMPT_COMMAND=' " +
+		"'PROMPT_DIRTRIM=3' " +
+		"'export PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat MANPAGER=cat LESS=FRX' " +
+		"'export DEBIAN_FRONTEND=noninteractive GIT_TERMINAL_PROMPT=0 PIP_DISABLE_PIP_VERSION_CHECK=1' " +
+		"'export PYTHONUNBUFFERED=1' " +
+		"\"PS1='\\\\u@\\\\h:\\\\w\\\\$ '\") -i"
+	return []string{"-lc", rc}
+}
 
 // OpenShell starts a new interactive shell and returns its session ID.
 // Any previously open shell is closed first.  Output is streamed to the
@@ -2550,6 +3684,8 @@ func (a *App) OpenShell() (string, error) {
 
 	a.mu.Lock()
 	backend := a.cfg.Tools.ShellBackend
+	distro := strings.TrimSpace(a.cfg.Tools.ShellDistro)
+	user := strings.TrimSpace(a.cfg.Tools.ShellUser)
 	cwd, _ := os.Getwd()
 	if dir := a.cfg.Context.WorkspaceDir; dir != "" {
 		cwd = dir
@@ -2566,22 +3702,35 @@ func (a *App) OpenShell() (string, error) {
 		shellCmd = "cmd.exe"
 	case "bash":
 		shellCmd = "bash"
-		shellArgs = []string{"-i"}
+		shellArgs = maulerBashInteractiveArgs()
 	case "wsl":
 		shellCmd = "wsl.exe"
+		if distro != "" {
+			shellArgs = append(shellArgs, "-d", distro)
+		}
+		if user != "" {
+			shellArgs = append(shellArgs, "--user", user)
+		}
+		if wslDir := tools.WindowsPathToWSL(cwd); wslDir != "" {
+			shellArgs = append(shellArgs, "--cd", wslDir)
+		}
+		shellArgs = append(shellArgs, "--", "bash")
+		shellArgs = append(shellArgs, maulerBashInteractiveArgs()...)
 	default: // auto
 		if runtime.GOOS == "windows" {
 			shellCmd = "powershell.exe"
 			shellArgs = []string{"-NoProfile", "-NonInteractive", "-Command", "-"}
 		} else {
 			shellCmd = "bash"
-			shellArgs = []string{"-i"}
+			shellArgs = maulerBashInteractiveArgs()
 		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, shellCmd, shellArgs...)
-	cmd.Dir = cwd
+	if backend != "wsl" {
+		cmd.Dir = cwd
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -2608,7 +3757,7 @@ func (a *App) OpenShell() (string, error) {
 	}
 
 	id := fmt.Sprintf("shell-%d", time.Now().UnixMilli())
-	sess := &shellSession{id: id, cmd: cmd, stdin: stdin, cancel: cancel}
+	sess := &shellSession{id: id, cmd: cmd, stdin: stdin, cancel: cancel, output: make(chan terminalOutput, 4096)}
 	a.shellSess = sess
 
 	go a.pipeShellOutput(id, stdout, "stdout")
@@ -2632,9 +3781,18 @@ func (a *App) OpenShell() (string, error) {
 // pipeShellOutput reads lines from r and emits them as mauler:shell_output events.
 func (a *App) pipeShellOutput(id string, r io.Reader, stream string) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := ansiEscape.ReplaceAllString(scanner.Text(), "")
+		line := sanitizeTerminalLine(decodeTerminalOutput(scanner.Bytes()))
+		a.shellMu.Lock()
+		sess := a.shellSess
+		if sess != nil && sess.id == id {
+			select {
+			case sess.output <- terminalOutput{data: line, stream: stream}:
+			default:
+			}
+		}
+		a.shellMu.Unlock()
 		if a.ctx != nil {
 			wailsruntime.EventsEmit(a.ctx, "mauler:shell_output", map[string]string{
 				"id":     id,
@@ -2643,6 +3801,44 @@ func (a *App) pipeShellOutput(id string, r io.Reader, stream string) {
 			})
 		}
 	}
+}
+
+func sanitizeTerminalLine(s string) string {
+	s = oscEscape.ReplaceAllString(s, "")
+	s = ansiEscape.ReplaceAllString(s, "")
+	s = strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.TrimRight(s, "\r")
+}
+
+func decodeTerminalOutput(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	zeroOdd := 0
+	pairs := len(data) / 2
+	if pairs >= 4 {
+		for i := 0; i+1 < len(data); i += 2 {
+			if data[i+1] == 0 {
+				zeroOdd++
+			}
+		}
+		if zeroOdd*100/pairs >= 45 {
+			u16 := make([]uint16, 0, pairs)
+			for i := 0; i+1 < len(data); i += 2 {
+				u16 = append(u16, uint16(data[i])|uint16(data[i+1])<<8)
+			}
+			return string(utf16.Decode(u16))
+		}
+	}
+	return strings.ToValidUTF8(string(data), "?")
 }
 
 // ShellInput writes a line of text to the active shell's stdin.
@@ -2655,6 +3851,205 @@ func (a *App) ShellInput(id, text string) error {
 	}
 	_, err := fmt.Fprintln(sess.stdin, text)
 	return err
+}
+
+func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw json.RawMessage, defaultTimeout int) (string, error) {
+	var p struct {
+		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", fmt.Errorf("%s: bad params: %w", toolName, err)
+	}
+	command, err := tools.PrepareShellCommand(p.Command)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", toolName, err)
+	}
+	// A persistent shell hangs forever on a sudo password prompt, poisoning every
+	// later command in the session. Make sudo non-interactive so it fails fast instead.
+	command = tools.ForceNonInteractiveSudo(command)
+	timeoutSecs := defaultTimeout
+	if timeoutSecs <= 0 {
+		timeoutSecs = 120
+	}
+	if p.Timeout > 0 && p.Timeout <= 300 {
+		timeoutSecs = p.Timeout
+	}
+	a.mu.Lock()
+	backend := a.cfg.Tools.ShellBackend
+	a.mu.Unlock()
+	if !sharedTerminalSupportsBackend(backend) {
+		return "", errSharedTerminalUnsupported
+	}
+	sess, err := a.ensureShellSession()
+	if err != nil {
+		return "", err
+	}
+	sess.runMu.Lock()
+	defer sess.runMu.Unlock()
+	drainTerminalOutput(sess.output)
+
+	runID := sharedTerminalRunID()
+	startMarker, donePrefix, wrapped := sharedTerminalWrapper(command, runID)
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "mauler:terminal_command_start", map[string]string{
+			"id": runID, "session": sess.id, "command": command, "timeout": strconv.Itoa(timeoutSecs),
+		})
+	}
+	if _, err := fmt.Fprintln(sess.stdin, wrapped); err != nil {
+		return "", err
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
+	defer cancel()
+	started := false
+	var out []terminalOutput
+	startedAt := time.Now()
+	for {
+		select {
+		case line := <-sess.output:
+			trimmed := strings.TrimSpace(line.data)
+			if isSharedTerminalWrapperEcho(line.data) {
+				if strings.Contains(line.data, startMarker) {
+					started = true
+				}
+				continue
+			}
+			if strings.Contains(trimmed, startMarker) {
+				started = true
+				continue
+			}
+			if statusText, preDone, ok := splitSharedTerminalDone(line.data, donePrefix); ok {
+				if started && strings.TrimSpace(preDone) != "" {
+					out = append(out, terminalOutput{data: strings.TrimSpace(preDone), stream: line.stream})
+				}
+				codeText := strings.TrimSpace(statusText)
+				exitCode, _ := strconv.Atoi(codeText)
+				result := formatSharedTerminalResult(out, backend, exitCode, time.Since(startedAt).Round(time.Millisecond))
+				if a.ctx != nil {
+					wailsruntime.EventsEmit(a.ctx, "mauler:terminal_command_done", map[string]string{
+						"id": runID, "session": sess.id, "exit_code": strconv.Itoa(exitCode),
+					})
+				}
+				if exitCode != 0 {
+					return result, fmt.Errorf("exit code %d", exitCode)
+				}
+				return result, nil
+			}
+			if started {
+				out = append(out, line)
+				if len(out) > 2000 {
+					out = out[len(out)-2000:]
+				}
+			}
+		case <-runCtx.Done():
+			a.shellMu.Lock()
+			if a.shellSess != nil && a.shellSess.id == sess.id {
+				a.shellSess.cancel()
+				a.shellSess = nil
+			}
+			a.shellMu.Unlock()
+			result := formatSharedTerminalResult(out, backend, -1, time.Since(startedAt).Round(time.Millisecond))
+			if runCtx.Err() == context.DeadlineExceeded {
+				return result + fmt.Sprintf("\n[shared_terminal timed out after %ds]", timeoutSecs), fmt.Errorf("shared terminal: timed out after %ds", timeoutSecs)
+			}
+			return result + "\n[shared_terminal cancelled]", fmt.Errorf("shared terminal: cancelled")
+		}
+	}
+}
+
+var errSharedTerminalUnsupported = errors.New("shared terminal is only supported for bash/wsl shell backends")
+
+func sharedTerminalSupportsBackend(backend string) bool {
+	backend = strings.TrimSpace(strings.ToLower(backend))
+	return backend == "wsl" || backend == "bash" || backend == ""
+}
+
+func (a *App) ensureShellSession() (*shellSession, error) {
+	a.shellMu.Lock()
+	sess := a.shellSess
+	a.shellMu.Unlock()
+	if sess != nil {
+		return sess, nil
+	}
+	if _, err := a.OpenShell(); err != nil {
+		return nil, err
+	}
+	a.shellMu.Lock()
+	defer a.shellMu.Unlock()
+	if a.shellSess == nil {
+		return nil, fmt.Errorf("shared terminal did not start")
+	}
+	return a.shellSess, nil
+}
+
+func drainTerminalOutput(ch <-chan terminalOutput) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+func sharedTerminalRunID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+func sharedTerminalWrapper(command, runID string) (string, string, string) {
+	start := "__MAULER_START_" + runID + "__"
+	donePrefix := "__MAULER_DONE_" + runID + ":"
+	wrapped := fmt.Sprintf("set -o pipefail 2>/dev/null || true; printf '%%s\\n' %s; { %s; }; status=$?; printf '%%s%%s\\n' %s \"$status\"",
+		terminalShellQuote(start), command, terminalShellQuote(donePrefix))
+	return start, donePrefix, wrapped
+}
+
+func terminalShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func isSharedTerminalWrapperEcho(line string) bool {
+	return strings.Contains(line, "__MAULER_START_") && strings.Contains(line, "__MAULER_DONE_") && strings.Contains(line, "printf")
+}
+
+func splitSharedTerminalDone(line, donePrefix string) (statusText, preDone string, ok bool) {
+	idx := strings.Index(line, donePrefix)
+	if idx < 0 {
+		return "", "", false
+	}
+	rest := strings.TrimSpace(line[idx+len(donePrefix):])
+	fields := strings.Fields(rest)
+	if len(fields) > 0 {
+		rest = fields[0]
+	}
+	return rest, line[:idx], true
+}
+
+func formatSharedTerminalResult(lines []terminalOutput, backend string, exitCode int, elapsed time.Duration) string {
+	var sb strings.Builder
+	for _, line := range lines {
+		if strings.TrimSpace(line.data) == "" {
+			continue
+		}
+		if isSharedTerminalWrapperEcho(line.data) || strings.Contains(line.data, "__MAULER_START_") || strings.Contains(line.data, "__MAULER_DONE_") {
+			continue
+		}
+		if line.stream == "stderr" {
+			sb.WriteString("[stderr] ")
+		}
+		sb.WriteString(line.data)
+		sb.WriteString("\n")
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n")
+	}
+	if exitCode >= 0 {
+		sb.WriteString(fmt.Sprintf("[shared_terminal/%s exit %d, %s]", backend, exitCode, elapsed))
+	} else {
+		sb.WriteString(fmt.Sprintf("[shared_terminal/%s stopped, %s]", backend, elapsed))
+	}
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // ShellClose terminates the shell session identified by id.
@@ -2789,8 +4184,9 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 		"(2) When your answer is complete, STOP. Do NOT offer to run additional tool calls, do NOT ask if the user wants to search for more, do NOT suggest follow-up tool use. " +
 		"(3) Never mention the availability of tools in a conversational reply. " +
 		"(4) If you say you will find, inspect, read, search, fetch, write, create, update, or run something, your very next action must be the appropriate tool call — not more narration. ")
-	sb.WriteString("You have tools for reading, writing, and editing files, running shell commands, searching with glob and grep. ")
+	sb.WriteString(formatEnabledToolSummary(cfg.Tools))
 	sb.WriteString("For multi-step implementation, debugging, research, or review tasks, create and maintain a visible plan with todo_create/todo_update/todo_done/todo_blocked. Keep it concise and update it as phases change. ")
+	sb.WriteString("If the user asks to update a README, writeup, notes file, report, or documentation as work progresses, treat that file as a living artifact: write a concise update after each major verified milestone instead of leaving all documentation until the end. ")
 	sb.WriteString("Use session_search when the user asks about prior work, past decisions, remembered fixes, or anything likely discussed in an earlier chat. ")
 	sb.WriteString("Use skills_list at the start of a complex task to see if a relevant procedural skill exists, then skill_view to read its full instructions. ")
 	sb.WriteString("Prefer glob/grep/file_outline/read_chunks/read_file/read_many/read_pdf for file discovery and inspection instead of shell. Use file_outline before reading large files, then read_chunks or read_file line ranges for only the needed sections. Use read_pdf for local PDF documents the user wants analysed. ")
@@ -2798,9 +4194,21 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 		sb.WriteString(workspace)
 	}
 	sb.WriteString("The shell tool is platform-aware: Windows uses PowerShell by default, Linux and WSL use bash by default. Use syntax and paths appropriate to the active shell; on Windows PowerShell do not use bash-only constructs like /dev/null or complex bash pipelines. ")
+	if strings.EqualFold(cfg.Tools.ShellBackend, "wsl") {
+		if distro := strings.TrimSpace(cfg.Tools.ShellDistro); distro != "" {
+			sb.WriteString("The active shell backend is WSL distro " + distro + "; run Linux/Kali commands directly with bash syntax and Linux paths. Do not prefix shell commands with wsl or wsl.exe because the shell tool is already inside that distro. ")
+		} else {
+			sb.WriteString("The active shell backend is the default WSL distro; run Linux commands directly with bash syntax and Linux paths. Do not prefix shell commands with wsl or wsl.exe because the shell tool is already inside WSL. ")
+		}
+		sb.WriteString("For HTB/CTF enumeration, use realistic shell timeouts: 120-300 seconds for nmap, gobuster, ffuf, hydra, and similar scans. Do not pipe long-running scans through head because it can terminate the scan early and hide the real exit status; write scan output to a file with -oA/-oN/-oG or tee, then tail/grep the saved file afterward. If a scan times out, retry narrower or with a larger timeout and continue from partial output instead of stopping. Sudo is allowed when the user supplied the WSL/Kali sudo password, but it must be non-interactive: pass the password through stdin with sudo -S and a bounded timeout. For privileged one-line writes such as /etc/hosts, prefer printf piped into sudo -S tee -a instead of nested sudo bash -c quoting. ")
+	}
+	if len(cfg.Tools.ProtectedPaths) > 0 {
+		sb.WriteString("Never edit, delete, move, overwrite, chmod/chown, or otherwise mutate these protected paths: " + strings.Join(cfg.Tools.ProtectedPaths, "; ") + ". ")
+	}
 	sb.WriteString(fmt.Sprintf("Web research is budgeted per task: at most %d searches, %d fetches, and %d failed/no-result web attempts. ", cfg.Tools.MaxSearches, cfg.Tools.MaxFetches, cfg.Tools.MaxFailedFetches))
+	sb.WriteString("For exploit, CVE, PoC, CTF/HTB, or service-version research, the runtime may grant a larger web budget; fan out across vendor advisories, NVD/CVE records, GitHub PoCs, Exploit-DB/Rapid7/Packet Storm, and relevant issue/forum reports before concluding none exists. ")
 	sb.WriteString("Rank sources as official docs first, then GitHub/repo docs, package docs, blogs/community posts, and random mirrors last. ")
-	sb.WriteString("If two or three searches/fetches fail, stop searching and state the uncertainty instead of spiraling. ")
+	sb.WriteString("If repeated searches/fetches fail or return only mirrors, stop searching and state the uncertainty instead of spiraling. ")
 	sb.WriteString("When web_search/fetch_url are insufficient for JavaScript-heavy pages or forms, use browser_open/browser_snapshot/browser_click/browser_type/browser_extract/browser_screenshot within the browser action budget. ")
 	sb.WriteString("When using web_search for current events, include today's year/date in the query and fetch promising high-ranked sources with fetch_url. ")
 	sb.WriteString("If a tool is blocked, disabled, denied, exhausted by budget, or returns repeated errors, stop the loop and clearly report what stopped you, what you already tried, and the exact next permission or input needed. ")
@@ -2815,8 +4223,16 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 			if s.Description != "" {
 				sb.WriteString("**When to use:** " + s.Description + "\n")
 			}
-			if s.Body != "" {
-				sb.WriteString(s.Body + "\n")
+			if strings.TrimSpace(s.SourcePath) != "" {
+				sb.WriteString("External source: " + s.SourcePath + "\n")
+				sb.WriteString("Load lazily with skill_view. Pass a focused query when only a section is needed.\n")
+			} else if s.Body != "" {
+				body := strings.TrimSpace(s.Body)
+				const maxInlineSkillChars = 6000
+				if len(body) > maxInlineSkillChars {
+					body = body[:maxInlineSkillChars] + "\n\n[Skill truncated in prompt. Use skill_view for the full instructions.]"
+				}
+				sb.WriteString(body + "\n")
 			}
 		}
 	}
@@ -2852,19 +4268,85 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 	return sb.String()
 }
 
+func formatEnabledToolSummary(cfg settings.ToolsConfig) string {
+	if !cfg.Enabled {
+		return "No tools are enabled for this run; answer directly and say what permission is needed if implementation is required. "
+	}
+	effective := settings.EffectiveEnabledTools(cfg)
+	has := func(name string) bool { return toolEnabled(effective, name) }
+	var groups []string
+	if has("read_file") || has("read_many") || has("read_chunks") || has("file_outline") || has("read_pdf") {
+		groups = append(groups, "read and inspect files")
+	}
+	if has("write_file") || has("edit_file") {
+		groups = append(groups, "write and edit files")
+	}
+	if has("shell") || has("bash") {
+		groups = append(groups, "run shell commands")
+	}
+	if has("glob") || has("grep") {
+		groups = append(groups, "search local files with glob and grep")
+	}
+	if has("web_search") || has("fetch_url") {
+		groups = append(groups, "search and fetch the web")
+	}
+	if has("browser_open") || has("browser_snapshot") || has("browser_click") || has("browser_type") || has("browser_extract") || has("browser_screenshot") {
+		groups = append(groups, "use browser automation")
+	}
+	if len(groups) == 0 {
+		return "No usable tools are enabled for this run; answer directly and say what permission is needed if implementation is required. "
+	}
+	return fmt.Sprintf("Enabled tools for this run let you %s. If the user asks you to implement, patch, write, edit, or run something and those tools are enabled, use a tool call instead of telling the user to copy/paste code. ", strings.Join(groups, ", "))
+}
+
 func buildWorkspaceContextPrompt() string {
 	wd, err := os.Getwd()
 	if err != nil || strings.TrimSpace(wd) == "" {
 		return ""
 	}
 	wd = filepath.ToSlash(wd)
+	cfg, _ := settings.Load()
 	var sb strings.Builder
 	sb.WriteString("\n\nCurrent workspace context (authoritative for this run):\n")
-	sb.WriteString("- Root: " + wd + "\n")
+	sb.WriteString("- Agent root: " + wd + "\n")
 	if entries := workspaceTopLevelEntries(wd, 40); len(entries) > 0 {
 		sb.WriteString("- Top-level entries: " + strings.Join(entries, ", ") + "\n")
 	}
+	if cfg != nil {
+		folders := normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, wd)
+		var extras []string
+		for _, folder := range folders {
+			if sameFilesystemPath(folder.Path, wd) {
+				continue
+			}
+			label := folder.Path
+			if folder.Role != "" && folder.Role != "folder" {
+				label += " (" + folder.Role + ")"
+			}
+			extras = append(extras, label)
+			if len(extras) >= 8 {
+				break
+			}
+		}
+		if len(extras) > 0 {
+			sb.WriteString("- Additional open folders for browsing/reference: " + strings.Join(extras, "; ") + "\n")
+		}
+		var lab []string
+		if cfg.Context.Lab.Target != "" {
+			lab = append(lab, "target="+cfg.Context.Lab.Target)
+		}
+		if cfg.Context.Lab.VPNInterface != "" {
+			lab = append(lab, "vpn/interface="+cfg.Context.Lab.VPNInterface)
+		}
+		if cfg.Context.Lab.LatestArtifact != "" {
+			lab = append(lab, "latest_artifact="+cfg.Context.Lab.LatestArtifact)
+		}
+		if len(lab) > 0 {
+			sb.WriteString("- Lab/run context: " + strings.Join(lab, "; ") + "\n")
+		}
+	}
 	sb.WriteString("All relative file paths in tool calls resolve from this root. ")
+	sb.WriteString("Open folders are for browsing/reference only unless the user or tool call uses an absolute path. ")
 	sb.WriteString("The user may switch projects between chats; ignore stale project names, memories, or prior file paths that conflict with this root and its entries. ")
 	sb.WriteString("Before reading assumed project files, discover what actually exists with glob/grep or use the files shown above. ")
 	sb.WriteString("If a file read reports that a path does not exist, adapt to the current workspace instead of retrying paths from another project.\n")
@@ -2894,6 +4376,107 @@ func workspaceTopLevelEntries(root string, limit int) []string {
 		}
 	}
 	return out
+}
+
+func normaliseAppWorkspaceFolders(folders []settings.WorkspaceFolder, agentRoot string) []settings.WorkspaceFolder {
+	seen := map[string]bool{}
+	var out []settings.WorkspaceFolder
+	add := func(folder settings.WorkspaceFolder) {
+		folder.Path = filepath.ToSlash(strings.TrimSpace(folder.Path))
+		folder.Name = strings.TrimSpace(folder.Name)
+		folder.Role = strings.TrimSpace(folder.Role)
+		if folder.Role == "" {
+			folder.Role = "folder"
+		}
+		if folder.Path == "" {
+			return
+		}
+		if !workspaceFolderExists(folder.Path) {
+			return
+		}
+		key := strings.ToLower(filepath.ToSlash(tools.NormalizeHostPath(folder.Path)))
+		if seen[key] {
+			return
+		}
+		if folder.Name == "" {
+			folder.Name = filepath.Base(folder.Path)
+		}
+		seen[key] = true
+		out = append(out, folder)
+	}
+	if strings.TrimSpace(agentRoot) != "" {
+		root := filepath.ToSlash(agentRoot)
+		add(settings.WorkspaceFolder{Path: root, Name: filepath.Base(root), Role: "root"})
+	}
+	for _, folder := range folders {
+		add(folder)
+	}
+	return out
+}
+
+func workspaceFolderExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(tools.NormalizeHostPath(path))
+	return err == nil && info.IsDir()
+}
+
+func mergeWorkspaceFolders(folders []settings.WorkspaceFolder, folder settings.WorkspaceFolder) []settings.WorkspaceFolder {
+	folder.Path = filepath.ToSlash(strings.TrimSpace(folder.Path))
+	if folder.Path == "" {
+		return folders
+	}
+	var out []settings.WorkspaceFolder
+	replaced := false
+	for _, existing := range folders {
+		if sameFilesystemPath(existing.Path, folder.Path) {
+			if folder.Name == "" {
+				folder.Name = existing.Name
+			}
+			if folder.Role == "" {
+				folder.Role = existing.Role
+			}
+			out = append(out, folder)
+			replaced = true
+			continue
+		}
+		out = append(out, existing)
+	}
+	if !replaced {
+		out = append(out, folder)
+	}
+	return out
+}
+
+func latestWorkspaceArtifact(folders []settings.WorkspaceFolder) string {
+	var newestPath string
+	var newestTime time.Time
+	for _, folder := range folders {
+		if folder.Path == "" {
+			continue
+		}
+		role := strings.ToLower(folder.Role)
+		name := strings.ToLower(filepath.Base(folder.Path))
+		if role != "scans" && role != "loot" && name != "scans" && name != "loot" {
+			continue
+		}
+		_ = filepath.WalkDir(tools.NormalizeHostPath(folder.Path), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			if info.ModTime().After(newestTime) {
+				newestTime = info.ModTime()
+				newestPath = path
+			}
+			return nil
+		})
+	}
+	return filepath.ToSlash(newestPath)
 }
 
 func sameFilesystemPath(a, b string) bool {
@@ -3009,6 +4592,48 @@ func sleepBeforeAutoContinue(ctx context.Context, attempt int) bool {
 	}
 }
 
+func sleepBeforeInferenceRetry(ctx context.Context) bool {
+	timer := time.NewTimer(750 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func isRecoverableInferenceFailure(message string) bool {
+	msg := strings.ToLower(message)
+	if strings.Contains(msg, "tool \"") && strings.Contains(msg, "disabled") {
+		return false
+	}
+	for _, marker := range []string{
+		"inference failed",
+		"http 500",
+		"http 502",
+		"http 503",
+		"http 504",
+		"error sending request",
+		"connectex",
+		"connection attempt failed",
+		"connection reset",
+		"connection refused",
+		"actively refused",
+		"did not properly respond",
+		"failed to respond",
+		"no connection could be made",
+		"unable to connect",
+		"unexpected eof",
+		"server closed",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func autoContinueDelay(attempt int) time.Duration {
 	if attempt <= 0 {
 		return 0
@@ -3035,6 +4660,10 @@ func looksAboutToAct(text string) bool {
 		"let me rewrite", "i'll rewrite", "i will rewrite", "now rewrite",
 		"let me repair", "i'll repair", "i will repair", "now repair",
 		"let me find", "i'll find", "now find",
+		"let me discover", "i'll discover", "now discover",
+		"let me enumerate", "i'll enumerate", "now enumerate",
+		"let me test", "i'll test", "now test",
+		"let me verify", "i'll verify", "now verify",
 		"let me explore", "i'll explore", "now explore",
 		"let me check", "i'll check", "now check",
 		"let me inspect", "i'll inspect", "now inspect",
@@ -3069,10 +4698,10 @@ func buildDirectivePrompt(lastText string) string {
 		"let me write", "let me create", "let me build", "let me update", "let me add",
 		"let me fix", "let me rewrite", "let me repair",
 		"let me find", "let me explore", "let me check", "let me inspect", "let me read", "let me search", "let me fetch",
-		"let me look",
+		"let me look", "let me discover", "let me enumerate", "let me test", "let me verify", "let me start", "let me begin",
 		"right — let me", "right - let me", "right, let me",
 		"now i'll write", "now i'll create", "now i'll fix", "now i'll rewrite", "i'll now write", "i will write", "i will now",
-		"now write", "now create", "now fix", "now rewrite", "now find", "now explore", "now check", "now inspect",
+		"now write", "now create", "now fix", "now rewrite", "now find", "now discover", "now enumerate", "now test", "now verify", "now explore", "now check", "now inspect",
 		"i'll write", "i'll create", "i'll fix", "i'll rewrite", "i'll repair", "i'll find", "i'll explore", "i'll check", "i'll inspect",
 		"i need to fix", "i need to rewrite", "i need to repair",
 	}
@@ -3124,6 +4753,19 @@ func buildMalformedToolMarkupPrompt(rawText string, toolDefs []llm.ToolDef) stri
 		strings.Join(names, ", "),
 		tail,
 	)
+}
+
+func visibleTextBeforeInlineToolMarkup(text string) string {
+	cut := len(text)
+	for _, marker := range []string{
+		"<|tool_call>", "<tool_call>", "<call:", "<function=", "<parameters>",
+		"<|channel>", "<|channel|>", "<channel>",
+	} {
+		if idx := strings.Index(strings.ToLower(text), strings.ToLower(marker)); idx >= 0 && idx < cut {
+			cut = idx
+		}
+	}
+	return strings.TrimSpace(sanitizeVisibleModelText(text[:cut]))
 }
 
 func enabledToolNames(toolDefs []llm.ToolDef) []string {
@@ -3195,6 +4837,7 @@ func sanitizeVisibleModelText(text string) string {
 	if idx := firstChatTemplateBoundary(text); idx >= 0 {
 		text = text[:idx]
 	}
+	text = stripGemmaChannelBlocks(text)
 	for _, pair := range [][2]string{
 		{"<|channel|>thought <channel|>", ""},
 		{"<|channel>thought <channel|>", ""},
@@ -3223,6 +4866,26 @@ func sanitizeVisibleModelText(text string) string {
 	text = channelRe.ReplaceAllString(text, "")
 	text = stripBareChannelPrefix(text)
 	return strings.TrimLeft(text, " \t\r\n")
+}
+
+func stripGemmaChannelBlocks(text string) string {
+	for _, open := range []string{"<|channel>thought", "<|channel|>thought", "<|channel>analysis", "<|channel|>analysis"} {
+		for {
+			start := strings.Index(text, open)
+			if start < 0 {
+				break
+			}
+			afterOpen := start + len(open)
+			relEnd := strings.Index(text[afterOpen:], "<channel|>")
+			if relEnd < 0 {
+				text = text[:start]
+				break
+			}
+			closeEnd := afterOpen + relEnd + len("<channel|>")
+			text = text[:start] + text[closeEnd:]
+		}
+	}
+	return text
 }
 
 func stripBareChannelPrefix(text string) string {
@@ -4210,7 +5873,7 @@ func stripInlineToolTags(s string) string {
 
 func isInspectionIntent(text string) bool {
 	lower := strings.ToLower(text)
-	return hasAny(lower, "find", "explore", "check", "inspect", "read", "search", "fetch", "look")
+	return hasAny(lower, "find", "explore", "check", "inspect", "read", "search", "fetch", "look", "discover", "enumerate", "test", "verify", "start", "begin")
 }
 
 func needsInspectionTool(text string) bool {
@@ -4350,7 +6013,87 @@ func toolDefsAndChoiceForTurn(registry *tools.Registry, cfg settings.ToolsConfig
 	if !cfg.Enabled || toolChoice == "none" {
 		return nil, toolChoice
 	}
-	return registry.ToEnabledToolDefs(settings.EffectiveEnabledTools(cfg)), toolChoice
+	enabled := settings.EffectiveEnabledTools(cfg)
+	if looksShellCentricTask(firstUserText) && !explicitWebResearchIntent(firstUserText) {
+		enabled = cloneToolEnabledMap(enabled)
+		enabled["subagent_research"] = false
+	}
+	return registry.ToEnabledToolDefs(enabled), toolChoice
+}
+
+func filterToolDefsByName(toolDefs []llm.ToolDef, names ...string) []llm.ToolDef {
+	allowed := map[string]bool{}
+	for _, name := range names {
+		allowed[name] = true
+	}
+	out := make([]llm.ToolDef, 0, len(toolDefs))
+	for _, def := range toolDefs {
+		if allowed[def.Function.Name] {
+			out = append(out, def)
+		}
+	}
+	return out
+}
+
+func documentationRecoveryPrompt(prompt, stopReason, stopDetail string) string {
+	var sb strings.Builder
+	sb.WriteString("The user explicitly asked for a README/writeup/docs update as work progresses, but no document has been written yet. ")
+	if stopReason != "" {
+		sb.WriteString("The run also hit stop reason `" + stopReason + "`. ")
+	}
+	if stopDetail != "" {
+		sb.WriteString("Stop detail: " + truncateRunes(stopDetail, 240) + " ")
+	}
+	sb.WriteString("Do not perform more web, browser, or shell research now. Use read_file/glob/grep if needed, then call write_file or edit_file to update the requested documentation with the verified facts gathered so far. If the named file is missing, create it in the active workspace using the requested name or the closest existing writeup name from the prompt. Original user request: ")
+	sb.WriteString(truncateRunes(prompt, 300))
+	return sb.String()
+}
+
+func cloneToolEnabledMap(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func looksShellCentricTask(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range []string{
+		"htb", "hackthebox", "hack the box",
+		"pentest", "penetration test", "lab target", "target ip", "target url",
+		"wsl", "kali", "vpn", "tun0", "sudo", "nmap", "gobuster", "ffuf", "feroxbuster", "dirsearch", "nikto", "searchsploit",
+		"user.txt", "root.txt", "foothold", "privilege escalation", "privesc", "recon", "enumerate", "enumeration",
+		"dvwa", "command injection", "cmd injection", "sql injection", "sqli", "xss", "lfi", "rfi", "ssrf",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func explicitWebResearchIntent(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "research online") ||
+		strings.Contains(lower, "look online") ||
+		strings.Contains(lower, "web research") ||
+		strings.Contains(lower, "search the web") ||
+		strings.Contains(lower, "find writeup") ||
+		strings.Contains(lower, "find documentation")
+}
+
+func agentToolBudgetExhausted(cfg settings.AgentsConfig, used int) bool {
+	return cfg.MaxToolCalls > 0 && used >= cfg.MaxToolCalls
+}
+
+func agentToolBudgetSummaryPrompt(maxToolCalls int) string {
+	return fmt.Sprintf(
+		"Agent tool-call budget is exhausted (%d calls). Do not emit tool calls or tool markup. "+
+			"Write a concise final progress summary for the user now: what was attempted, what worked, what failed, current evidence, and the safest next manual step. "+
+			"If more work is needed, ask the user before continuing.",
+		maxToolCalls,
+	)
 }
 
 func extractPath(tc llm.ToolCallDef) string {

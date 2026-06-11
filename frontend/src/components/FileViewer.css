@@ -4,7 +4,7 @@
   min-width: 0;
   min-height: 0;
   height: 100%;
-  background: #151515;
+  background: var(--c-pane);
 }
 
 .file-viewer-header {
@@ -15,7 +15,7 @@
   height: 42px;
   padding: 7px 12px;
   border-bottom: 1px solid var(--border);
-  background: #181818;
+  background: var(--c-panel);
   flex-shrink: 0;
 }
 
@@ -116,7 +116,7 @@
   padding: 4px 10px;
   border-top: 1px solid var(--border);
   color: var(--text-dim);
-  background: #181818;
+  background: var(--c-panel);
   font-size: 11px;
   flex-shrink: 0;
 }
@@ -129,7 +129,7 @@
   justify-content: center;
   gap: 10px;
   color: var(--text-dim);
-  background: #151515;
+  background: var(--c-pane);
   font-size: 12px;
 }
 
@@ -161,7 +161,7 @@
   color: var(--text);
   font-size: 14px;
   line-height: 1.7;
-  background: #151515;
+  background: var(--c-pane);
 }
 .md-preview h1, .md-preview h2, .md-preview h3 {
   color: var(--text-bright);
@@ -214,6 +214,21 @@
   color: var(--accent) !important;
 }
 
+/* Edit | Preview segmented control */
+.fv-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.fv-seg button {
+  border: 0 !important;
+  border-radius: 0 !important;
+}
+.fv-seg button + button {
+  border-left: 1px solid var(--border) !important;
+}
+
 /* Run button */
 .run-btn {
   background: #1a4a1a !important;
@@ -239,7 +254,7 @@
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  background: #181818;
+  background: var(--c-panel);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   color: var(--text-dim);

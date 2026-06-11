@@ -61,12 +61,12 @@ func subagentSpecs() []subagentSpec {
 			ModeName:      "Researcher",
 			Kind:          subagentResearcher,
 			Toolset:       "web-research",
-			TimeoutSecs:   180,
-			MaxTurns:      4,
-			MaxToolCalls:  8,
-			MaxOutput:     1800,
+			TimeoutSecs:   300,
+			MaxTurns:      8,
+			MaxToolCalls:  16,
+			MaxOutput:     2400,
 			ContextBudget: 24576,
-			Contract:      "Return: Findings, Sources/Evidence, Uncertainty, Recommended next step.",
+			Contract:      "Return: Findings, Sources/Evidence, Searches tried, Uncertainty, Recommended next step. If no good sources are found, say exactly what searches/tools failed and propose the next local enumeration step.",
 		},
 		{
 			ToolName:      "subagent_review",
@@ -149,9 +149,6 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	a.mu.Unlock()
 
 	profile := activeProfile(&cfg, &profiles)
-	if spec.ContextBudget > 0 && spec.ContextBudget < profile.CtxTokens {
-		profile.CtxTokens = spec.ContextBudget
-	}
 	timeout := boundedValue(args.TimeoutSeconds, spec.TimeoutSecs, 10, spec.TimeoutSecs)
 	maxToolCalls := boundedValue(args.MaxToolCalls, spec.MaxToolCalls, 0, spec.MaxToolCalls)
 
@@ -180,23 +177,31 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	}
 
 	var final strings.Builder
+	var evidence []string
 	toolCallsUsed := 0
 	for turn := 0; turn < spec.MaxTurns; turn++ {
 		if ctx.Err() != nil {
-			return finalSubagentReport(spec, final.String(), toolCallsUsed, "timeout or cancellation"), ctx.Err()
+			return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "timeout or cancellation"), ctx.Err()
 		}
-		req := buildChatRequest(profile, msgs, toolDefs, "auto", false)
+		reqToolDefs := toolDefs
+		toolChoice := "auto"
+		if maxToolCalls >= 0 && toolCallsUsed >= maxToolCalls {
+			reqToolDefs = nil
+			toolChoice = "none"
+			msgs = append(msgs, llm.NewTextMessage(llm.RoleUser, "Your subagent tool budget is exhausted. Do not call tools. Return the required output contract now using only the evidence already gathered, including searches tried and uncertainty."))
+		}
+		req := buildChatRequest(profile, msgs, reqToolDefs, toolChoice, false, subagentUsesCodingParams(spec.Kind))
 		req.MaxTokens = spec.MaxOutput
 		req.Temperature = 0.2
 		ch, err := client.Chat(ctx, req)
 		if err != nil {
-			return finalSubagentReport(spec, final.String(), toolCallsUsed, err.Error()), err
+			return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, err.Error()), err
 		}
 		var text strings.Builder
 		var calls []llm.ToolCallDef
 		for delta := range ch {
 			if delta.Error != nil {
-				return finalSubagentReport(spec, final.String(), toolCallsUsed, delta.Error.Error()), delta.Error
+				return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, delta.Error.Error()), delta.Error
 			}
 			text.WriteString(delta.Content)
 			if len(delta.ToolCalls) > 0 {
@@ -210,7 +215,7 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 			msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: "", ToolCalls: calls})
 		}
 		if len(calls) == 0 {
-			return finalSubagentReport(spec, final.String(), toolCallsUsed, ""), nil
+			return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, ""), nil
 		}
 		for _, call := range calls {
 			if maxToolCalls >= 0 && toolCallsUsed >= maxToolCalls {
@@ -235,13 +240,14 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 					result = result + "\n" + verification
 				}
 			}
-			if guarded, findings := guardToolResult(call.Function.Name, result); len(findings) > 0 {
+			if guarded, findings := guardToolResult(call.Function.Name, result, cfg.Tools.RedactSecrets); len(findings) > 0 {
 				result = guarded
 			}
+			evidence = appendSubagentEvidence(evidence, call.Function.Name, result)
 			msgs = append(msgs, newToolResultMsg(call.ID, call.Function.Name, truncateToolResult(result, cfg.Tools.MaxToolResultChars)))
 		}
 	}
-	return finalSubagentReport(spec, final.String(), toolCallsUsed, "turn budget exhausted"), nil
+	return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "turn budget exhausted"), nil
 }
 
 func buildSubagentSystemPrompt(spec subagentSpec, profile settings.Profile, timeout, maxToolCalls int) string {
@@ -249,6 +255,7 @@ func buildSubagentSystemPrompt(spec subagentSpec, profile settings.Profile, time
 	fmt.Fprintf(&sb, "You are a bounded %s subagent inside TheMauler.\n", spec.Kind)
 	fmt.Fprintf(&sb, "Profile: %s. Toolset: %s. Timeout: %ds. Context budget: %d tokens. Tool-call budget: %d.\n", profile.Name, spec.Toolset, timeout, spec.ContextBudget, maxToolCalls)
 	sb.WriteString("Work only on the delegated task. Use tools when they materially improve evidence. Stop when the output contract is satisfied.\n")
+	sb.WriteString("You must always produce a final textual report. If searches fail, report the failed queries/tools and uncertainty rather than returning blank output.\n")
 	if !spec.Destructive {
 		sb.WriteString("This subagent is read-only. Do not request write/edit/shell mutations.\n")
 	}
@@ -264,10 +271,10 @@ func buildSubagentUserPrompt(args subagentArgs) string {
 	return args.Task + "\n\nProvided context:\n" + strings.TrimSpace(args.Context)
 }
 
-func finalSubagentReport(spec subagentSpec, output string, toolCalls int, stop string) string {
+func finalSubagentReport(spec subagentSpec, output string, evidence []string, toolCalls int, stop string) string {
 	output = strings.TrimSpace(output)
 	if output == "" {
-		output = "No subagent output was produced."
+		output = fallbackSubagentOutput(spec, evidence)
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Subagent: %s\nToolset: %s\nTool calls used: %d\n", spec.Kind, spec.Toolset, toolCalls)
@@ -276,6 +283,57 @@ func finalSubagentReport(spec subagentSpec, output string, toolCalls int, stop s
 	}
 	sb.WriteString("\n")
 	sb.WriteString(output)
+	return sb.String()
+}
+
+func subagentUsesCodingParams(kind subagentKind) bool {
+	switch kind {
+	case subagentReviewer, subagentTestFix:
+		return true
+	default:
+		return false
+	}
+}
+
+func appendSubagentEvidence(evidence []string, toolName, result string) []string {
+	result = strings.TrimSpace(result)
+	if result == "" {
+		result = "(empty result)"
+	}
+	if len(result) > 500 {
+		result = result[:500] + "... [truncated]"
+	}
+	evidence = append(evidence, fmt.Sprintf("%s: %s", toolName, result))
+	if len(evidence) > 8 {
+		evidence = evidence[len(evidence)-8:]
+	}
+	return evidence
+}
+
+func fallbackSubagentOutput(spec subagentSpec, evidence []string) string {
+	var sb strings.Builder
+	sb.WriteString("Findings:\n")
+	if len(evidence) == 0 {
+		sb.WriteString("- No usable evidence was gathered before the subagent stopped.\n")
+	} else {
+		sb.WriteString("- The subagent stopped before writing a synthesis. Recent evidence/tool results are preserved below.\n")
+	}
+	sb.WriteString("\nSources/Evidence:\n")
+	if len(evidence) == 0 {
+		sb.WriteString("- None.\n")
+	} else {
+		for _, item := range evidence {
+			sb.WriteString("- ")
+			sb.WriteString(strings.ReplaceAll(item, "\n", "\n  "))
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\nUncertainty:\n- Search/subagent budget ended before a reliable conclusion was produced.\n")
+	if spec.Kind == subagentResearcher {
+		sb.WriteString("\nRecommended next step:\n- Continue with local enumeration and targeted searches using explicit queries; avoid treating this incomplete subagent result as evidence.\n")
+	} else {
+		sb.WriteString("\nRecommended next step:\n- Continue from the preserved evidence above.\n")
+	}
 	return sb.String()
 }
 

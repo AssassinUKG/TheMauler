@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, useCallback, useMemo, type KeyboardEvent }
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Undo, EncodeFileBase64, PickSaveFilePath, SaveFileContent, GetWorkingDir, type ChatAttachment } from '../wailsjs/go'
-import type { ChatMessage } from '../App'
+import type { ChatMessage, ToolCountdown } from '../App'
 import './ChatPane.css'
 
 interface Props {
@@ -14,6 +14,7 @@ interface Props {
   activeProfile: string
   autonomous: boolean
   pendingInterrupt: boolean
+  toolCountdown: ToolCountdown | null
   onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[]) => void
   onCancelPending: () => void
   onStopAgent: () => void
@@ -32,6 +33,7 @@ export function ChatPane({
   activeProfile,
   autonomous,
   pendingInterrupt,
+  toolCountdown,
   onSubmitMessage,
   onCancelPending,
   onStopAgent,
@@ -49,6 +51,7 @@ export function ChatPane({
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearch, setShowSearch] = useState(false)
+  const [nowMs, setNowMs] = useState(Date.now())
 
   const visibleMessages = useMemo(() => {
     if (!searchQuery.trim()) return messages
@@ -63,6 +66,12 @@ export function ChatPane({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamBuffer])
+
+  useEffect(() => {
+    if (!toolCountdown) return
+    const id = window.setInterval(() => setNowMs(Date.now()), 500)
+    return () => window.clearInterval(id)
+  }, [toolCountdown])
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
@@ -311,6 +320,9 @@ export function ChatPane({
             {thinkingBuffer && (
               <ThinkingBlock text={thinkingBuffer} live />
             )}
+            {toolCountdown && (
+              <ToolCountdownCard countdown={toolCountdown} nowMs={nowMs} onCancel={onStopAgent} />
+            )}
             {streamBuffer ? (
               <div className="msg-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamBuffer}</ReactMarkdown>
@@ -392,6 +404,9 @@ export function ChatPane({
             placeholder="Ask anything... drop a file to attach. Ctrl+Enter sends."
             rows={3}
             disabled={false}
+            spellCheck
+            lang="en"
+            autoCapitalize="sentences"
           />
           <div className="chat-input-actions">
             {streaming && (
@@ -438,6 +453,46 @@ function AttachmentChip({
       {onRemove && <button className="attachment-remove" onClick={onRemove} title="Remove attachment">x</button>}
     </div>
   )
+}
+
+function ToolCountdownCard({
+  countdown,
+  nowMs,
+  onCancel,
+}: {
+  countdown: ToolCountdown
+  nowMs: number
+  onCancel: () => void
+}) {
+  const remainingMs = Math.max(0, countdown.deadline - nowMs)
+  const remainingSec = Math.ceil(remainingMs / 1000)
+  const elapsed = Math.max(0, nowMs - countdown.startedAt)
+  const total = Math.max(1, countdown.timeoutSec * 1000)
+  const pct = Math.min(100, Math.round((elapsed / total) * 100))
+  const isShell = countdown.name === 'shell' || countdown.name === 'bash'
+  return (
+    <div className="tool-countdown-card">
+      <div className="tool-countdown-row">
+        <div className="tool-countdown-title">
+          <span>{countdown.name}</span>
+          <span>{formatDuration(remainingSec)} left</span>
+        </div>
+        <button className="tool-countdown-cancel" onClick={onCancel} title={isShell ? 'Cancel this shell call' : 'Stop the current tool call'}>
+          {isShell ? 'Cancel shell' : 'Cancel'}
+        </button>
+      </div>
+      <div className="tool-countdown-track">
+        <div className="tool-countdown-fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = seconds % 60
+  if (m <= 0) return `${s}s`
+  return `${m}:${String(s).padStart(2, '0')}`
 }
 
 function tryPrettyJson(text: string): string {

@@ -125,6 +125,11 @@ func (r *TaskRun) stop(reason, detail string) {
 	}
 }
 
+func (r *TaskRun) stopTerminal(reason, detail string) {
+	r.StopReason = strings.TrimSpace(reason)
+	r.StopDetail = trimRunText(detail)
+}
+
 func saveTaskRun(run TaskRun, cfg *settings.LoggingConfig) error {
 	if cfg != nil && !cfg.Enabled {
 		return nil

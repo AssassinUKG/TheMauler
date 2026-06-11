@@ -9,9 +9,13 @@ export function AddMemory(arg1:string,arg2:string,arg3:Array<string>):Promise<ap
 
 export function AddToolSafeRule(arg1:string,arg2:string):Promise<void>;
 
+export function AddWorkspaceFolder(arg1:string,arg2:string):Promise<Array<settings.WorkspaceFolder>>;
+
 export function ApplySafetyPreset(arg1:string):Promise<void>;
 
 export function BenchmarkProfile(arg1:settings.Profile,arg2:settings.Provider):Promise<app.ProfileBenchmarkResult>;
+
+export function BenchmarkProfileWithCases(arg1:settings.Profile,arg2:settings.Provider,arg3:Array<app.BenchmarkSpecInput>):Promise<app.ProfileBenchmarkResult>;
 
 export function ClearBenchmarkRuns():Promise<void>;
 
@@ -51,9 +55,13 @@ export function GetHistoryStats():Promise<app.HistoryStats>;
 
 export function GetHomeDir():Promise<string>;
 
+export function GetLabStatus():Promise<app.LabStatus>;
+
 export function GetProfileNames():Promise<Array<string>>;
 
 export function GetProfiles():Promise<settings.ProfilesFile>;
+
+export function GetProjectInstructionsSummary():Promise<string>;
 
 export function GetSettings():Promise<settings.Settings>;
 
@@ -62,6 +70,8 @@ export function GetSkill(arg1:string):Promise<app.Skill>;
 export function GetUserProfile():Promise<string>;
 
 export function GetWorkingDir():Promise<string>;
+
+export function KillLocalInferenceServers():Promise<app.MaintenanceResult>;
 
 export function ListBenchmarkRuns():Promise<Array<app.ProfileBenchmarkResult>>;
 
@@ -79,6 +89,10 @@ export function ListTaskRuns():Promise<Array<app.TaskRun>>;
 
 export function ListTodos():Promise<Array<tools.TodoItem>>;
 
+export function ListWSLDistros():Promise<Array<string>>;
+
+export function ListWorkspaceFolders():Promise<Array<settings.WorkspaceFolder>>;
+
 export function LoadSession(arg1:string):Promise<Array<app.SessionChatMessage>>;
 
 export function OpenShell():Promise<string>;
@@ -93,9 +107,13 @@ export function ReadFileContent(arg1:string):Promise<string>;
 
 export function ReindexSessionRecall():Promise<number>;
 
+export function RemoveWorkspaceFolder(arg1:string):Promise<Array<settings.WorkspaceFolder>>;
+
 export function RenameFile(arg1:string,arg2:string):Promise<void>;
 
 export function RespondConfirm(arg1:boolean):Promise<void>;
+
+export function RestartWSL():Promise<app.MaintenanceResult>;
 
 export function RollbackDepth():Promise<number>;
 
@@ -113,9 +131,17 @@ export function SaveSkill(arg1:app.Skill):Promise<app.Skill>;
 
 export function SaveUserProfile(arg1:string):Promise<void>;
 
+export function ScaffoldWorkspaceFolders(arg1:string,arg2:Array<string>):Promise<Array<string>>;
+
 export function SearchSessionRecall(arg1:string,arg2:number):Promise<Array<sessionstore.SearchResult>>;
 
+export function SelectProjectInstructionDirectory(arg1:string):Promise<string>;
+
+export function SelectProjectInstructionFile(arg1:string):Promise<string>;
+
 export function SelectWorkingDir(arg1:string):Promise<string>;
+
+export function SelectWorkspaceFolder(arg1:string):Promise<string>;
 
 export function SendMessage(arg1:string,arg2:Array<string>,arg3:Array<app.ChatAttachment>):Promise<void>;
 
@@ -139,8 +165,12 @@ export function SwitchProfile(arg1:string):Promise<void>;
 
 export function Undo():Promise<string>;
 
+export function UpdateLabContext(arg1:string,arg2:string,arg3:string):Promise<app.LabStatus>;
+
 export function UpdateProfiles(arg1:settings.ProfilesFile):Promise<void>;
 
 export function UpdateSettings(arg1:settings.Settings):Promise<void>;
 
 export function UseProfile(arg1:string,arg2:settings.Settings,arg3:settings.ProfilesFile):Promise<void>;
+
+export function UseProjectInstructionFile(arg1:string):Promise<settings.Settings>;

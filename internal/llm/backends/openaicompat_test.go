@@ -3,8 +3,10 @@ package backends
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -441,6 +443,50 @@ func TestModelsRespectsShorterCallerTimeout(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatalf("Models ignored shorter caller timeout")
+	}
+}
+
+func TestChatCancellationPostsInferenceCancelForLlamaCpp(t *testing.T) {
+	var cancelCalls atomic.Int32
+	streamStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"\"}]}\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			close(streamStarted)
+			<-r.Context().Done()
+		case "/v1/inference/cancel":
+			cancelCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"cancelled":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("llamacpp", server.URL+"/v1", "qwen", 32768, "", true)
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := client.Chat(ctx, llm.Request{
+		Messages: []llm.Message{llm.NewTextMessage(llm.RoleUser, "hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-streamStarted
+	cancel()
+	for range ch {
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for cancelCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cancelCalls.Load() == 0 {
+		t.Fatal("expected /v1/inference/cancel to be called after chat cancellation")
 	}
 }
 

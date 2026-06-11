@@ -21,6 +21,9 @@ export interface Settings {
     confirm_exec: boolean
     bash_timeout: number
     shell_backend: string
+    shell_mode: string
+    shell_distro: string
+    shell_user: string
     artifact_timeout: number
     web_engine: string
     web_base_url: string
@@ -31,6 +34,7 @@ export interface Settings {
     max_failed_fetches: number
     max_browser_actions: number
     max_tool_result_chars: number
+    protected_paths: string[]
     active_toolset: string
     toolsets: Record<string, string[]>
     enabled_tools: Record<string, boolean>
@@ -54,6 +58,8 @@ export interface Settings {
     project_doc_max_bytes: number
     project_doc_fallback_filenames: string[]
     workspace_dir: string
+    open_folders: WorkspaceFolder[]
+    lab: LabContext
   }
   memory: {
     enabled: boolean
@@ -72,6 +78,9 @@ export interface Settings {
     syntax_highlight: boolean
     diff_colours: boolean
     chat_timestamps: boolean
+    tool_countdown: boolean
+    terminal_default_open: boolean
+    terminal_height: number
     tree_width: number
     chat_width: number
     artifact_width: number
@@ -117,6 +126,29 @@ export interface ToolSafeRule {
   created_at: string
 }
 
+export interface WorkspaceFolder {
+  path: string
+  name: string
+  role: string
+}
+
+export interface LabContext {
+  target: string
+  vpn_interface: string
+  latest_artifact: string
+}
+
+export interface LabStatus {
+  agent_root: string
+  shell_backend: string
+  shell_distro: string
+  shell_user: string
+  target: string
+  vpn_interface: string
+  latest_artifact: string
+  open_folders: WorkspaceFolder[]
+}
+
 export interface GenerationParams {
   temperature: number
   top_p: number
@@ -140,6 +172,7 @@ export interface Profile {
   nothinking: GenerationParams
   spec_type: string        // "" | "draft-mtp"
   spec_draft_n_max: number // draft tokens per step, 0 = server default
+  spec_draft_model: string // optional GGUF draft model path
 }
 
 export interface Provider {
@@ -215,6 +248,7 @@ export interface Skill {
   description: string
   version: string
   tags: string[]
+  source_path: string
   body: string
   raw: string
   created_at: string
@@ -411,6 +445,39 @@ export const SetWorkingDir = (dir: string): Promise<void> =>
 export const SelectWorkingDir = (defaultDir: string): Promise<string> =>
   call('app.App.SelectWorkingDir', defaultDir)
 
+export const ListWorkspaceFolders = (): Promise<WorkspaceFolder[]> =>
+  call('app.App.ListWorkspaceFolders')
+
+export const AddWorkspaceFolder = (path: string, role: string): Promise<WorkspaceFolder[]> =>
+  call('app.App.AddWorkspaceFolder', path, role)
+
+export const RemoveWorkspaceFolder = (path: string): Promise<WorkspaceFolder[]> =>
+  call('app.App.RemoveWorkspaceFolder', path)
+
+export const SelectWorkspaceFolder = (defaultDir: string): Promise<string> =>
+  call('app.App.SelectWorkspaceFolder', defaultDir)
+
+export const GetLabStatus = (): Promise<LabStatus> =>
+  call('app.App.GetLabStatus')
+
+export const UpdateLabContext = (target: string, vpnInterface: string, latestArtifact: string): Promise<LabStatus> =>
+  call('app.App.UpdateLabContext', target, vpnInterface, latestArtifact)
+
+export const ScaffoldWorkspaceFolders = (root: string, names: string[]): Promise<string[]> =>
+  call('app.App.ScaffoldWorkspaceFolders', root, names)
+
+export const SelectProjectInstructionFile = (defaultPath: string): Promise<string> =>
+  call('app.App.SelectProjectInstructionFile', defaultPath)
+
+export const SelectProjectInstructionDirectory = (defaultPath: string): Promise<string> =>
+  call('app.App.SelectProjectInstructionDirectory', defaultPath)
+
+export const UseProjectInstructionFile = (path: string): Promise<Settings> =>
+  call('app.App.UseProjectInstructionFile', path)
+
+export const GetProjectInstructionsSummary = (): Promise<string> =>
+  call('app.App.GetProjectInstructionsSummary')
+
 export const PickSaveFilePath = (defaultName: string): Promise<string> =>
   call<string>('app.App.PickSaveFilePath', defaultName)
 
@@ -449,6 +516,20 @@ export const PingProvider = (provider: Provider): Promise<string> =>
 
 export const ListModelsForProvider = (provider: Provider): Promise<string[]> =>
   call('app.App.ListModelsForProvider', provider)
+
+export const ListWSLDistros = (): Promise<string[]> =>
+  call('app.App.ListWSLDistros')
+
+export interface MaintenanceResult {
+  summary: string
+  lines: string[]
+}
+
+export const KillLocalInferenceServers = (): Promise<MaintenanceResult> =>
+  call('app.App.KillLocalInferenceServers')
+
+export const RestartWSL = (): Promise<MaintenanceResult> =>
+  call('app.App.RestartWSL')
 
 export interface ProfileBenchmarkResult {
   status: string
@@ -491,8 +572,26 @@ export interface BenchmarkCase {
   error?: string
 }
 
+export interface BenchmarkSpecInput {
+  name: string
+  system: string
+  user: string
+  max_tokens: number
+  temperature: number
+  top_p: number
+  top_k: number
+  min_p: number
+  presence_penalty: number
+  seed: number
+  expect_json: boolean
+  tool_mode: string
+}
+
 export const BenchmarkProfile = (profile: Profile, provider: Provider): Promise<ProfileBenchmarkResult> =>
   call('app.App.BenchmarkProfile', profile, provider)
+
+export const BenchmarkProfileWithCases = (profile: Profile, provider: Provider, cases: BenchmarkSpecInput[]): Promise<ProfileBenchmarkResult> =>
+  call('app.App.BenchmarkProfileWithCases', profile, provider, cases)
 
 export const ListBenchmarkRuns = (): Promise<ProfileBenchmarkResult[]> =>
   call('app.App.ListBenchmarkRuns')

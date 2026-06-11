@@ -18,6 +18,7 @@ export function TerminalPane({ visible }: Props) {
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const historyRef = useRef<string[]>([])
@@ -49,12 +50,21 @@ export function TerminalPane({ visible }: Props) {
     const offs = [
       EventsOn('mauler:shell_output', (...args: unknown[]) => {
         const msg = args[0] as { id: string; data: string; stream: 'stdout' | 'stderr' }
+        if (isMaulerWrapperEcho(msg.data)) return
         setLines(prev => [...prev, { data: msg.data, stream: msg.stream }])
       }),
       EventsOn('mauler:shell_exit', (...args: unknown[]) => {
         const msg = args[0] as { id: string }
         setSessionId(prev => (prev === msg.id ? null : prev))
         setLines(prev => [...prev, { data: '[shell exited]', stream: 'system' }])
+      }),
+      EventsOn('mauler:terminal_command_start', (...args: unknown[]) => {
+        const msg = args[0] as { command: string; timeout: string }
+        setLines(prev => [...prev, { data: `[AI running ${msg.timeout}s] ${msg.command}`, stream: 'system' }])
+      }),
+      EventsOn('mauler:terminal_command_done', (...args: unknown[]) => {
+        const msg = args[0] as { exit_code: string }
+        setLines(prev => [...prev, { data: `[AI command finished: exit ${msg.exit_code}]`, stream: 'system' }])
       }),
     ]
     return () => offs.forEach(off => off())
@@ -65,7 +75,7 @@ export function TerminalPane({ visible }: Props) {
     try {
       const id = await OpenShell()
       setSessionId(id)
-      setLines([{ data: '[shell started — type commands below]', stream: 'system' }])
+      setLines([{ data: '[shell started - type commands below]', stream: 'system' }])
     } catch (e) {
       setLines(prev => [...prev, { data: `[error starting shell: ${e}]`, stream: 'stderr' }])
     } finally {
@@ -75,9 +85,12 @@ export function TerminalPane({ visible }: Props) {
 
   const sendInput = useCallback(async () => {
     if (!sessionId) return
-    const text = input
+    const text = input.trimEnd()
+    if (!text.trim()) {
+      setInput('')
+      return
+    }
     setInput('')
-    setLines(prev => [...prev, { data: `$ ${text}`, stream: 'system' }])
     // Push to history (most recent first, cap at 100)
     historyRef.current = [text, ...historyRef.current.slice(0, 99)]
     historyIdxRef.current = -1
@@ -119,6 +132,17 @@ export function TerminalPane({ visible }: Props) {
     setLines(prev => [...prev, { data: '[shell killed]', stream: 'system' }])
   }, [sessionId])
 
+  const restartShell = useCallback(async () => {
+    if (sessionId) {
+      await ShellClose(sessionId).catch(() => null)
+    }
+    await startShell()
+  }, [sessionId, startShell])
+
+  const copyOutput = useCallback(async () => {
+    await navigator.clipboard.writeText(lines.map(line => line.data).join('\n')).catch(() => null)
+  }, [lines])
+
   // Keep mounted so output history and session ID survive panel toggle.
   // Visibility is controlled by the parent container's display/height.
   return (
@@ -127,16 +151,22 @@ export function TerminalPane({ visible }: Props) {
         <span className="terminal-title">Terminal</span>
         <div className="terminal-header-actions">
           {!sessionId ? (
-            <button
-              className="terminal-btn"
-              onClick={() => void startShell()}
-              disabled={starting}
-            >
-              {starting ? 'Starting…' : 'Start shell'}
-            </button>
+            <>
+              <button
+                className="terminal-btn"
+                onClick={() => void startShell()}
+                disabled={starting}
+              >
+                {starting ? 'Starting...' : 'Start shell'}
+              </button>
+              <button className="terminal-btn" onClick={() => setShowHelp(v => !v)}>Help</button>
+            </>
           ) : (
             <>
               <button className="terminal-btn" onClick={() => setLines([])}>Clear</button>
+              <button className="terminal-btn" onClick={() => void copyOutput()}>Copy</button>
+              <button className="terminal-btn" onClick={() => void restartShell()}>Restart</button>
+              <button className="terminal-btn" onClick={() => setShowHelp(v => !v)}>Help</button>
               <button className="terminal-btn terminal-btn-danger" onClick={() => void killShell()}>Kill</button>
             </>
           )}
@@ -144,14 +174,15 @@ export function TerminalPane({ visible }: Props) {
       </div>
 
       <div className="terminal-output">
+        {showHelp && <TerminalHelp />}
         {lines.map((line, i) => (
-          <div key={i} className={`terminal-line terminal-${line.stream}`}>{line.data || ' '}</div>
+          <div key={i} className={`terminal-line terminal-${line.stream}`}>{line.data || ' '}</div>
         ))}
         <div ref={bottomRef} />
       </div>
 
       <div className="terminal-input-row">
-        <span className="terminal-prompt">{sessionId ? '$' : '—'}</span>
+        <span className="terminal-prompt">{sessionId ? '$' : '-'}</span>
         <input
           ref={inputRef}
           className="terminal-input"
@@ -159,13 +190,29 @@ export function TerminalPane({ visible }: Props) {
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={!sessionId}
-          placeholder={sessionId ? 'Type command and press Enter…' : 'Click "Start shell" above'}
+          placeholder={sessionId ? 'Type command and press Enter...' : 'Click "Start shell" above'}
           spellCheck={false}
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
         />
       </div>
+    </div>
+  )
+}
+
+function isMaulerWrapperEcho(line: string): boolean {
+  return line.includes('__MAULER_START_') || line.includes('__MAULER_DONE_')
+}
+
+function TerminalHelp() {
+  return (
+    <div className="terminal-help">
+      <div className="terminal-help-title">Terminal Help</div>
+      <div>Type commands and press Enter. AI shell calls appear here when shared terminal mode is enabled.</div>
+      <div><strong>Kill</strong> stops the shell. <strong>Restart</strong> starts clean. <strong>Copy</strong> copies visible output.</div>
+      <div>Use chat Stop to interrupt an AI run. After manual commands, ask the AI to continue from the terminal output.</div>
+      <div>Switch Settings &gt; Tools &gt; AI shell mode between shared terminal and isolated one-shot.</div>
     </div>
   )
 }

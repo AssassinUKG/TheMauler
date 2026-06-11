@@ -1,6 +1,7 @@
 # TheMauler — Feature Backlog
 
-All 10 planned improvements are implemented.
+The original 10 UI features (bottom table) are implemented. Active work continues in the
+regression log (R-series) and UI Ops tracker (U-series) below — see each row's Status.
 
 ---
 
@@ -27,6 +28,46 @@ These are the current issues to fix before adding new agent foundation features.
 | R15 | UI still hides important agent health/state behind secondary surfaces. | The Agent panel has logs and Doctor controls, but live run phase, diagnostics, collapsed panes, and guardrail notices are not prominent enough during failure debugging. | Fixed first pass: added live `mauler:run_state` in the bottom status bar, a top-bar Doctor action, collapsed Explorer/Agent rails, and clearer chat/log guardrail styling. |
 | R17 | Plain greetings can still trigger arbitrary tool calls from local Qwen. | A simple "hello" turn called skill tools and only then answered. `tool_choice:"none"` was not enough because local stacks still saw the tool schema and drifted toward available skills. | Fixed: conversational first turns now send no tool definitions at all. The detection covers general small talk and Q&A while still allowing short task prompts such as "fix bug", "run tests", "read README.md", and "list files" to use tools. |
 | R16 | Subagent delegation is only a plan, not a bounded runtime capability. | Tracker called for focused Researcher, Reviewer, Test/Fix, and Summarizer runners with explicit profile, toolset, timeout, context budget, and output contracts. | Fixed first pass: added `subagent_research`, `subagent_review`, `subagent_testfix`, and `subagent_summarize` tools. Each uses scratch history, bounded turns/tool calls/time, an explicit toolset, current workspace context, guardrailed tool results, and a fixed report contract. |
+| R18 | Backend inference failures can be misreported and subagent loads can downshift a shared local backend. | Latest run `task-2026-06-03T19-10-00+01-00` ended after InferenceBridge returned `HTTP 500` for `http://127.0.0.1:20688/completion`, but the task log kept an older `tool_disabled` stop reason from an earlier `web_search` attempt. InferenceBridge logs show the parent loaded Qwen at 32768 ctx, then a subagent/request reloaded the same model at 24576 ctx with thinking disabled. | Fixed first pass: terminal model/client errors override older recoverable stop reasons; InferenceBridge records post-failure health/slot/props/stderr diagnostics; same-model lower/equal context requests reuse the larger loaded backend instead of reloading down; Mauler logs runtime mismatches before generation; subagents no longer shrink backend launch ctx; pre-output inference failures get one bounded retry; Doctor warns about shared-backend subagent risk. |
+| R19 | Master workflow skills can consume too much context when registered. | Registering a large external master skill caused the bottom token bar to jump because the source could be appended into chat/system context instead of being retrieved only when needed. | Fixed: master/project workflow sources are registered as lazy external skills. The system prompt now carries source metadata only, `skill_view master` returns an outline by default, and focused queries return capped matching excerpts. Regression tests cover no auto-injection and focused external-source retrieval. |
+| R20 | The live agent flow needs a first-class ops surface. | Reference UI review on 2026-06-11 showed useful patterns from an agent workbench: live KPIs, operational trace, memory/facts sidebar, operator console, and lab/workspace cards. TheMauler already captures run state, activity, task logs, memory, terminal output, todos, and lab context, but these are split across Chat, Logs, Memory, Agent, and Terminal. | First pass landed: center `Ops` view shows current phase, objective, KPIs, recent tool activity, latest run timeline, workspace/lab context, and next-step/fact style side panels. Follow-ups: live facts extracted during a run, richer terminal/command cards, browser screenshot previews, run replay/debug view, and richer lab run cards. |
+
+## UI Ops Update Tracker - 2026-06-11
+
+| # | Item | Status |
+|---|------|--------|
+| U1 | Live Ops Center tab for watching the agent in flow | First pass done |
+| U2 | Agent operational trace with outcome badges | First pass done |
+| U3 | Live memory/facts/open-questions panel | First pass done |
+| U4 | Run KPI strip: elapsed, tools, edits, tests, tokens, recoveries | Planned |
+| U5 | Workspace/lab run cards with target, shell, agent root, latest artifact | Planned |
+| U6 | Operator console cards: AI commands, pinned artifacts, pause/take-over | Planned |
+| U7 | Optional compact Ops visual density mode | Planned |
+| U8 | Shell timer cancel button and cleaner shared-terminal command display | First pass done |
+| U9 | Expand web/exploit research budgets and guidance | First pass done |
+| U10 | Harden shared-terminal scan execution with pipefail and no-head scan guidance | First pass done |
+| U11 | Fix shared-terminal DONE marker parsing and wrapper leakage in tool results | First pass done |
+| U12 | Treat requested README/writeup/docs updates as living milestone artifacts | First pass done |
+| U13 | Durable milestone memory and resume flow for HTB/lab/coding runs | First pass: run-end milestone memory landed |
+| U14 | Normalize shell tool command escaping before UI/log/shared-terminal execution | Fixed: shell entities decoded before command events, logs, confirmation, and execution |
+| U15 | Treat "hack the box" / user-root lab prompts as deep exploit research for web budgets | Fixed: spaced HTB and user/root language now triggers boosted research budget |
+| U16 | Prevent doc-required runs from finishing green without write/edit | Fixed: blocked run status plus file-tool-only documentation recovery turn |
+| U17 | Prune stale/moved workspace folders from Explorer instead of resurrecting them | Fixed: missing open-folder paths are filtered and config retargeted to moved HTB folder |
+| U18 | Keep registered master skill source internal instead of permanently displaying absolute folder paths | Fixed: UI, summaries, and skill_view labels hide full source path while lazy loading still works |
+
+## Durable Run Memory Plan - 2026-06-11
+
+Goal: make TheMauler reliably remember what it did, what it found, and where to resume, especially for long HTB/lab runs and documentation-driven tasks.
+
+| # | Item | Status |
+|---|------|--------|
+| M1 | Detect meaningful milestones from tool/run events: recon complete, service found, creds found, shell gained, user flag found, privesc lead, root flag, tests passed, doc updated | First pass done: recon, web research, fetched sources, file updates, flag-path sightings, stop reasons, and resume hints |
+| M2 | Auto-save concise project memory after milestones, scoped to the active workspace and tagged by target/box/repo | First pass done: task completion now writes concise workspace-scoped memory entries |
+| M3 | Treat requested writeups/READMEs/notes as living artifacts and require a doc update after each major verified milestone | First prompt pass done |
+| M4 | Add run-end summary memory: done, blocked reason, next action, important paths/artifacts, commands worth reusing | First pass done: status, stop reason, target, milestones, and next action are persisted |
+| M5 | Add an Ops/Memory card showing latest remembered facts, open questions, touched files, current target, and resume hints | Partial: Ops side panel first pass done |
+| M6 | Add a "Resume Last Run" helper that pulls latest task log, active todos, project memory, and named writeup sections into a compact prompt | Planned |
+| M7 | Add tests that milestone memory does not store secrets unless explicitly allowed, and that memories are workspace/target scoped | Partial: redaction and target-tag tests added |
 
 | # | Feature | Status |
 |---|---------|--------|

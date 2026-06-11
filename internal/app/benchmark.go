@@ -55,9 +55,32 @@ type BenchmarkCase struct {
 	Error            string  `json:"error,omitempty"`
 }
 
+type BenchmarkSpecInput struct {
+	Name            string  `json:"name"`
+	System          string  `json:"system"`
+	User            string  `json:"user"`
+	MaxTokens       int     `json:"max_tokens"`
+	Temperature     float64 `json:"temperature"`
+	TopP            float64 `json:"top_p"`
+	TopK            int     `json:"top_k"`
+	MinP            float64 `json:"min_p"`
+	PresencePenalty float64 `json:"presence_penalty"`
+	Seed            int64   `json:"seed"`
+	ExpectJSON      bool    `json:"expect_json"`
+	ToolMode        string  `json:"tool_mode"`
+}
+
 // BenchmarkProfile recommends profile settings from the runtime registry and,
 // when possible, runs a tiny live generation probe against the selected provider.
 func (a *App) BenchmarkProfile(profile settings.Profile, provider settings.Provider) ProfileBenchmarkResult {
+	return a.runBenchmarkProfile(profile, provider, nil)
+}
+
+func (a *App) BenchmarkProfileWithCases(profile settings.Profile, provider settings.Provider, inputs []BenchmarkSpecInput) ProfileBenchmarkResult {
+	return a.runBenchmarkProfile(profile, provider, inputs)
+}
+
+func (a *App) runBenchmarkProfile(profile settings.Profile, provider settings.Provider, inputs []BenchmarkSpecInput) ProfileBenchmarkResult {
 	profile.Backend = provider.Backend
 	profile.BaseURL = provider.BaseURL
 	profile.APIKeyEnv = provider.APIKeyEnv
@@ -90,6 +113,9 @@ func (a *App) BenchmarkProfile(profile settings.Profile, provider settings.Provi
 	}
 
 	cases := benchmarkCases(recommended)
+	if len(inputs) > 0 {
+		cases = benchmarkCasesFromInputs(inputs)
+	}
 	for _, spec := range cases {
 		result.Scenarios = append(result.Scenarios, runBenchmarkCase(client, spec))
 	}
@@ -145,13 +171,19 @@ func (a *App) ClearBenchmarkRuns() error {
 }
 
 type benchmarkSpec struct {
-	Name       string
-	System     string
-	User       string
-	MaxTokens  int
-	Tools      []llm.ToolDef
-	ToolChoice string
-	ExpectJSON bool
+	Name            string
+	System          string
+	User            string
+	MaxTokens       int
+	Temperature     float64
+	TopP            float64
+	TopK            int
+	MinP            float64
+	PresencePenalty float64
+	Seed            int64
+	Tools           []llm.ToolDef
+	ToolChoice      string
+	ExpectJSON      bool
 }
 
 func benchmarkCases(profile settings.Profile) []benchmarkSpec {
@@ -186,6 +218,44 @@ func benchmarkCases(profile settings.Profile) []benchmarkSpec {
 	}
 }
 
+func benchmarkCasesFromInputs(inputs []BenchmarkSpecInput) []benchmarkSpec {
+	out := make([]benchmarkSpec, 0, len(inputs))
+	for _, input := range inputs {
+		name := strings.TrimSpace(input.Name)
+		system := strings.TrimSpace(input.System)
+		user := strings.TrimSpace(input.User)
+		if name == "" || user == "" {
+			continue
+		}
+		if system == "" {
+			system = "You are a concise local assistant."
+		}
+		spec := benchmarkSpec{
+			Name:            name,
+			System:          system,
+			User:            user,
+			MaxTokens:       clampInt(input.MaxTokens, 16, 8192, 128),
+			Temperature:     input.Temperature,
+			TopP:            input.TopP,
+			TopK:            input.TopK,
+			MinP:            input.MinP,
+			PresencePenalty: input.PresencePenalty,
+			Seed:            input.Seed,
+			ExpectJSON:      input.ExpectJSON,
+		}
+		switch strings.ToLower(strings.TrimSpace(input.ToolMode)) {
+		case "auto", "required":
+			spec.Tools = benchmarkToolDefs()
+			spec.ToolChoice = strings.ToLower(strings.TrimSpace(input.ToolMode))
+		}
+		out = append(out, spec)
+	}
+	if len(out) == 0 {
+		return benchmarkCases(settings.Profile{})
+	}
+	return out
+}
+
 func benchmarkToolDefs() []llm.ToolDef {
 	return []llm.ToolDef{{
 		Type: "function",
@@ -208,10 +278,12 @@ func runBenchmarkCase(client llm.Client, spec benchmarkSpec) BenchmarkCase {
 		Tools:            spec.Tools,
 		ToolChoice:       spec.ToolChoice,
 		MaxTokens:        spec.MaxTokens,
-		Temperature:      0,
-		TopP:             1,
-		TopK:             1,
-		Seed:             1,
+		Temperature:      spec.Temperature,
+		TopP:             defaultFloat(spec.TopP, 1),
+		TopK:             defaultInt(spec.TopK, 1),
+		MinP:             spec.MinP,
+		PresencePenalty:  spec.PresencePenalty,
+		Seed:             defaultInt64(spec.Seed, 1),
 		EnableThinking:   false,
 		PreserveThinking: false,
 	}
@@ -499,4 +571,25 @@ func clampMaxTokens(profile *settings.Profile) {
 	if profile.NoThink.MaxTokens <= 0 || profile.NoThink.MaxTokens > safeMax {
 		profile.NoThink.MaxTokens = 4096
 	}
+}
+
+func defaultFloat(value, fallback float64) float64 {
+	if value == 0 {
+		return fallback
+	}
+	return value
+}
+
+func defaultInt(value, fallback int) int {
+	if value == 0 {
+		return fallback
+	}
+	return value
+}
+
+func defaultInt64(value, fallback int64) int64 {
+	if value == 0 {
+		return fallback
+	}
+	return value
 }

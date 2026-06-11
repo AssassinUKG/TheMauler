@@ -66,6 +66,29 @@ func Registry() []RuntimeProfile {
 			KVTypeV:        "q8_0",
 		},
 		{
+			Name:         "gemma4-26b-a4b-qat",
+			Family:       "gemma4",
+			Backend:      "llama.cpp",
+			Quant:        "QAT-Q4_0",
+			Adapter:      "gemma4",
+			ToolProtocol: "mixed",
+			Supports: Supports{
+				Tools:    true,
+				Thinking: false,
+				MTP:      false,
+			},
+			Defaults: Defaults{
+				Temperature:   1.0,
+				TopP:          0.95,
+				TopK:          64,
+				MinP:          0.05,
+				RepeatPenalty: 1.0,
+			},
+			RecommendedCtx: 49152,
+			KVTypeK:        "q8_0",
+			KVTypeV:        "q8_0",
+		},
+		{
 			Name:         "gemma4-31b",
 			Family:       "gemma4",
 			Backend:      "llama.cpp",
@@ -94,6 +117,42 @@ func Registry() []RuntimeProfile {
 // Match returns the best known runtime profile for the configured model.
 func Match(profile settings.Profile) (RuntimeProfile, bool) {
 	haystack := strings.ToLower(profile.Name + " " + profile.ModelID)
+	normalizedHaystack := normalizeRuntimeNeedle(haystack)
+	for _, rp := range Registry() {
+		if strings.Contains(haystack, "qat") && !strings.Contains(strings.ToLower(rp.Name), "qat") {
+			continue
+		}
+		if strings.Contains(haystack, strings.ToLower(rp.Name)) || strings.Contains(normalizedHaystack, normalizeRuntimeNeedle(rp.Name)) {
+			return rp, true
+		}
+	}
+	if strings.Contains(haystack, "qat") {
+		for _, rp := range Registry() {
+			if !strings.Contains(strings.ToLower(rp.Name), "qat") {
+				continue
+			}
+			sizeNeedle := sizeNeedleFromName(rp.Name)
+			if sizeNeedle == "" || !strings.Contains(haystack, sizeNeedle) {
+				continue
+			}
+			for _, needle := range matchNeedles(rp.Family) {
+				if strings.Contains(haystack, needle) {
+					return rp, true
+				}
+			}
+		}
+	}
+	for _, rp := range Registry() {
+		sizeNeedle := sizeNeedleFromName(rp.Name)
+		if sizeNeedle == "" || !strings.Contains(haystack, sizeNeedle) {
+			continue
+		}
+		for _, needle := range matchNeedles(rp.Family) {
+			if strings.Contains(haystack, needle) {
+				return rp, true
+			}
+		}
+	}
 	for _, rp := range Registry() {
 		for _, needle := range matchNeedles(rp.Family) {
 			if strings.Contains(haystack, needle) {
@@ -102,6 +161,27 @@ func Match(profile settings.Profile) (RuntimeProfile, bool) {
 		}
 	}
 	return RuntimeProfile{}, false
+}
+
+func normalizeRuntimeNeedle(text string) string {
+	var sb strings.Builder
+	for _, r := range strings.ToLower(text) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+func sizeNeedleFromName(name string) string {
+	for _, part := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '-' || r == '_' || r == '.'
+	}) {
+		if len(part) > 1 && strings.HasSuffix(part, "b") {
+			return part
+		}
+	}
+	return ""
 }
 
 func matchNeedles(family string) []string {

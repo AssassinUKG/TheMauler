@@ -306,6 +306,8 @@ function MemoryEditor({
         value={entry.content}
         onChange={e => onChange({ ...entry, content: e.target.value })}
         placeholder="What should the agent remember for this workspace?"
+        spellCheck
+        lang="en"
       />
       <input
         value={(entry.tags ?? []).join(', ')}

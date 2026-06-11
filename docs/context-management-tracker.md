@@ -19,12 +19,18 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - [x] Runtime lock snapshots for last active model/profile/backend launch.
 - [x] Dedicated Benchmarks tab for profile/model tests, saved runs, comparisons, and applying recommended settings.
 - [x] Context sweep benchmarking for 32k/65k/96k/current-ceiling candidates with fast/balanced/max-context scoring.
+- [x] Lazy master-skill loading: register external workflow sources as compact metadata, use `skill_view` outlines and focused query excerpts instead of injecting whole files.
+- [x] Shared visible terminal mode for WSL/bash shell tool calls, with terminal defaults, help, markers, and capped shell-history summaries.
+- [x] Readable web fetch extraction for HTML/GitHub pages so fetched pages shed CSS/script noise before entering context.
+- [x] UTF-16-ish Windows shell/terminal output decoding and ASCII lint summaries to avoid mojibake in chat/logs.
 - [ ] Memory/task-run dedicated inspection helpers.
 - [ ] Structural code intelligence tools (`symbol_search`, `find_references`, Go/TS symbol indexes).
 - [ ] Visual feedback loop for frontend/Wails verification.
 - [ ] Structured Git helpers for commit history, branch diffs, and change provenance.
 - [ ] Proactive monitoring/watchers for builds, logs, and long-running processes.
 - [ ] InferenceBridge raw-log integration in TheMauler logs/benchmark views for backend parser failures.
+- [x] First-pass VS Code-like workspace model with separate agent root, multiple open folders, generic lab status, and user-chosen folder scaffolding.
+- [ ] Recent/saved workspace files plus richer lab run cards.
 
 ## Notes
 
@@ -47,8 +53,12 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - Successful agent runs write `runtime-lock.json` to the Mauler config directory, capturing active profile/backend/model/context/spec settings for reproducibility.
 - Benchmark runs are persisted in the Mauler config directory, shown in the Benchmarks tab, compared by model/profile/context, and can apply a recommended profile back to `profiles.toml`.
 - Context benchmarks now classify runs as Fast daily, Large-code, Wide-context, or Max-context, with score penalties for slow throughput, high TTFT, JSON failure, output leaks, and missing or repaired-only tools.
+- Master/project workflow sources are stored as external source paths and exposed through lazy `skill_view` retrieval. Calling `skill_view master` without a query returns an outline; calling it with a focused query returns matching sections under an output cap.
+- Shell tool calls can now run through the visible Terminal pane when Settings > Tools > AI shell mode is `shared_terminal` and the backend is WSL/bash. The agent sees a summarized/capped shell result while the full interactive stream stays visible to the user.
+- HTML fetches now strip non-content elements and prefer main/article/body text; GitHub fetches prefer API/raw/readme content to avoid sending rendered-page chrome and CSS into context.
 - InferenceBridge now has source-side safety nets for Gemma content-only fenced JSON tool calls and explicit no-thinking guidance for `enable_thinking=false` / `reasoning_effort=none`.
 - InferenceBridge now strips Gemma-style `<|channel>thought ... <channel|>` markers in the shared normalizer and buffers streamed tool-request content until it can return clean OpenAI `tool_calls` or cleaned visible content.
+- 2026-06-03 backend reliability follow-up: add stop-reason precedence, runtime-lock mismatch events, subagent shared-backend guardrails, one bounded pre-output inference retry, and Doctor warnings for shared one-model backends that can be mutated by subagent loads.
 
 ## Next Capability Tracks
 
@@ -69,12 +79,15 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 2. Add first-class Qwen/Gemma adapter package around response normalization and tool-call repair.
 3. Extend the Benchmarks tab with live InferenceBridge/LM Studio telemetry capture, backend raw-output links, VRAM/KV fit snapshots, and MTP-specific probes.
 4. Add MTP launch validation against live backend props and selected model artifact name.
-5. Add JSON repair engine with schema validation metrics and failing examples in task logs.
-6. Add explicit Plan/Act/Observe/Reflect loop events and UI phase visualizer.
-7. Add capability router for automatic profile selection per task mode.
-8. Add eval harness for tool-call validity, JSON validity, loop count, latency, and task success.
-9. Add richer runtime telemetry from InferenceBridge/llama.cpp/LM Studio where available.
-10. Build planner/worker/critic orchestration on top of bounded subagents.
+5. Continue generalizing lazy/capped retrieval to session and document outputs so bulky re-fetchable data does not live in chat history.
+6. Add JSON repair engine with schema validation metrics and failing examples in task logs.
+7. Add explicit Plan/Act/Observe/Reflect loop events and UI phase visualizer.
+8. Add capability router for automatic profile selection per task mode.
+9. Add eval harness for tool-call validity, JSON validity, loop count, latency, and task success.
+10. Add richer runtime telemetry from InferenceBridge/llama.cpp/LM Studio where available.
+11. Build planner/worker/critic orchestration on top of bounded subagents.
+12. Continue the workspace redesign from `docs/workspace-redesign-plan.md` with recent/saved workspace files, workspace switcher, and richer lab run cards.
+13. Add terminal take-over controls, command artifact pinning, and long-running command progress cards on top of shared terminal mode.
 
 ## Verification
 

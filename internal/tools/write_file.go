@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 // WriteFile overwrites (or creates) a file with new content.
@@ -48,7 +51,14 @@ func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) 
 	if p.Path == "" {
 		return "", fmt.Errorf("write_file: path is required")
 	}
+	rawPath := strings.TrimSpace(p.Path)
 	p.Path = NormalizeHostPath(p.Path)
+	if err := rejectProtectedMutationPath(p.Path); err != nil {
+		return "", fmt.Errorf("write_file: %w", err)
+	}
+	if shouldWriteViaWSL(rawPath) {
+		return writeFileViaWSL(rawPath, p.Content, p.Append)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(p.Path), 0o755); err != nil {
 		return "", fmt.Errorf("write_file: mkdir: %w", err)
@@ -73,6 +83,58 @@ func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) 
 
 	lines := countLines(p.Content)
 	return fmt.Sprintf("wrote %s (%d lines)", p.Path, lines), nil
+}
+
+func shouldWriteViaWSL(path string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	if detectShellBackend("") != "wsl" {
+		return false
+	}
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if !strings.HasPrefix(path, "/") {
+		return false
+	}
+	if wslMountRE.MatchString(path) || msysPathRE.MatchString(path) {
+		return false
+	}
+	return true
+}
+
+func writeFileViaWSL(path, content string, appendMode bool) (string, error) {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("write_file: invalid WSL path %q", path)
+	}
+	op := ">"
+	action := "wrote"
+	if appendMode {
+		op = ">>"
+		action = "appended"
+	}
+	dir := filepath.ToSlash(filepath.Dir(path))
+	script := fmt.Sprintf("mkdir -p -- %s && cat %s %s", shellQuote(dir), op, shellQuote(path))
+	if dir == "." || dir == "/" {
+		script = fmt.Sprintf("cat %s %s", op, shellQuote(path))
+	}
+	args := []string{}
+	if distro := activeWSLDistro(); distro != "" {
+		args = append(args, "-d", distro)
+	}
+	args = append(args, "--", "bash", "-lc", script)
+	cmd := exec.Command("wsl.exe", args...)
+	cmd.Stdin = strings.NewReader(content)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return "", fmt.Errorf("write_file: wsl write: %w: %s", err, detail)
+		}
+		return "", fmt.Errorf("write_file: wsl write: %w", err)
+	}
+	lines := countLines(content)
+	return fmt.Sprintf("%s %s (%d lines, WSL)", action, path, lines), nil
 }
 
 func countLines(s string) int {

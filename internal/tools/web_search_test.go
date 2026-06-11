@@ -32,3 +32,14 @@ func TestFormatSearchResultsIncludesRank(t *testing.T) {
 		t.Fatalf("formatted output missing source rank: %s", out)
 	}
 }
+
+func TestReadableHTMLToTextPrefersMainContent(t *testing.T) {
+	page := `<html><head><style>.x{display:none}</style><script>alert(1)</script></head><body><nav>Home Pricing Login</nav><main><h1>Exploit Notes</h1><p>Use the endpoint with the token parameter.</p></main><footer>Footer noise</footer></body></html>`
+	got := readableHTMLToText(page)
+	if !strings.Contains(got, "Exploit Notes") || !strings.Contains(got, "token parameter") {
+		t.Fatalf("missing main content: %q", got)
+	}
+	if strings.Contains(got, "display:none") || strings.Contains(got, "alert(1)") || strings.Contains(got, "Home Pricing") {
+		t.Fatalf("included noisy page chrome: %q", got)
+	}
+}

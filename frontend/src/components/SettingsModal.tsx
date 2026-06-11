@@ -6,6 +6,7 @@ import {
   UpdateProfiles,
   PingProvider,
   ListModelsForProvider,
+  ListWSLDistros,
   BenchmarkProfile,
   UseProfile,
   type Settings,
@@ -94,6 +95,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [pingResult, setPingResult] = useState('')
   const [models, setModels] = useState<string[]>([])
   const [profileModels, setProfileModels] = useState<string[]>([])
+  const [wslDistros, setWslDistros] = useState<string[]>([])
   const [selectedProvider, setSelectedProvider] = useState('')
   const [selectedProfile, setSelectedProfile] = useState('')
   const [deleteProfileConfirm, setDeleteProfileConfirm] = useState<string | null>(null)
@@ -114,6 +116,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         setSelectedProvider(providerNames[0])
       }
     }).catch(() => {})
+    void ListWSLDistros().then(setWslDistros).catch(() => setWslDistros([]))
   }, [])
 
   const markDirty = () => {
@@ -306,6 +309,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       nothinking: { temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, max_tokens: 4096, seed: -1 },
       spec_type: '',
       spec_draft_n_max: 0,
+      spec_draft_model: '',
     }
     setProfilesFile({
       ...profilesFile,
@@ -750,8 +754,17 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                         onChange={e => updateProfileField(selectedProfile, 'spec_type', e.target.value)}
                       >
                         <option value="">Disabled</option>
-                        <option value="draft-mtp">draft-mtp (Qwen3 / MTP)</option>
+                        <option value="draft-mtp">draft-mtp (Gemma / Qwen MTP)</option>
                       </select>
+                    </Field>
+                    <Field label="Draft model path">
+                      <input
+                        value={profile.spec_draft_model ?? ''}
+                        disabled={!profile.spec_type}
+                        onChange={e => updateProfileField(selectedProfile, 'spec_draft_model', e.target.value)}
+                        placeholder="C:\\path\\to\\draft-model.gguf"
+                      />
+                      <span className="field-hint">Passed to llama.cpp as -md / draft_model_path.</span>
                     </Field>
                     <Field label="Draft tokens per step">
                       <input
@@ -952,9 +965,48 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     <option value="wsl">wsl</option>
                   </select>
                 </Field>
+                <Field label="AI shell mode">
+                  <select value={settings.tools.shell_mode || 'shared_terminal'}
+                    onChange={e => updateSettings('tools', { ...settings.tools, shell_mode: e.target.value })}>
+                    <option value="shared_terminal">shared terminal</option>
+                    <option value="isolated">isolated one-shot</option>
+                  </select>
+                  <span className="field-hint">Shared terminal runs AI shell calls in the visible terminal; isolated keeps the old hidden one-shot behavior.</span>
+                </Field>
+                <Field label="WSL distro">
+                  <select
+                    value={settings.tools.shell_distro || ''}
+                    disabled={(settings.tools.shell_backend || 'auto') !== 'wsl'}
+                    onChange={e => updateSettings('tools', { ...settings.tools, shell_distro: e.target.value })}
+                  >
+                    <option value="">default distro</option>
+                    {wslDistros.map(name => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                  <span className="field-hint">Used when Shell backend is wsl; choose kali-linux for Kali tools</span>
+                </Field>
+                <Field label="WSL user">
+                  <input
+                    value={settings.tools.shell_user || ''}
+                    disabled={(settings.tools.shell_backend || 'auto') !== 'wsl'}
+                    onChange={e => updateSettings('tools', { ...settings.tools, shell_user: e.target.value })}
+                    placeholder="root"
+                  />
+                  <span className="field-hint">Passed to wsl.exe as --user. Use root for Kali; WSL does not use a password here.</span>
+                </Field>
                 <Field label="Shell timeout (s)">
                   <input type="number" min={1} max={300} value={settings.tools.bash_timeout}
-                    onChange={e => updateSettings('tools', { ...settings.tools, bash_timeout: parseInt(e.target.value, 10) || 30 })} />
+                    onChange={e => updateSettings('tools', { ...settings.tools, bash_timeout: parseInt(e.target.value, 10) || 120 })} />
+                </Field>
+                <Field label="Protected paths">
+                  <textarea
+                    value={(settings.tools.protected_paths ?? []).join('\n')}
+                    onChange={e => updateSettings('tools', {
+                      ...settings.tools,
+                      protected_paths: e.target.value.split('\n').map(v => v.trim()).filter(Boolean)
+                    })}
+                    rows={3}
+                  />
+                  <span className="field-hint">Mauler blocks write/edit and destructive shell commands touching these paths</span>
                 </Field>
                 <Field label="Active toolset">
                   <select value={settings.tools.active_toolset || 'balanced'}
@@ -994,20 +1046,20 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     placeholder="BRAVE_API_KEY" />
                 </Field>
                 <Field label="Max searches">
-                  <input type="number" min={1} max={20} value={settings.tools.max_searches ?? 4}
-                    onChange={e => updateSettings('tools', { ...settings.tools, max_searches: parseInt(e.target.value, 10) || 4 })} />
+                  <input type="number" min={1} max={50} value={settings.tools.max_searches ?? 8}
+                    onChange={e => updateSettings('tools', { ...settings.tools, max_searches: parseInt(e.target.value, 10) || 8 })} />
                 </Field>
                 <Field label="Max fetches">
-                  <input type="number" min={1} max={30} value={settings.tools.max_fetches ?? 6}
-                    onChange={e => updateSettings('tools', { ...settings.tools, max_fetches: parseInt(e.target.value, 10) || 6 })} />
+                  <input type="number" min={1} max={80} value={settings.tools.max_fetches ?? 12}
+                    onChange={e => updateSettings('tools', { ...settings.tools, max_fetches: parseInt(e.target.value, 10) || 12 })} />
                 </Field>
                 <Field label="Max failed web attempts">
-                  <input type="number" min={1} max={10} value={settings.tools.max_failed_fetches ?? 3}
-                    onChange={e => updateSettings('tools', { ...settings.tools, max_failed_fetches: parseInt(e.target.value, 10) || 3 })} />
+                  <input type="number" min={1} max={20} value={settings.tools.max_failed_fetches ?? 5}
+                    onChange={e => updateSettings('tools', { ...settings.tools, max_failed_fetches: parseInt(e.target.value, 10) || 5 })} />
                 </Field>
                 <Field label="Max browser actions">
-                  <input type="number" min={1} max={100} value={settings.tools.max_browser_actions ?? 20}
-                    onChange={e => updateSettings('tools', { ...settings.tools, max_browser_actions: parseInt(e.target.value, 10) || 20 })} />
+                  <input type="number" min={1} max={150} value={settings.tools.max_browser_actions ?? 35}
+                    onChange={e => updateSettings('tools', { ...settings.tools, max_browser_actions: parseInt(e.target.value, 10) || 35 })} />
                 </Field>
                 <Field label="Max tool result chars">
                   <input type="number" min={0} max={100000} value={settings.tools.max_tool_result_chars ?? 8000}
@@ -1064,7 +1116,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                 <Field label="Project docs max bytes">
                   <input type="number" min={4096} max={131072} step={1024} value={settings.context.project_doc_max_bytes || 32768}
                     onChange={e => updateSettings('context', { ...settings.context, project_doc_max_bytes: parseInt(e.target.value, 10) || 32768 })} />
-                  <span className="field-hint">Caps layered MAULER/AGENTS instruction files before they enter context</span>
+                  <span className="field-hint">Caps layered project instruction files before they enter context. Master skills are registered from the Skills tab.</span>
                 </Field>
                 <Field label="Project doc filenames">
                   <input value={(settings.context.project_doc_fallback_filenames || ['MAULER.md', 'AGENTS.md']).join(', ')}
@@ -1072,7 +1124,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       ...settings.context,
                       project_doc_fallback_filenames: e.target.value.split(',').map(v => v.trim()).filter(Boolean)
                     })} />
-                  <span className="field-hint">Checked after MAULER.override.md and AGENTS.override.md in each workspace directory</span>
+                  <span className="field-hint">Checked in order in each workspace directory; directory entries load all Markdown files</span>
                 </Field>
                 <Field label="Workspace dir">
                   <input value={settings.context.workspace_dir ?? ''}
@@ -1161,6 +1213,24 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       onChange={e => updateSettings('ui', { ...settings.ui, think_indicator: e.target.checked })} />
                     Show thinking animation while streaming
                   </label>
+                </Field>
+                <Field label="Tool countdown">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.ui.tool_countdown ?? false}
+                      onChange={e => updateSettings('ui', { ...settings.ui, tool_countdown: e.target.checked })} />
+                    Show countdown for long-running tool calls
+                  </label>
+                </Field>
+                <Field label="Terminal default">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.ui.terminal_default_open ?? false}
+                      onChange={e => updateSettings('ui', { ...settings.ui, terminal_default_open: e.target.checked })} />
+                    Open terminal by default
+                  </label>
+                </Field>
+                <Field label="Terminal height">
+                  <input type="number" min={100} max={600} value={settings.ui.terminal_height || 260}
+                    onChange={e => updateSettings('ui', { ...settings.ui, terminal_height: parseInt(e.target.value, 10) || 260 })} />
                 </Field>
                 <Field label="Diff colours">
                   <label className="checkbox-label">

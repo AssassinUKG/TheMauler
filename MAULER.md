@@ -77,6 +77,12 @@ For LM Studio, use a current 0.4.x build or newer for Qwen3.6 parser fixes. TheM
 
 For llama.cpp, launch Qwen with Jinja/template support and keep server-side built-in tools disabled. TheMauler owns file/shell tools, confirmations, rollback, and task logs; llama.cpp built-ins such as `exec_shell_command`, `read_file`, `write_file`, `edit_file`, and `grep_search` can bypass those controls.
 
+For Gemma 4, use the model's Gemma 4 chat template rather than Gemma 3's `<start_of_turn>` template. Gemma 4 native tools use special-token markup such as `<|tool_call>call:name{...}<tool_call|>`; prefer a server parser that converts this into OpenAI `tool_calls`, and keep TheMauler's repair-text fallback enabled for llama.cpp/InferenceBridge content-only streams.
+
+Recommended Gemma 4 sampling from Google's defaults and Unsloth's Gemma 4 guide is `temperature=1.0`, `top_p=0.95`, and `top_k=64`. Keep thinking disabled for ordinary agent/tool work unless the serving stack is explicitly using the Gemma 4 reasoning parser, because raw `<|channel>thought ... <channel|>` output is easy for local runtimes to leak.
+
+Gemma 4 QAT should be treated as a separate runtime profile from regular `Q4_K_M`/dynamic GGUF. QAT aims to recover quality lost by naive 4-bit quantization while keeping the same low-bit inference footprint. For the 26B-A4B QAT model, TheMauler tags it as `gemma4-26b-a4b-qat`, keeps tool repair enabled, and uses the exact model id reported by the serving API. The current InferenceBridge managed llama.cpp model id is `gemma-4-26B-A4B-it-QAT-Q4_0.gguf`, not the repository id, and the default launch context is a snappy 49,152 tokens for a 24GB RTX 3090. The profile follows the live `/props` sampling defaults: temperature 1.0, top_p 0.95, top_k 64, min_p 0.05, repeat_penalty 1.0. Unsloth lists 26B-A4B as the speed/quality tradeoff model with text+image support and 256K max context.
+
 For SGLang:
 
 ```bash
@@ -100,6 +106,19 @@ vllm serve Qwen/Qwen3.6-27B \
 ```
 
 Use provider `vllm-local` (`http://localhost:8000/v1`). These generic OpenAI-compatible providers do not expose TheMauler's native LM Studio/llama.cpp model-management checks, so Doctor can verify reachability but not loaded-context metadata.
+
+For vLLM Gemma 4 26B-A4B:
+
+```bash
+vllm serve google/gemma-4-26B-A4B-it \
+  --host 127.0.0.1 --port 8000 \
+  --enable-auto-tool-choice \
+  --tool-call-parser gemma4 \
+  --reasoning-parser gemma4 \
+  --chat-template examples/tool_chat_template_gemma4.jinja
+```
+
+For llama.cpp/GGUF Gemma 4 26B-A4B QAT, use a current build, launch with Jinja/template mode, and load the matching `mmproj` sidecar for vision. TheMauler should connect to the OpenAI-compatible `/v1` endpoint; do not enable llama.cpp server-side file/shell tools.
 
 ## browser-use setup (one-time)
 

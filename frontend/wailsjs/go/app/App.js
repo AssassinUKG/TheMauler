@@ -10,12 +10,20 @@ export function AddToolSafeRule(arg1, arg2) {
   return window['go']['app']['App']['AddToolSafeRule'](arg1, arg2);
 }
 
+export function AddWorkspaceFolder(arg1, arg2) {
+  return window['go']['app']['App']['AddWorkspaceFolder'](arg1, arg2);
+}
+
 export function ApplySafetyPreset(arg1) {
   return window['go']['app']['App']['ApplySafetyPreset'](arg1);
 }
 
 export function BenchmarkProfile(arg1, arg2) {
   return window['go']['app']['App']['BenchmarkProfile'](arg1, arg2);
+}
+
+export function BenchmarkProfileWithCases(arg1, arg2, arg3) {
+  return window['go']['app']['App']['BenchmarkProfileWithCases'](arg1, arg2, arg3);
 }
 
 export function ClearBenchmarkRuns() {
@@ -94,12 +102,20 @@ export function GetHomeDir() {
   return window['go']['app']['App']['GetHomeDir']();
 }
 
+export function GetLabStatus() {
+  return window['go']['app']['App']['GetLabStatus']();
+}
+
 export function GetProfileNames() {
   return window['go']['app']['App']['GetProfileNames']();
 }
 
 export function GetProfiles() {
   return window['go']['app']['App']['GetProfiles']();
+}
+
+export function GetProjectInstructionsSummary() {
+  return window['go']['app']['App']['GetProjectInstructionsSummary']();
 }
 
 export function GetSettings() {
@@ -116,6 +132,10 @@ export function GetUserProfile() {
 
 export function GetWorkingDir() {
   return window['go']['app']['App']['GetWorkingDir']();
+}
+
+export function KillLocalInferenceServers() {
+  return window['go']['app']['App']['KillLocalInferenceServers']();
 }
 
 export function ListBenchmarkRuns() {
@@ -150,6 +170,14 @@ export function ListTodos() {
   return window['go']['app']['App']['ListTodos']();
 }
 
+export function ListWSLDistros() {
+  return window['go']['app']['App']['ListWSLDistros']();
+}
+
+export function ListWorkspaceFolders() {
+  return window['go']['app']['App']['ListWorkspaceFolders']();
+}
+
 export function LoadSession(arg1) {
   return window['go']['app']['App']['LoadSession'](arg1);
 }
@@ -178,12 +206,20 @@ export function ReindexSessionRecall() {
   return window['go']['app']['App']['ReindexSessionRecall']();
 }
 
+export function RemoveWorkspaceFolder(arg1) {
+  return window['go']['app']['App']['RemoveWorkspaceFolder'](arg1);
+}
+
 export function RenameFile(arg1, arg2) {
   return window['go']['app']['App']['RenameFile'](arg1, arg2);
 }
 
 export function RespondConfirm(arg1) {
   return window['go']['app']['App']['RespondConfirm'](arg1);
+}
+
+export function RestartWSL() {
+  return window['go']['app']['App']['RestartWSL']();
 }
 
 export function RollbackDepth() {
@@ -218,12 +254,28 @@ export function SaveUserProfile(arg1) {
   return window['go']['app']['App']['SaveUserProfile'](arg1);
 }
 
+export function ScaffoldWorkspaceFolders(arg1, arg2) {
+  return window['go']['app']['App']['ScaffoldWorkspaceFolders'](arg1, arg2);
+}
+
 export function SearchSessionRecall(arg1, arg2) {
   return window['go']['app']['App']['SearchSessionRecall'](arg1, arg2);
 }
 
+export function SelectProjectInstructionDirectory(arg1) {
+  return window['go']['app']['App']['SelectProjectInstructionDirectory'](arg1);
+}
+
+export function SelectProjectInstructionFile(arg1) {
+  return window['go']['app']['App']['SelectProjectInstructionFile'](arg1);
+}
+
 export function SelectWorkingDir(arg1) {
   return window['go']['app']['App']['SelectWorkingDir'](arg1);
+}
+
+export function SelectWorkspaceFolder(arg1) {
+  return window['go']['app']['App']['SelectWorkspaceFolder'](arg1);
 }
 
 export function SendMessage(arg1, arg2, arg3) {
@@ -270,6 +322,10 @@ export function Undo() {
   return window['go']['app']['App']['Undo']();
 }
 
+export function UpdateLabContext(arg1, arg2, arg3) {
+  return window['go']['app']['App']['UpdateLabContext'](arg1, arg2, arg3);
+}
+
 export function UpdateProfiles(arg1) {
   return window['go']['app']['App']['UpdateProfiles'](arg1);
 }
@@ -280,4 +336,8 @@ export function UpdateSettings(arg1) {
 
 export function UseProfile(arg1, arg2, arg3) {
   return window['go']['app']['App']['UseProfile'](arg1, arg2, arg3);
+}
+
+export function UseProjectInstructionFile(arg1) {
+  return window['go']['app']['App']['UseProjectInstructionFile'](arg1);
 }

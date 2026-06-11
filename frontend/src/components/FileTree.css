@@ -1,7 +1,7 @@
 .file-tree {
   display: flex;
   flex-direction: column;
-  background: #181818;
+  background: var(--c-panel);
   border-right: 0;
   overflow: hidden;
   min-width: 0;
@@ -44,7 +44,6 @@
   font-size: 11px;
   color: var(--text-dim);
   text-align: left;
-  cursor: pointer;
   flex-shrink: 0;
   display: grid;
   grid-template-columns: auto 1fr;
@@ -79,10 +78,109 @@
   white-space: nowrap;
 }
 
+.file-tree-cwd-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.file-tree-cwd-actions button,
+.workspace-root-header button,
+.scaffold-row button {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.lab-status-card {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.lab-status-title {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.lab-status-card input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  outline: none;
+}
+
+.lab-status-card input:focus {
+  border-color: var(--accent);
+}
+
+.lab-status-line {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scaffold-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+}
+
 .file-tree-body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+.workspace-root {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 4px 0;
+}
+
+.workspace-root-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 4px;
+  align-items: center;
+  padding: 3px 8px;
+}
+
+.workspace-root-header button:first-child {
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.workspace-root-header span {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.workspace-root-header.agent-root span {
+  color: var(--accent);
 }
 
 .file-entry {

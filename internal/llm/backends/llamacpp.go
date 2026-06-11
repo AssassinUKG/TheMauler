@@ -20,15 +20,12 @@ func NewLlamacpp(p settings.Profile) llm.Client {
 		apiKey = os.Getenv(p.APIKeyEnv)
 	}
 	client := newOpenAICompat("llamacpp", baseURL, p.ModelID, p.CtxTokens, apiKey, true)
+	client.specType = p.SpecType
+	client.specDraftNMax = p.SpecDraftNMax
+	client.specDraftModel = p.SpecDraftModel
 	kwargs := map[string]interface{}{
 		"enable_thinking":   p.Thinking,
 		"preserve_thinking": p.PreserveThink,
-	}
-	if p.SpecType != "" {
-		kwargs["spec_type"] = p.SpecType
-	}
-	if p.SpecDraftNMax > 0 {
-		kwargs["spec_draft_n_max"] = p.SpecDraftNMax
 	}
 	if raw, err := json.Marshal(kwargs); err == nil {
 		client.loadKwargsJSON = string(raw)

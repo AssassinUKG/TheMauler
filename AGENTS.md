@@ -215,6 +215,7 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
 - Tool calls: `read_file`, `read_many`, `read_pdf`, `write_file`, `edit_file`, `shell`, `bash` alias, `glob`, `grep`, `session_search`, planner/todo tools, skill tools, bounded subagent tools, `web_search`, `fetch_url`, and browser tools
 - PDF text extraction is available through the read-only `read_pdf` tool with optional page ranges and output limits. It is for text-based PDFs; scanned/image-only PDFs still need OCR later.
 - Shell backend is configurable as `auto`, `powershell`, `cmd`, `bash`, or `wsl`. Auto uses PowerShell on Windows and bash on Linux/WSL.
+- Shell mode is configurable as `shared_terminal` or `isolated`. In `shared_terminal` mode, `shell`/`bash` tool calls use the visible Terminal pane when the backend is WSL/bash, emit AI command start/done markers, and fall back to isolated execution for unsupported backends.
 - File tools normalize common path forms between Windows and WSL, such as `/mnt/c/...`, `/c/...`, and `C:\...`.
 - Workspace selection is authoritative for tools and prompts. `SetWorkingDir` and Settings `workspace_dir` both apply the process cwd, persist the normalized path, and clear the active chat/tool context plus rollback stack when the project changes. New runs include the current workspace root and top-level entries in the system prompt; missing-file tool results include the current workspace and a glob/read hint so stale paths from another project do not keep looping.
 - LM Studio profiles check `/api/v1/models` for a matching loaded instance before loading. The check is intentionally tolerant of missing context metadata and treats an already-loaded target as usable to avoid LM Studio creating duplicate `:2` instances. If a matching target is loaded with a clearly too-small context, TheMauler unloads loaded models before reloading the requested profile/context. Chat uses `/v1/chat/completions` for custom tools.
@@ -241,6 +242,7 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
 - No-tool inspection handling: when the model says it will find/explore/check/read/search/fetch but emits no tool calls, the next auto-continue forces an immediate inspection/research tool call.
 - Shell failures on Windows PowerShell that look like bash syntax return a hint telling the model to use PowerShell syntax or switch the shell backend to WSL/bash.
 - Shell failures preserve captured stdout/stderr in the tool result before appending the exit error. PowerShell `curl` alias mistakes now return a specific hint to use `curl.exe` or `Invoke-WebRequest -Uri ... -UseBasicParsing`.
+- Shell and terminal output decoding handles UTF-16-ish Windows output as UTF-8 text before returning results to chat/logs.
 - Code block Open button opens code as a scratch snippet in the File tab
 - Agent control panel for autonomous mode, tool toggles, stop, clear, and settings
 - Agent panel has tabs for Agent, Plan, Activity, Tools, Browser, Memory, Skills, and Logs. Activity is scrollable and shows recent tool calls/results, including shell output; Windows shell child windows are hidden.
@@ -261,7 +263,9 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
 - Recoverable tool failures, including malformed local-model tool JSON such as `unexpected end of JSON input`, are logged as `tool_error` timeline events and tool rows but do not set the run's terminal stop reason if the agent later recovers and finishes. The tool result tells the model to retry with complete valid JSON.
 - Task runs now carry a structured `state` and state timeline (`planning`, `model_loading`, `thinking`, `researching`, `reading`, `editing`, `testing`, `recovering`, `blocked`, `failed`, `done`) so the Logs tab can show what phase the agent reached before stopping.
 - Planner/todo tools are available: `todo_create`, `todo_update`, `todo_done`, `todo_blocked`, `todo_list`, and `todo_clear`. They store the active checklist in `~/.config/mauler/todos.json`; the Agent panel has a Plan tab with refresh/clear controls and live updates after todo tool calls.
+- Master/project workflow skills are now lazy-loaded: registering a master skill stores the source path and a compact outline, while `skill_view master` returns an outline by default or focused excerpts when called with a query. Do not reintroduce full master-skill injection into every chat/system prompt.
 - Web search uses auto selection: configured SearXNG first, then Brave with an API key, then DuckDuckGo HTML as the no-key fallback; `fetch_url` reads source pages.
+- `fetch_url` now favors readable page text over raw CSS/script noise, and GitHub URLs are fetched through repository/raw content paths where possible.
 - Web research is bounded per user task with configurable max searches, max fetches, max failed web attempts, and max browser actions. Repeated failed/no-result searches stop the loop and tell the model to report uncertainty.
 - Search results are ranked and labelled by source quality: official docs, GitHub/repo docs, package docs, general sources, blogs/community, and low-confidence mirrors.
 - Browser automation tools are available for pages where search/fetch is not enough: `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_extract`, `browser_screenshot`, and `browser_close`.
@@ -277,11 +281,12 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
 - Profiles include an explicit Thinking behaviour card. Thinking on/off is per profile, with preserved-thinking display gated behind the thinking toggle and only the active parameter family shown.
 - Anthropic/Claude defaults are removed; supported UI backends are local OpenAI-compatible providers: LM Studio and llama.cpp
 - **Artifact runner fully wired end-to-end**: Run/Stop buttons in FileViewer, streaming output panel with auto-scroll and pulsing indicator, `mauler:artifact_output` / `mauler:artifact_done` events consumed in App.tsx
+- **Terminal pane first-class for daily work**: terminal visibility/height persist in UI settings, the terminal opens by default when configured, includes a short Help panel, and can be used interactively while AI shell runs are visible in the same stream.
 - **Settings round-trip data integrity fixed**: `go.ts` Settings interface now includes all fields including `think_indicator`, `diff_colours`, and the full `image` block — missing fields no longer silently zero out on save
 - Regression tests cover profile generation settings, one-model-load-per-key behavior, compaction lock boundaries, workspace switching/context reset, missing-path workspace hints, Monaco save rollback snapshots, web/browser budgets, source ranking, settings default migration, toolset filtering, PDF text extraction, safety presets, shell/bash alias filtering, path normalization, and task-run logging/timeline behavior.
 - `npm run build` passes clean (301 modules, no TypeScript errors)
 
-Last verified: `go test ./...`, `go vet ./...`, `npm run build`, and `.\build.ps1` pass.
+Last verified 2026-06-10: `go test ./...`, `go vet ./...`, `npm run build`, and `.\build.ps1` pass.
 
 Production output: `C:\Users\richa\Desktop\TheMauler\build\bin\TheMauler.exe`.
 
@@ -292,6 +297,10 @@ Production output: `C:\Users\richa\Desktop\TheMauler\build\bin\TheMauler.exe`.
 ### NEXT: Hermes-inspired "next level" agent foundation
 
 The first Hermes-agent foundation pass is now mostly landed: session recall, structured run state, todo/planner tools, local skills, toolsets, and post-run skill suggestions are implemented. Keep the remaining UI polish sections below; do not remove them.
+
+### NEXT: Workspace/folder model redesign
+
+Explorer now has a first-pass VS Code-like split between **Agent Root** and browse-only **Open Folders**. The agent root remains the authoritative cwd for tools, shell, memory/session scope, and prompts; extra folders can be added to Explorer without changing cwd or clearing chat context. The Explorer also has a generic pentest/lab status card for target, VPN/interface, shell, latest artifact, and user-chosen folder scaffolding. Continue the redesign with recent/saved workspace files and richer lab run cards. See `docs/workspace-redesign-plan.md`.
 
 ### Latest local-LLM compatibility work, researched 2026-05-28
 
@@ -330,6 +339,7 @@ P3 — Hermes-style agent foundation follow-up:
 - Continue improving full-auto flow: mode selection, task budgets, safe-list interaction, and concise stop/report behavior when blocked.
 - Add visible explanation of Offline vs Balanced presets.
 - Add richer browser activity cards with screenshot preview links.
+- Add HTB/lab run cards that show target, shell backend, agent root, command phase, and latest scan/output artifact.
 
 ### 3. Settings UX Polish
 
@@ -350,7 +360,9 @@ P3 — Hermes-style agent foundation follow-up:
 - Add result caching and source cards in the agent panel.
 - Add browser wait/navigation helpers and optional visible-browser mode for inspecting automation live.
 - Add tool-result summaries so large web/shell outputs do not bloat the chat context.
+- Extend lazy context retrieval beyond master skills: apply outline/query/capped retrieval patterns to large web, shell, session, and document results.
 - Add a run replay/debug view for reviewing agent decisions, tool calls, denials, and stop reasons.
+- Terminal follow-up: add an explicit AI pause/take-over control, command attachment/pinning for scan artifacts, and richer long-running command progress cards.
 
 ---
 
@@ -360,7 +372,7 @@ P3 — Hermes-style agent foundation follow-up:
 2. Do not launch a plain `go build` binary such as root `mauler.exe`; Wails will show a build-tags dialog. Use `wails build -clean` or `.\build.ps1`, then run `build\bin\TheMauler.exe`.
 3. On Linux/WSL, use `./build.sh` and run `build/bin/TheMauler`; do not run a plain `go build` binary.
 4. `frontend/dist/` must exist for Wails packaging. `.\build.ps1` and `./build.sh` handle this.
-5. Shell execution is platform-aware. On Windows auto uses PowerShell; choose `wsl` in Settings when commands should run inside WSL. File tools normalize common Windows/WSL path forms.
+5. Shell execution is platform-aware. On Windows auto uses PowerShell; choose `wsl` in Settings when commands should run inside WSL. Shared terminal mode only applies to WSL/bash backends; PowerShell/cmd shell tool calls fall back to isolated execution. File tools normalize common Windows/WSL path forms.
 6. `ProfilesFile.Profiles` is `map[string]Profile`.
 7. `encoding/base64` in `app.go` is used by `EncodeFileBase64`.
 8. There is no `.git` metadata in this workspace right now, so use direct file inspection rather than git diff/status.

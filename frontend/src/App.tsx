@@ -7,6 +7,7 @@ import { AgentPanel } from './components/AgentPanel'
 import { LogsPage } from './components/LogsPage'
 import { MemoryPage } from './components/MemoryPage'
 import { BenchmarkPage } from './components/BenchmarkPage'
+import { LiveOpsPage } from './components/LiveOpsPage'
 import { StatusBar } from './components/StatusBar'
 import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -30,6 +31,7 @@ import {
   GetSettings,
   GetHistoryStats,
   SendMessage,
+  UpdateSettings,
   type ChatAttachment,
   StopAgent,
   type ChatRole,
@@ -64,6 +66,17 @@ function applyAccentColor(hex: string) {
 function applyPrimaryColor(hex: string) {
   document.documentElement.style.setProperty('--btn-primary', hex)
   document.documentElement.style.setProperty('--btn-primary-text', contrastText(hex))
+}
+
+function toolTimeoutFromInput(input: string): number {
+  try {
+    const parsed = JSON.parse(input) as { timeout?: unknown }
+    const timeout = Number(parsed.timeout)
+    if (Number.isFinite(timeout) && timeout > 0) return Math.floor(timeout)
+  } catch {
+    return 0
+  }
+  return 0
 }
 
 export interface ChatMessage {
@@ -108,6 +121,14 @@ export interface RunStatePayload {
   detail?: string
 }
 
+export interface ToolCountdown {
+  id: string
+  name: string
+  timeoutSec: number
+  startedAt: number
+  deadline: number
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
@@ -124,7 +145,7 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'file' | 'logs' | 'memory' | 'benchmarks'>('chat')
+  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'file' | 'logs' | 'memory' | 'benchmarks'>('chat')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
   const [artifactOutput, setArtifactOutput] = useState('')
@@ -132,14 +153,29 @@ export default function App() {
   const [activity, setActivity] = useState<AgentActivity[]>([])
   const [agentMode, setAgentMode] = useState('Auto')
   const [runState, setRunState] = useState<RunStatePayload | null>(null)
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [doctorRunRequest, setDoctorRunRequest] = useState(0)
   const [taskRunVersion, setTaskRunVersion] = useState(0)
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const toastThresholds = useRef<Set<string>>(new Set())
+  const appliedInitialUI = useRef(false)
 
   const pushToast = useCallback((message: string, level: ToastItem['level'] = 'warn') => {
     const id = crypto.randomUUID()
     setToasts(prev => [...prev, { id, message, level }])
+  }, [])
+
+  const persistTerminalPrefs = useCallback(async (open: boolean, height: number) => {
+    const settings = await GetSettings().catch(() => null)
+    if (!settings) return
+    await UpdateSettings({
+      ...settings,
+      ui: {
+        ...settings.ui,
+        terminal_default_open: open,
+        terminal_height: Math.round(height),
+      },
+    }).catch(() => null)
   }, [])
   const [pendingInterrupt, setPendingInterrupt] = useState<{ text: string; images: string[]; attachments: ChatAttachment[] } | null>(null)
   const pendingInterruptRef = useRef<{ text: string; images: string[]; attachments: ChatAttachment[] } | null>(null)
@@ -152,11 +188,14 @@ export default function App() {
   const [showTerminal, setShowTerminal] = useState(false)
   const [terminalHeight, setTerminalHeight] = useState(220)
   const [skillSuggestion, setSkillSuggestion] = useState<SkillSuggestion | null>(null)
+  const [toolCountdown, setToolCountdown] = useState<ToolCountdown | null>(null)
+  const [showToolCountdown, setShowToolCountdown] = useState(false)
 
   useEffect(() => {
     const offs = [
       EventsOn('mauler:stream_start', () => {
         setStreaming(true)
+        setRunStartedAt(Date.now())
         setRunState({ state: 'starting', detail: 'Preparing request' })
         setStreamBuffer('')
         setThinkingBuffer('')
@@ -186,6 +225,7 @@ export default function App() {
       }),
       EventsOn('mauler:stream_done', () => {
         setStreaming(false)
+        setToolCountdown(null)
         setStreamBuffer(prev => {
           if (prev.trim()) {
             const thinking = pendingThinkingRef.current || undefined
@@ -219,6 +259,7 @@ export default function App() {
       EventsOn('mauler:stream_error', (...args: unknown[]) => {
         const err = args[0] as string
         setStreaming(false)
+        setToolCountdown(null)
         setStreamBuffer('')
         setRunState({ state: 'failed', detail: err })
         setMessages(m => [...m, {
@@ -258,9 +299,21 @@ export default function App() {
           content: tc.input,
           timestamp: Date.now(),
         }])
+        const timeoutSec = toolTimeoutFromInput(tc.input)
+        if (timeoutSec > 0) {
+          const now = Date.now()
+          setToolCountdown({
+            id: tc.id,
+            name: tc.name,
+            timeoutSec,
+            startedAt: now,
+            deadline: now + timeoutSec * 1000,
+          })
+        }
       }),
       EventsOn('mauler:tool_result', (...args: unknown[]) => {
         const tr = args[0] as { id: string; name: string; result: string }
+        setToolCountdown(prev => prev?.id === tr.id ? null : prev)
         setActivity(items => {
           const next = items.map(item => item.id === tr.id
             ? { ...item, status: 'done' as const, result: tr.result, durationMs: Date.now() - item.startTime }
@@ -346,6 +399,12 @@ export default function App() {
     setProfileNames(names)
     if (settings) {
       setActiveProfile(settings.active_profile)
+      setShowToolCountdown(settings.ui.tool_countdown ?? false)
+      if (!appliedInitialUI.current) {
+        appliedInitialUI.current = true
+        setShowTerminal(settings.ui.terminal_default_open ?? false)
+        setTerminalHeight(Math.min(600, Math.max(100, settings.ui.terminal_height || 260)))
+      }
       applyTheme(settings.ui.theme || 'dark')
       applyAccentColor(settings.ui.accent_color || '#007acc')
       applyPrimaryColor(settings.ui.primary_color || settings.ui.accent_color || '#007acc')
@@ -387,7 +446,11 @@ export default function App() {
       }
       if (e.key === '`' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
-        setShowTerminal(v => !v)
+        setShowTerminal(v => {
+          const next = !v
+          void persistTerminalPrefs(next, terminalHeight)
+          return next
+        })
       }
       if (e.key === 'Escape') {
         setShowSettings(false)
@@ -412,7 +475,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
+  }, [persistTerminalPrefs, terminalHeight])
 
   const handleUserMessage = useCallback((text: string, images: string[], attachments: ChatAttachment[] = []) => {
     setMessages(m => [...m, {
@@ -628,6 +691,7 @@ export default function App() {
           <div className="titlebar-sep" />
           <div className="titlebar-group">
             <button onClick={() => setCenterTab('chat')} title="Open chat" style={centerTab === 'chat' ? { color: 'var(--text)' } : {}}>Chat</button>
+            <button onClick={() => setCenterTab('ops')} title="Open live ops" style={centerTab === 'ops' ? { color: 'var(--text)' } : {}}>Ops</button>
             <button onClick={() => setCenterTab('logs')} title="Open full-page logs" style={centerTab === 'logs' ? { color: 'var(--text)' } : {}}>Logs</button>
             <button onClick={() => setCenterTab('memory')} title="Open full-page memory" style={centerTab === 'memory' ? { color: 'var(--text)' } : {}}>Memory</button>
             <button onClick={() => setCenterTab('benchmarks')} title="Open model benchmarks" style={centerTab === 'benchmarks' ? { color: 'var(--text)' } : {}}>Benchmarks</button>
@@ -644,7 +708,13 @@ export default function App() {
           >Doctor</button>
           <div className="titlebar-sep" />
           <button
-            onClick={() => setShowTerminal(v => !v)}
+            onClick={() => {
+              setShowTerminal(v => {
+                const next = !v
+                void persistTerminalPrefs(next, terminalHeight)
+                return next
+              })
+            }}
             title="Toggle terminal (Ctrl+`)"
             style={showTerminal ? { color: 'var(--text)' } : {}}
           >Terminal</button>
@@ -673,6 +743,7 @@ export default function App() {
         <main className="center-pane">
           <div className="center-tabs">
             <button className={centerTab === 'chat' ? 'active' : ''} onClick={() => setCenterTab('chat')}>Chat</button>
+            <button className={centerTab === 'ops' ? 'active' : ''} onClick={() => setCenterTab('ops')}>Ops</button>
             <button className={centerTab === 'logs' ? 'active' : ''} onClick={() => setCenterTab('logs')}>Logs</button>
             <button className={centerTab === 'memory' ? 'active' : ''} onClick={() => setCenterTab('memory')}>Memory</button>
             <button className={centerTab === 'benchmarks' ? 'active' : ''} onClick={() => setCenterTab('benchmarks')}>Benchmarks</button>
@@ -694,6 +765,7 @@ export default function App() {
                 activeProfile={activeProfile}
                 autonomous={autonomous}
                 pendingInterrupt={pendingInterrupt !== null}
+                toolCountdown={showToolCountdown ? toolCountdown : null}
                 onSubmitMessage={handleSubmitMessage}
                 onCancelPending={handleCancelPending}
                 onStopAgent={() => void StopAgent()}
@@ -701,6 +773,17 @@ export default function App() {
                 onArtifact={handleArtifact}
                 onProfileChange={handleSwitchProfile}
                 onAutonomousChange={handleToggleAutonomous}
+              />
+            ) : centerTab === 'ops' ? (
+              <LiveOpsPage
+                streaming={streaming}
+                runState={runState}
+                activity={activity}
+                agentMode={agentMode}
+                activeProfile={activeProfile}
+                statsVersion={statsVersion}
+                taskRunVersion={taskRunVersion}
+                runStartedAt={runStartedAt}
               />
             ) : centerTab === 'logs' ? (
               <LogsPage version={taskRunVersion + statsVersion} />
@@ -760,19 +843,25 @@ export default function App() {
           onMouseDown={e => {
             const startY = e.clientY
             const startH = terminalHeight
+            let nextH = terminalHeight
             const onMove = (mv: MouseEvent) => {
               const dy = startY - mv.clientY
-              setTerminalHeight(Math.min(600, Math.max(100, startH + dy)))
+              nextH = Math.min(600, Math.max(100, startH + dy))
+              setTerminalHeight(nextH)
             }
             const onUp = () => {
               window.removeEventListener('mousemove', onMove)
               window.removeEventListener('mouseup', onUp)
+              void persistTerminalPrefs(showTerminal, nextH)
             }
             window.addEventListener('mousemove', onMove)
             window.addEventListener('mouseup', onUp)
             e.preventDefault()
           }}
-          onDoubleClick={() => setShowTerminal(false)}
+          onDoubleClick={() => {
+            setShowTerminal(false)
+            void persistTerminalPrefs(false, terminalHeight)
+          }}
         />
       )}
       {/* Terminal panel — always mounted so session/output survive toggle */}

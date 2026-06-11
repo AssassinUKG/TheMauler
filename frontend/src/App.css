@@ -4,7 +4,7 @@
   height: 100vh;
   width: 100vw;
   overflow: hidden;
-  background: #111;
+  background: var(--c-app);
 }
 
 /* ── Titlebar ───────────────────────────────────────── */
@@ -115,12 +115,12 @@
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  background: #151515;
+  background: var(--c-pane);
 }
 
 .pane-slot.closed {
   pointer-events: auto;
-  background: #181818;
+  background: var(--c-panel);
   border-inline: 1px solid var(--border);
 }
 
@@ -133,14 +133,14 @@
   justify-content: center;
   border: 0;
   border-radius: 0;
-  background: #181818;
+  background: var(--c-panel);
   color: var(--text-dim);
   cursor: pointer;
 }
 
 .collapsed-rail:hover {
   color: var(--text);
-  background: #202020;
+  background: var(--c-card);
 }
 
 .collapsed-rail span {
@@ -180,7 +180,7 @@
   min-height: 100px;
   max-height: 600px;
   overflow: hidden;
-  background: #111820;
+  background: var(--c-terminal);
   border-top: 1px solid var(--border);
 }
 
@@ -203,7 +203,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #151515;
+  background: var(--c-pane);
 }
 
 .center-tabs {
@@ -213,7 +213,7 @@
   height: 40px;
   padding: 0 8px;
   border-bottom: 1px solid var(--border);
-  background: #181818;
+  background: var(--c-panel);
   overflow-x: auto;
   flex-shrink: 0;
 }

@@ -4,7 +4,7 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #111820;
+  background: var(--c-terminal);
   font-family: 'Cascadia Code', 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
   font-size: 12.5px;
   min-height: 0;
@@ -80,6 +80,23 @@
 .terminal-stdout { color: #cbd5e1; }
 .terminal-stderr { color: #fca5a5; }
 .terminal-system { color: #64748b; font-style: italic; }
+
+.terminal-help {
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #94a3b8;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.terminal-help-title {
+  color: #e2e8f0;
+  font-weight: 700;
+}
 
 /* Input row */
 .terminal-input-row {

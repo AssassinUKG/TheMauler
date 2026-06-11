@@ -26,6 +26,29 @@ func TestMatchGemma4Profile(t *testing.T) {
 	}
 }
 
+func TestMatchGemma426BA4BQATProfilePrefersQATRuntime(t *testing.T) {
+	rp, ok := Match(settings.Profile{Name: "gemma4-26b-a4b-qat", ModelID: "gemma-4-26B-A4B-it-QAT-Q4_0.gguf"})
+	if !ok {
+		t.Fatalf("expected gemma 4 26b-a4b QAT runtime profile match")
+	}
+	if rp.Name != "gemma4-26b-a4b-qat" || rp.Quant != "QAT-Q4_0" || rp.RecommendedCtx != 49152 || rp.Supports.MTP {
+		t.Fatalf("unexpected gemma 4 26b-a4b QAT runtime profile: %#v", rp)
+	}
+	if rp.Defaults.Temperature != 1.0 || rp.Defaults.TopP != 0.95 || rp.Defaults.TopK != 64 || rp.Defaults.MinP != 0.05 || rp.Defaults.RepeatPenalty != 1.0 {
+		t.Fatalf("gemma 4 26b-a4b QAT defaults = %#v, want live InferenceBridge temp/top_p/top_k/min_p/repeat_penalty", rp.Defaults)
+	}
+}
+
+func TestMatchGemma426BA4BQATProfileFromHyphenatedModelID(t *testing.T) {
+	rp, ok := Match(settings.Profile{Name: "local", ModelID: "google/gemma-4-26B-A4B-it-qat-q4_0-gguf"})
+	if !ok {
+		t.Fatalf("expected hyphenated gemma 4 26b-a4b QAT runtime profile match")
+	}
+	if rp.Name != "gemma4-26b-a4b-qat" {
+		t.Fatalf("matched %q, want gemma4-26b-a4b-qat", rp.Name)
+	}
+}
+
 func TestLooksMTPModelRequiresMTPMarker(t *testing.T) {
 	if LooksMTPModel(settings.Profile{Name: "qwen3.6-think", ModelID: "Qwen3.6-27B-UD-Q4_K_XL.gguf"}) {
 		t.Fatalf("plain qwen profile should not look like an MTP artifact")

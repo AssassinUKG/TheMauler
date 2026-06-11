@@ -100,6 +100,21 @@ func TestParseSSEAccumulatesTextChunks(t *testing.T) {
 	}
 }
 
+func TestParseSSEHandlesLargeSingleEvent(t *testing.T) {
+	large := strings.Repeat("x", 96*1024)
+	input := `data: {"choices":[{"index":0,"delta":{"content":"` + large + `"},"finish_reason":"stop"}]}` + "\n"
+	var combined string
+	for _, d := range collectSSE(input) {
+		if d.Error != nil {
+			t.Fatalf("unexpected parser error: %v", d.Error)
+		}
+		combined += d.Content
+	}
+	if combined != large {
+		t.Fatalf("large event content length = %d, want %d", len(combined), len(large))
+	}
+}
+
 // --- thinking tokens ---
 
 func TestParseSSEThinkingContent(t *testing.T) {
@@ -181,6 +196,132 @@ func TestParseSSEMultipleToolCalls(t *testing.T) {
 	}
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 tool calls, got %d", len(calls))
+	}
+}
+
+func TestParseSSESparseToolCallIndexes(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"a","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}},{"index":3,"id":"b","type":"function","function":{"name":"glob","arguments":"{\"pattern\":\"**/*.go\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		"",
+	}, "\n")
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if len(d.ToolCalls) > 0 {
+			calls = d.ToolCalls
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 sparse-index tool calls, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" || calls[1].Function.Name != "glob" {
+		t.Fatalf("calls were not preserved in index order: %#v", calls)
+	}
+}
+
+func TestParseSSEFlushesToolCallsOnDoneWithoutFinishReason(t *testing.T) {
+	// InferenceBridge-style: tool-call fragments stream, then the response ends
+	// on [DONE] with no finish_reason="tool_calls" chunk. The accumulated call
+	// must still be flushed, not dropped.
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call1","type":"function","function":{"name":"glob","arguments":"{\"pattern\":"}}]},"finish_reason":""}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"**/*.go\"}"}}]},"finish_reason":""}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n")
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if len(d.ToolCalls) > 0 {
+			calls = d.ToolCalls
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call flushed on [DONE], got %d", len(calls))
+	}
+	if calls[0].Function.Name != "glob" || string(calls[0].Function.Arguments) != `{"pattern":"**/*.go"}` {
+		t.Fatalf("tool call not reconstructed: %#v", calls[0])
+	}
+}
+
+func TestParseSSEFlushesToolCallsOnEOFWithoutFinishReason(t *testing.T) {
+	// Same as above but the body just EOFs without a [DONE] sentinel.
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":""}]}`,
+		"",
+	}, "\n")
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if len(d.ToolCalls) > 0 {
+			calls = d.ToolCalls
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call flushed on EOF, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "read_file" {
+		t.Fatalf("name = %q", calls[0].Function.Name)
+	}
+}
+
+func TestParseSSEFlushesTruncatedToolCallOnDone(t *testing.T) {
+	// Tool-call JSON cut off mid-argument and then [DONE]: must report Truncated
+	// so the agent's recovery path fires instead of executing a broken call.
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"out.txt\",\"content\":\"unterm"}}]},"finish_reason":""}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n")
+	sawTruncated := false
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if d.Truncated {
+			sawTruncated = true
+		}
+		if len(d.ToolCalls) > 0 {
+			calls = d.ToolCalls
+		}
+	}
+	if !sawTruncated {
+		t.Fatal("expected Truncated delta for incomplete tool-call JSON")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("expected no executable tool calls, got %d", len(calls))
+	}
+}
+
+func TestParseSSESynthesizesEmptyToolCallID(t *testing.T) {
+	// Local backends often emit tool calls with an empty id; we must synthesize a
+	// stable per-index id so the call/result pairing is valid.
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":"glob","arguments":"{\"pattern\":\"**/*.go\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		"",
+	}, "\n")
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if len(d.ToolCalls) > 0 {
+			calls = d.ToolCalls
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(calls))
+	}
+	if calls[0].ID != "call_0" {
+		t.Fatalf("expected synthesized id call_0, got %q", calls[0].ID)
+	}
+}
+
+func TestParseSSEPreservesProvidedToolCallID(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"real-id-7","type":"function","function":{"name":"glob","arguments":"{\"pattern\":\"*\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		"",
+	}, "\n")
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if len(d.ToolCalls) > 0 {
+			calls = d.ToolCalls
+		}
+	}
+	if len(calls) != 1 || calls[0].ID != "real-id-7" {
+		t.Fatalf("provided id must be preserved, got %#v", calls)
 	}
 }
 

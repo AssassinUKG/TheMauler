@@ -41,7 +41,12 @@ var (
 	secretAssignRe    = regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|secret|password|passwd|private[_-]?key)\b(\s*[:=]\s*["']?)([^\s"',;]{8,})`)
 )
 
-func guardToolResult(toolName, result string) (string, []string) {
+// guardToolResult applies the untrusted-tool-output trust boundary before a tool
+// result re-enters model context. Prompt-injection / exfiltration language is always
+// labelled (non-destructive). Secret/credential redaction only runs when redactSecrets
+// is true — it is off by default because recovered credentials are the objective of a
+// pen-test run and must reach the model verbatim.
+func guardToolResult(toolName, result string, redactSecrets bool) (string, []string) {
 	if strings.TrimSpace(result) == "" {
 		return result, nil
 	}
@@ -55,9 +60,12 @@ func guardToolResult(toolName, result string) (string, []string) {
 		findings["secret_exfiltration_language"] = true
 	}
 
-	redacted := redactSensitiveToolResult(result)
-	if redacted != result {
-		findings["sensitive_value_redacted"] = true
+	redacted := result
+	if redactSecrets {
+		redacted = redactSensitiveToolResult(result)
+		if redacted != result {
+			findings["sensitive_value_redacted"] = true
+		}
 	}
 	if len(findings) == 0 {
 		return result, nil

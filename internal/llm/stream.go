@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -59,7 +60,7 @@ type accumTC struct {
 // ch is closed by the caller's goroutine after this function returns.
 func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 
 	accum := make(map[int]*accumTC)
 
@@ -76,6 +77,14 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			// Some backends (notably InferenceBridge's managed llama.cpp proxy)
+			// stream tool-call fragments and then terminate on [DONE] without ever
+			// emitting a finish_reason="tool_calls" chunk. Flush whatever we
+			// accumulated instead of dropping the tool call.
+			if len(accum) > 0 {
+				ch <- flushAccumulatedToolCalls(accum)
+				return
+			}
 			break
 		}
 
@@ -141,35 +150,7 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 			return
 
 		case "tool_calls":
-			calls := make([]ToolCallDef, 0, len(accum))
-			anyTruncated := false
-			for i := 0; i < len(accum); i++ {
-				a, ok := accum[i]
-				if !ok {
-					continue
-				}
-				// Validate the accumulated arguments — if the model was cut off by
-				// max_tokens mid-argument the JSON will be incomplete. Treat this
-				// exactly like finish_reason=length so the agent's truncation-recovery
-				// path fires instead of passing a broken tool call to the executor.
-				if rawArgs := a.args.String(); !json.Valid([]byte(rawArgs)) {
-					anyTruncated = true
-					break
-				}
-				calls = append(calls, ToolCallDef{
-					ID:   a.id,
-					Type: "function",
-					Function: FunctionCall{
-						Name:      a.name,
-						Arguments: json.RawMessage(a.args.String()),
-					},
-				})
-			}
-			if anyTruncated {
-				ch <- Delta{Done: true, Truncated: true}
-				return
-			}
-			ch <- Delta{ToolCalls: calls, Done: true}
+			ch <- flushAccumulatedToolCalls(accum)
 			return
 		}
 	}
@@ -179,7 +160,53 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 		return
 	}
 
+	// Scanner reached EOF without a terminal finish_reason. If tool-call
+	// fragments were accumulated, flush them rather than reporting an empty turn.
+	if len(accum) > 0 {
+		ch <- flushAccumulatedToolCalls(accum)
+		return
+	}
+
 	ch <- Delta{Done: true}
+}
+
+// flushAccumulatedToolCalls converts the accumulated per-index tool-call
+// fragments into a terminal Delta. If any call's arguments are not valid JSON
+// (the model was cut off mid-argument by max_tokens) it reports Truncated so the
+// agent's truncation-recovery path fires instead of passing a broken call to the
+// executor.
+func flushAccumulatedToolCalls(accum map[int]*accumTC) Delta {
+	indexes := make([]int, 0, len(accum))
+	for idx := range accum {
+		indexes = append(indexes, idx)
+	}
+	sort.Ints(indexes)
+
+	calls := make([]ToolCallDef, 0, len(accum))
+	for _, idx := range indexes {
+		a := accum[idx]
+		if rawArgs := a.args.String(); !json.Valid([]byte(rawArgs)) {
+			return Delta{Done: true, Truncated: true}
+		}
+		// Local backends (Qwen/llama.cpp/InferenceBridge) often emit tool calls with
+		// an empty id. Synthesize a stable per-index id so the assistant tool_call and
+		// its tool-result message always share a non-empty tool_call_id — strict
+		// OpenAI-compatible servers reject unmatched ids, and history compaction relies
+		// on the pairing.
+		id := a.id
+		if id == "" {
+			id = fmt.Sprintf("call_%d", idx)
+		}
+		calls = append(calls, ToolCallDef{
+			ID:   id,
+			Type: "function",
+			Function: FunctionCall{
+				Name:      a.name,
+				Arguments: json.RawMessage(a.args.String()),
+			},
+		})
+	}
+	return Delta{ToolCalls: calls, Done: true}
 }
 
 func normalizeSSEToolArguments(raw json.RawMessage) string {
@@ -189,9 +216,6 @@ func normalizeSSEToolArguments(raw json.RawMessage) string {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
-	}
-	if json.Valid(raw) {
-		return string(raw)
 	}
 	return string(raw)
 }

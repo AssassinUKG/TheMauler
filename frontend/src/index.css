@@ -5,6 +5,15 @@
   --bg1: #252526;
   --bg2: #2d2d30;
   --bg3: #3c3c3c;
+  /* Semantic surface tokens (dark). Components used to hardcode these darks, which
+     broke light mode — route them through tokens so both themes flip cleanly. */
+  --c-app: #111111;          /* app shell / deepest bg */
+  --c-pane: #151515;         /* center pane / page background */
+  --c-panel: #181818;        /* titlebar, tab strips, section headers */
+  --c-card: #202020;         /* raised cards (log events, agent cards) */
+  --c-card-hover: #242424;   /* card hover / active */
+  --c-list: #141414;         /* scrolling list backgrounds */
+  --c-terminal: #111820;     /* terminal panel */
   --border: #3e3e42;
   --text: #d4d4d4;
   --text-dim: #858585;
@@ -37,6 +46,13 @@
   --bg1: #ffffff;
   --bg2: #f0f0f0;
   --bg3: #e2e2e2;
+  --c-app: #e6e6e6;
+  --c-pane: #f3f3f3;
+  --c-panel: #ffffff;
+  --c-card: #ffffff;
+  --c-card-hover: #ececec;
+  --c-list: #f7f7f7;
+  --c-terminal: #eef2f6;
   --border: #cccccc;
   --text: #1e1e1e;
   --text-dim: #6e6e6e;

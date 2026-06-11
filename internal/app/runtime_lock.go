@@ -31,6 +31,7 @@ type RuntimeLock struct {
 	PreserveThink   bool   `json:"preserve_thinking"`
 	SpecType        string `json:"spec_type,omitempty"`
 	SpecDraftNMax   int    `json:"spec_draft_n_max,omitempty"`
+	SpecDraftModel  string `json:"spec_draft_model,omitempty"`
 	LaunchSignature string `json:"launch_signature"`
 }
 
@@ -62,6 +63,7 @@ func buildRuntimeLock(profile settings.Profile) RuntimeLock {
 		profile.ModelID,
 		profile.MMProj,
 		profile.SpecType,
+		profile.SpecDraftModel,
 	}
 	sum := sha256.Sum256([]byte(strings.Join(sigParts, "\x00")))
 	return RuntimeLock{
@@ -79,6 +81,7 @@ func buildRuntimeLock(profile settings.Profile) RuntimeLock {
 		PreserveThink:   profile.PreserveThink,
 		SpecType:        profile.SpecType,
 		SpecDraftNMax:   profile.SpecDraftNMax,
+		SpecDraftModel:  profile.SpecDraftModel,
 		LaunchSignature: strings.Join(sigParts, " | "),
 	}
 }

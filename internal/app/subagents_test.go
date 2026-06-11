@@ -48,11 +48,35 @@ func TestBuildSubagentSystemPromptIncludesBoundsAndWorkspace(t *testing.T) {
 
 func TestSubagentFinalReportIncludesMetadata(t *testing.T) {
 	spec := subagentSpecs()[1]
-	out := finalSubagentReport(spec, "found issue", 3, "turn budget exhausted")
+	out := finalSubagentReport(spec, "found issue", nil, 3, "turn budget exhausted")
 
 	for _, want := range []string{"Subagent: Reviewer", "Toolset: safe", "Tool calls used: 3", "Stop: turn budget exhausted", "found issue"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("report missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestSubagentFinalReportFallsBackToEvidence(t *testing.T) {
+	spec := subagentSpecs()[0]
+	out := finalSubagentReport(spec, "", []string{
+		`web_search: No results found for "FreePBX 16.0.40.7 exploit"`,
+		`fetch_url: blocked by timeout`,
+	}, 4, "turn budget exhausted")
+
+	for _, want := range []string{
+		"Subagent: Researcher",
+		"Stop: turn budget exhausted",
+		"The subagent stopped before writing a synthesis",
+		`web_search: No results found for "FreePBX 16.0.40.7 exploit"`,
+		"fetch_url: blocked by timeout",
+		"Recommended next step",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("fallback report missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "No subagent output was produced") {
+		t.Fatalf("fallback report should not return the old blank-output message:\n%s", out)
 	}
 }

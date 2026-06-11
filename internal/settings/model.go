@@ -34,8 +34,9 @@ type Profile struct {
 	// MTP speculative decoding (llama.cpp b9180+): 1.4–2.2× faster generation.
 	// SpecType: "" (disabled) | "draft-mtp"
 	// SpecDraftNMax: number of draft tokens per step (2 is a safe default)
-	SpecType      string `toml:"spec_type" json:"spec_type"`
-	SpecDraftNMax int    `toml:"spec_draft_n_max" json:"spec_draft_n_max"`
+	SpecType       string `toml:"spec_type" json:"spec_type"`
+	SpecDraftNMax  int    `toml:"spec_draft_n_max" json:"spec_draft_n_max"`
+	SpecDraftModel string `toml:"spec_draft_model" json:"spec_draft_model"`
 
 	// Legacy provider fields. Kept to migrate existing profiles.toml files.
 	Backend   string `toml:"backend,omitempty" json:"backend,omitempty"`
@@ -62,6 +63,9 @@ type ToolsConfig struct {
 	ConfirmExec        bool                `toml:"confirm_exec" json:"confirm_exec"`
 	BashTimeout        int                 `toml:"bash_timeout" json:"bash_timeout"`
 	ShellBackend       string              `toml:"shell_backend" json:"shell_backend"` // auto | powershell | cmd | bash | wsl
+	ShellMode          string              `toml:"shell_mode" json:"shell_mode"`       // isolated | shared_terminal
+	ShellDistro        string              `toml:"shell_distro" json:"shell_distro"`   // optional WSL distro name when shell_backend = wsl
+	ShellUser          string              `toml:"shell_user" json:"shell_user"`       // optional WSL user, e.g. root
 	ArtifactTimeout    int                 `toml:"artifact_timeout" json:"artifact_timeout"`
 	WebEngine          string              `toml:"web_engine" json:"web_engine"`
 	WebBaseURL         string              `toml:"web_base_url" json:"web_base_url"`
@@ -72,6 +76,8 @@ type ToolsConfig struct {
 	MaxFailedFetches   int                 `toml:"max_failed_fetches" json:"max_failed_fetches"`
 	MaxBrowserActions  int                 `toml:"max_browser_actions" json:"max_browser_actions"`
 	MaxToolResultChars int                 `toml:"max_tool_result_chars" json:"max_tool_result_chars"` // 0 = no truncation
+	ProtectedPaths     []string            `toml:"protected_paths" json:"protected_paths"`             // never modify/delete through Mauler tools
+	RedactSecrets      bool                `toml:"redact_secrets" json:"redact_secrets"`               // when true, redact keys/passwords from tool output before the model sees them (off by default; pentest workflows need recovered creds verbatim)
 	ActiveToolset      string              `toml:"active_toolset" json:"active_toolset"`
 	Toolsets           map[string][]string `toml:"toolsets" json:"toolsets"`
 	EnabledTools       map[string]bool     `toml:"enabled_tools" json:"enabled_tools"`
@@ -110,16 +116,30 @@ type AgentsConfig struct {
 	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
 }
 
+type WorkspaceFolder struct {
+	Path string `toml:"path" json:"path"`
+	Name string `toml:"name" json:"name"`
+	Role string `toml:"role" json:"role"` // root | notes | loot | scans | scripts | reference | folder
+}
+
+type LabContext struct {
+	Target         string `toml:"target" json:"target"`
+	VPNInterface   string `toml:"vpn_interface" json:"vpn_interface"`
+	LatestArtifact string `toml:"latest_artifact" json:"latest_artifact"`
+}
+
 // ContextConfig holds context window and compaction settings.
 type ContextConfig struct {
-	AutoInjectFile              bool     `toml:"auto_inject_file" json:"auto_inject_file"`
-	AutoInjectCursor            bool     `toml:"auto_inject_cursor" json:"auto_inject_cursor"`
-	CompactionAt                float64  `toml:"compaction_at" json:"compaction_at"` // fraction, default 0.85
-	ShowCompaction              bool     `toml:"show_compaction" json:"show_compaction"`
-	MAULERMDPath                string   `toml:"mauler_md_path" json:"mauler_md_path"` // explicit single file; empty = layered auto-discover
-	ProjectDocMaxBytes          int      `toml:"project_doc_max_bytes" json:"project_doc_max_bytes"`
-	ProjectDocFallbackFilenames []string `toml:"project_doc_fallback_filenames" json:"project_doc_fallback_filenames"`
-	WorkspaceDir                string   `toml:"workspace_dir" json:"workspace_dir"`
+	AutoInjectFile              bool              `toml:"auto_inject_file" json:"auto_inject_file"`
+	AutoInjectCursor            bool              `toml:"auto_inject_cursor" json:"auto_inject_cursor"`
+	CompactionAt                float64           `toml:"compaction_at" json:"compaction_at"` // fraction, default 0.85
+	ShowCompaction              bool              `toml:"show_compaction" json:"show_compaction"`
+	MAULERMDPath                string            `toml:"mauler_md_path" json:"mauler_md_path"` // explicit single file; empty = layered auto-discover
+	ProjectDocMaxBytes          int               `toml:"project_doc_max_bytes" json:"project_doc_max_bytes"`
+	ProjectDocFallbackFilenames []string          `toml:"project_doc_fallback_filenames" json:"project_doc_fallback_filenames"`
+	WorkspaceDir                string            `toml:"workspace_dir" json:"workspace_dir"`
+	OpenFolders                 []WorkspaceFolder `toml:"open_folders" json:"open_folders"`
+	Lab                         LabContext        `toml:"lab" json:"lab"`
 }
 
 // MemoryConfig holds durable project-memory settings.
@@ -150,18 +170,21 @@ type ImageConfig struct {
 
 // UIConfig holds display and layout settings.
 type UIConfig struct {
-	Theme           string  `toml:"theme" json:"theme"` // dark | light
-	AccentColor     string  `toml:"accent_color" json:"accent_color"`
-	PrimaryColor    string  `toml:"primary_color" json:"primary_color"`
-	StatusBar       bool    `toml:"status_bar" json:"status_bar"`
-	TokenCounter    bool    `toml:"token_counter" json:"token_counter"`
-	ThinkIndicator  bool    `toml:"think_indicator" json:"think_indicator"`
-	SyntaxHighlight bool    `toml:"syntax_highlight" json:"syntax_highlight"`
-	DiffColours     bool    `toml:"diff_colours" json:"diff_colours"`
-	ChatTimestamps  bool    `toml:"chat_timestamps" json:"chat_timestamps"`
-	TreeWidth       float64 `toml:"tree_width" json:"tree_width"` // fraction of terminal width
-	ChatWidth       float64 `toml:"chat_width" json:"chat_width"`
-	ArtifactWidth   float64 `toml:"artifact_width" json:"artifact_width"`
+	Theme               string  `toml:"theme" json:"theme"` // dark | light
+	AccentColor         string  `toml:"accent_color" json:"accent_color"`
+	PrimaryColor        string  `toml:"primary_color" json:"primary_color"`
+	StatusBar           bool    `toml:"status_bar" json:"status_bar"`
+	TokenCounter        bool    `toml:"token_counter" json:"token_counter"`
+	ThinkIndicator      bool    `toml:"think_indicator" json:"think_indicator"`
+	SyntaxHighlight     bool    `toml:"syntax_highlight" json:"syntax_highlight"`
+	DiffColours         bool    `toml:"diff_colours" json:"diff_colours"`
+	ChatTimestamps      bool    `toml:"chat_timestamps" json:"chat_timestamps"`
+	ToolCountdown       bool    `toml:"tool_countdown" json:"tool_countdown"`
+	TerminalDefaultOpen bool    `toml:"terminal_default_open" json:"terminal_default_open"`
+	TerminalHeight      int     `toml:"terminal_height" json:"terminal_height"`
+	TreeWidth           float64 `toml:"tree_width" json:"tree_width"` // fraction of terminal width
+	ChatWidth           float64 `toml:"chat_width" json:"chat_width"`
+	ArtifactWidth       float64 `toml:"artifact_width" json:"artifact_width"`
 }
 
 // LoggingConfig controls what gets persisted in task run logs.

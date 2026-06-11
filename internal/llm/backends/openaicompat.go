@@ -26,6 +26,9 @@ type OpenAICompat struct {
 	apiKey         string
 	thinkingKwargs bool // send chat_template_kwargs (llama.cpp only)
 	loadKwargsJSON string
+	specType       string
+	specDraftNMax  int
+	specDraftModel string
 	httpClient     *http.Client
 }
 
@@ -116,6 +119,15 @@ func (c *OpenAICompat) loadLlamaCppModel(ctx context.Context) error {
 	}
 	if c.loadKwargsJSON != "" {
 		body["chat_template_kwargs_json"] = c.loadKwargsJSON
+	}
+	if c.specType != "" {
+		body["spec_type"] = c.specType
+	}
+	if c.specDraftNMax > 0 {
+		body["spec_draft_n_max"] = c.specDraftNMax
+	}
+	if strings.TrimSpace(c.specDraftModel) != "" {
+		body["draft_model_path"] = c.specDraftModel
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -521,11 +533,42 @@ func (c *OpenAICompat) Chat(ctx context.Context, req llm.Request) (<-chan llm.De
 	ch := make(chan llm.Delta, 128)
 	go func() {
 		defer close(ch)
+		done := make(chan struct{})
+		go c.watchStreamingCancel(ctx, resp.Body, done)
+		defer close(done)
 		defer resp.Body.Close()
 		llm.ParseSSE(ctx, resp.Body, ch)
 	}()
 
 	return ch, nil
+}
+
+func (c *OpenAICompat) watchStreamingCancel(ctx context.Context, body io.Closer, done <-chan struct{}) {
+	select {
+	case <-ctx.Done():
+		_ = body.Close()
+		c.cancelActiveInference()
+	case <-done:
+	}
+}
+
+func (c *OpenAICompat) cancelActiveInference() {
+	if c.clientName != "llamacpp" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/inference/cancel", nil)
+	if err != nil {
+		return
+	}
+	c.setHeaders(httpReq)
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
 
 // --- request building ---

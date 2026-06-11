@@ -300,6 +300,7 @@ func (a *App) RunDoctor() DoctorResult {
 	addRuntimeProfileChecks(add, activeProfile)
 	addProfileIdentityChecks(add, cfg.ActiveProfile, activeProfile)
 	addAgentPresetBudgetChecks(add, cfg, activeProfile)
+	addSharedBackendSubagentCheck(add, cfg, activeProfile)
 	addProfileSanityChecks(add, activeProfile)
 
 	if activeProfile.Thinking {
@@ -822,12 +823,26 @@ func addRuntimeProfileChecks(add func(DoctorCheck), profile settings.Profile) {
 			Detail:  "Disable thinking for this profile unless the specific backend/template exposes a known reasoning channel.",
 		})
 	}
-	if profile.SpecType != "" && !rp.Supports.MTP {
+	hasDraftModel := strings.TrimSpace(profile.SpecDraftModel) != ""
+	if profile.SpecType != "" && hasDraftModel {
+		status := "ok"
+		detail := "The draft model path will be passed to the llama.cpp load API."
+		if _, err := os.Stat(profile.SpecDraftModel); err != nil {
+			status = "warn"
+			detail = fmt.Sprintf("Draft model path was set but could not be read: %v", err)
+		}
+		add(DoctorCheck{
+			Name:    "MTP compatibility",
+			Status:  status,
+			Message: fmt.Sprintf("Enabled: spec_type=%s draft_n_max=%d with draft model", profile.SpecType, profile.SpecDraftNMax),
+			Detail:  detail,
+		})
+	} else if profile.SpecType != "" && !rp.Supports.MTP {
 		add(DoctorCheck{
 			Name:    "MTP compatibility",
 			Status:  "warn",
 			Message: fmt.Sprintf("%s is not marked as MTP-capable but spec_type=%s is enabled", rp.Name, profile.SpecType),
-			Detail:  "Disable draft-mtp or switch to a known MTP GGUF.",
+			Detail:  "Set spec_draft_model to a matching GGUF draft model, or disable draft-mtp.",
 		})
 	} else if profile.SpecType != "" && !runtimeprofile.LooksMTPModel(profile) {
 		add(DoctorCheck{
@@ -940,6 +955,34 @@ func addAgentPresetBudgetChecks(add func(DoctorCheck), cfg settings.Settings, pr
 		Status:  "info",
 		Message: fmt.Sprintf("Some presets use smaller working budgets than profile ctx_tokens=%d", profile.CtxTokens),
 		Detail:  "These budgets now limit only chat/history compaction, not backend model loading: " + strings.Join(lower, ", "),
+	})
+}
+
+func addSharedBackendSubagentCheck(add func(DoctorCheck), cfg settings.Settings, profile settings.Profile) {
+	if profile.Backend != "llamacpp" {
+		return
+	}
+	enabled := settings.EffectiveEnabledTools(cfg.Tools)
+	var subagents []string
+	for name, ok := range enabled {
+		if ok && strings.HasPrefix(name, "subagent_") {
+			subagents = append(subagents, name)
+		}
+	}
+	if len(subagents) == 0 {
+		add(DoctorCheck{
+			Name:    "Subagent backend isolation",
+			Status:  "ok",
+			Message: "No subagent tools are enabled for the active toolset",
+		})
+		return
+	}
+	sort.Strings(subagents)
+	add(DoctorCheck{
+		Name:    "Subagent backend isolation",
+		Status:  "info",
+		Message: "Subagents share the active llama.cpp backend",
+		Detail:  "Same-model lower-context subagent requests are now reused instead of reloading down. Enabled subagents: " + strings.Join(subagents, ", "),
 	})
 }
 

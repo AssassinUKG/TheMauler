@@ -70,6 +70,29 @@ func TestBenchmarkCasesIncludeGeneralCodingAndToolProtocol(t *testing.T) {
 	}
 }
 
+func TestBenchmarkCasesFromInputsAllowsCustomScenarioAndToolMode(t *testing.T) {
+	cases := benchmarkCasesFromInputs([]BenchmarkSpecInput{{
+		Name:        "Tool required",
+		System:      "Use tools.",
+		User:        "Read package.json.",
+		MaxTokens:   32,
+		Temperature: 0.2,
+		TopP:        0.8,
+		TopK:        20,
+		ExpectJSON:  false,
+		ToolMode:    "required",
+	}})
+	if len(cases) != 1 {
+		t.Fatalf("custom benchmark case count = %d, want 1", len(cases))
+	}
+	if cases[0].ToolChoice != "required" || len(cases[0].Tools) == 0 {
+		t.Fatalf("custom tool mode was not applied: %#v", cases[0])
+	}
+	if cases[0].Temperature != 0.2 || cases[0].TopP != 0.8 || cases[0].TopK != 20 {
+		t.Fatalf("custom sampling was not applied: %#v", cases[0])
+	}
+}
+
 func TestLooksLikeBenchmarkOutputLeak(t *testing.T) {
 	if !looksLikeBenchmarkOutputLeak("<start_of_turn>system") {
 		t.Fatalf("expected template token leak")

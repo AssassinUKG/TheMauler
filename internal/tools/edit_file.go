@@ -54,6 +54,9 @@ func (t *EditFile) Run(_ context.Context, raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("edit_file: old_string is required")
 	}
 	p.Path = NormalizeHostPath(p.Path)
+	if err := rejectProtectedMutationPath(p.Path); err != nil {
+		return "", fmt.Errorf("edit_file: %w", err)
+	}
 
 	data, err := os.ReadFile(p.Path)
 	if err != nil {

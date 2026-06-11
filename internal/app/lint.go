@@ -42,16 +42,16 @@ func lintGo(path string) string {
 	out = bytes.TrimSpace(out)
 
 	if err == nil {
-		return "âœ“ go vet passed"
+		return "[ok] go vet passed"
 	}
 	if len(out) == 0 {
-		return fmt.Sprintf("âœ— go vet failed: %v", err)
+		return fmt.Sprintf("[fail] go vet failed: %v", err)
 	}
 	msg := string(out)
 	if len(msg) > 600 {
 		msg = msg[:600] + "\n... (truncated)"
 	}
-	return fmt.Sprintf("âœ— go vet errors:\n%s", msg)
+	return fmt.Sprintf("[fail] go vet errors:\n%s", msg)
 }
 
 func lintPython(path string) string {
@@ -77,13 +77,13 @@ func lintPython(path string) string {
 	out, err := cmd.CombinedOutput()
 	out = bytes.TrimSpace(out)
 	if err == nil {
-		return "âœ“ python syntax OK"
+		return "[ok] python syntax OK"
 	}
 	msg := string(out)
 	if len(msg) > 400 {
 		msg = msg[:400] + "\n... (truncated)"
 	}
-	return fmt.Sprintf("âœ— python syntax error:\n%s", msg)
+	return fmt.Sprintf("[fail] python syntax error:\n%s", msg)
 }
 
 func lintShell(path string) string {
@@ -103,12 +103,12 @@ func lintShell(path string) string {
 		out, err := cmd.CombinedOutput()
 		out = bytes.TrimSpace(out)
 		if err == nil {
-			return "âœ“ bash -n syntax OK"
+			return "[ok] bash -n syntax OK"
 		}
 		lastOut = out
 		if !strings.Contains(strings.ToLower(string(out)), "no such file") {
 			break
 		}
 	}
-	return fmt.Sprintf("âœ— bash syntax error:\n%s", string(lastOut))
+	return fmt.Sprintf("[fail] bash syntax error:\n%s", string(lastOut))
 }

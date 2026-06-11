@@ -60,9 +60,17 @@ func normaliseSettings(s *Settings) {
 	if s.Tools.MaxBrowserActions <= 0 {
 		s.Tools.MaxBrowserActions = defaults.Tools.MaxBrowserActions
 	}
+	if s.Tools.BashTimeout <= 0 {
+		s.Tools.BashTimeout = defaults.Tools.BashTimeout
+	}
+	if s.Tools.ShellMode != "isolated" && s.Tools.ShellMode != "shared_terminal" {
+		s.Tools.ShellMode = defaults.Tools.ShellMode
+	}
 	if s.Tools.ActiveToolset == "" {
 		s.Tools.ActiveToolset = defaults.Tools.ActiveToolset
 	}
+	s.Tools.ShellDistro = strings.TrimSpace(s.Tools.ShellDistro)
+	s.Tools.ShellUser = strings.TrimSpace(s.Tools.ShellUser)
 	if s.Tools.Toolsets == nil {
 		s.Tools.Toolsets = defaults.Tools.Toolsets
 	} else {
@@ -80,7 +88,7 @@ func normaliseSettings(s *Settings) {
 	if s.Agents.DefaultAutonomy == "" {
 		s.Agents.DefaultAutonomy = defaults.Agents.DefaultAutonomy
 	}
-	if s.Agents.MaxToolCalls <= 0 {
+	if s.Agents.MaxToolCalls <= 0 || s.Agents.MaxToolCalls == 40 {
 		s.Agents.MaxToolCalls = defaults.Agents.MaxToolCalls
 	}
 	if s.Agents.Presets == nil {
@@ -100,7 +108,17 @@ func normaliseSettings(s *Settings) {
 	}
 	if len(s.Context.ProjectDocFallbackFilenames) == 0 {
 		s.Context.ProjectDocFallbackFilenames = defaults.Context.ProjectDocFallbackFilenames
+	} else {
+		s.Context.ProjectDocFallbackFilenames = mergeProjectDocFallbacks(
+			s.Context.ProjectDocFallbackFilenames,
+			defaults.Context.ProjectDocFallbackFilenames,
+		)
 	}
+	s.Context.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(s.Context.WorkspaceDir))
+	s.Context.OpenFolders = normaliseWorkspaceFolders(s.Context.OpenFolders, s.Context.WorkspaceDir)
+	s.Context.Lab.Target = strings.TrimSpace(s.Context.Lab.Target)
+	s.Context.Lab.VPNInterface = strings.TrimSpace(s.Context.Lab.VPNInterface)
+	s.Context.Lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(s.Context.Lab.LatestArtifact))
 	if s.Memory.MaxEntries <= 0 {
 		s.Memory = defaults.Memory
 	} else {
@@ -124,6 +142,72 @@ func normaliseSettings(s *Settings) {
 	if s.Logging.MaxRuns <= 0 {
 		s.Logging.MaxRuns = defaults.Logging.MaxRuns
 	}
+	if s.UI.TerminalHeight <= 0 {
+		s.UI.TerminalHeight = defaults.UI.TerminalHeight
+		s.UI.TerminalDefaultOpen = defaults.UI.TerminalDefaultOpen
+	}
+}
+
+func mergeProjectDocFallbacks(existing, defaults []string) []string {
+	return mergeStringList(existing, defaults)
+}
+
+func normaliseWorkspaceFolders(folders []WorkspaceFolder, agentRoot string) []WorkspaceFolder {
+	seen := map[string]bool{}
+	var out []WorkspaceFolder
+	add := func(folder WorkspaceFolder) {
+		folder.Path = filepath.ToSlash(strings.TrimSpace(folder.Path))
+		folder.Name = strings.TrimSpace(folder.Name)
+		folder.Role = strings.TrimSpace(folder.Role)
+		if folder.Role == "" {
+			folder.Role = "folder"
+		}
+		if folder.Path == "" || seen[strings.ToLower(folder.Path)] {
+			return
+		}
+		if folder.Name == "" {
+			folder.Name = filepath.Base(folder.Path)
+		}
+		seen[strings.ToLower(folder.Path)] = true
+		out = append(out, folder)
+	}
+	if agentRoot != "" {
+		add(WorkspaceFolder{Path: agentRoot, Role: "root"})
+	}
+	for _, folder := range folders {
+		add(folder)
+	}
+	return out
+}
+
+func mergeStringList(existing, defaults []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(existing)+len(defaults))
+	for _, name := range existing {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	for _, name := range defaults {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 // EffectiveEnabledTools combines the selected toolset with the explicit
@@ -246,6 +330,14 @@ func migrateProviders(pf *ProfilesFile) {
 			pf.Providers[name] = provider
 		}
 	}
+	for name, profile := range defaults.Profiles {
+		if _, ok := pf.Profiles[name]; !ok {
+			pf.Profiles[name] = profile
+		}
+	}
+	normaliseGemma426BQATProfile(pf, defaults)
+	delete(pf.Profiles, "gemma4-12b")
+	delete(pf.Profiles, "gemma4-12b-qat")
 	canonical := make(map[string]string)
 	for name, provider := range pf.Providers {
 		if provider.Backend == "anthropic" {
@@ -283,6 +375,32 @@ func migrateProviders(pf *ProfilesFile) {
 			delete(pf.Providers, name)
 		}
 	}
+}
+
+func normaliseGemma426BQATProfile(pf *ProfilesFile, defaults ProfilesFile) {
+	const name = "gemma4-26b-a4b-qat"
+	profile, ok := pf.Profiles[name]
+	if !ok {
+		return
+	}
+	def := defaults.Profiles[name]
+	modelID := strings.TrimSpace(profile.ModelID)
+	if modelID == "" || strings.EqualFold(modelID, "unsloth/gemma-4-26B-A4B-it-qat-GGUF") {
+		profile.ModelID = def.ModelID
+	}
+	if profile.CtxTokens <= 0 || profile.CtxTokens == 131072 || profile.CtxTokens == 49664 {
+		profile.CtxTokens = def.CtxTokens
+	}
+	if profile.NoThink.MinP == 0 {
+		profile.NoThink.MinP = def.NoThink.MinP
+	}
+	if profile.ThinkGeneral.MinP == 0 {
+		profile.ThinkGeneral.MinP = def.ThinkGeneral.MinP
+	}
+	if profile.ThinkCoding.MinP == 0 {
+		profile.ThinkCoding.MinP = def.ThinkCoding.MinP
+	}
+	pf.Profiles[name] = profile
 }
 
 func providerOnlyProfile(name string, profile Profile) bool {

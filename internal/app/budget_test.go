@@ -21,6 +21,42 @@ func TestTaskBudgetStopsAfterSearchLimit(t *testing.T) {
 	}
 }
 
+func TestTaskBudgetDefaultsAllowDeeperWebResearch(t *testing.T) {
+	b := newTaskBudget(settings.ToolsConfig{})
+	for i := 0; i < 8; i++ {
+		if msg := b.before("web_search"); msg != "" {
+			t.Fatalf("search %d blocked too early: %s", i+1, msg)
+		}
+	}
+	if msg := b.before("web_search"); !strings.Contains(msg, "budget exhausted (8 searches)") {
+		t.Fatalf("ninth search was not blocked with new default: %q", msg)
+	}
+}
+
+func TestTaskBudgetBoostsExploitResearch(t *testing.T) {
+	b := newTaskBudget(settings.ToolsConfig{MaxSearches: 4, MaxFetches: 6, MaxFailedFetches: 3, MaxBrowserActions: 20}, "FreePBX admin config php RCE exploit CVE PoC")
+	for i := 0; i < 16; i++ {
+		if msg := b.before("web_search"); msg != "" {
+			t.Fatalf("exploit search %d blocked too early: %s", i+1, msg)
+		}
+	}
+	if msg := b.before("web_search"); !strings.Contains(msg, "budget exhausted (16 searches)") {
+		t.Fatalf("seventeenth exploit search was not blocked with boosted budget: %q", msg)
+	}
+}
+
+func TestTaskBudgetBoostsHackTheBoxLanguage(t *testing.T) {
+	b := newTaskBudget(settings.ToolsConfig{MaxSearches: 4, MaxFetches: 6, MaxFailedFetches: 3, MaxBrowserActions: 20}, "use master skill to hack the box and get user and root")
+	for i := 0; i < 16; i++ {
+		if msg := b.before("web_search"); msg != "" {
+			t.Fatalf("hack-the-box search %d blocked too early: %s", i+1, msg)
+		}
+	}
+	if msg := b.before("web_search"); !strings.Contains(msg, "budget exhausted (16 searches)") {
+		t.Fatalf("seventeenth hack-the-box search was not blocked with boosted budget: %q", msg)
+	}
+}
+
 func TestTaskBudgetStopsAfterFailedWebAttempts(t *testing.T) {
 	b := newTaskBudget(settings.ToolsConfig{MaxSearches: 4, MaxFetches: 6, MaxFailedFetches: 2, MaxBrowserActions: 20})
 	b.after("web_search", `No results for "x" from DuckDuckGo.`, nil)

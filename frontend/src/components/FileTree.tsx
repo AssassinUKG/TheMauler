@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   GetFileTree, GetHomeDir, GetWorkingDir, ReadFileContent,
   SelectWorkingDir, SetWorkingDir, RenameFile, DeleteFile, CreateFile, CreateDir,
-  type FileNode,
+  ListWorkspaceFolders, AddWorkspaceFolder, RemoveWorkspaceFolder, SelectWorkspaceFolder,
+  GetLabStatus, UpdateLabContext, ScaffoldWorkspaceFolders,
+  type FileNode, type WorkspaceFolder, type LabStatus,
 } from '../wailsjs/go'
 import './FileTree.css'
 
@@ -18,8 +20,13 @@ interface CtxMenu {
 }
 
 export function FileTree({ onOpenFile, onDropFile }: Props) {
-  const [nodes, setNodes] = useState<FileNode[]>([])
   const [cwd, setCwd] = useState('')
+  const [folders, setFolders] = useState<WorkspaceFolder[]>([])
+  const [rootTrees, setRootTrees] = useState<Record<string, FileNode[]>>({})
+  const [labStatus, setLabStatus] = useState<LabStatus | null>(null)
+  const [targetDraft, setTargetDraft] = useState('')
+  const [vpnDraft, setVpnDraft] = useState('')
+  const [scaffoldDraft, setScaffoldDraft] = useState('notes scans loot scripts screenshots')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -32,8 +39,22 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
     try {
       const d = dir ?? await GetWorkingDir()
       setCwd(d)
-      const tree = await GetFileTree(d)
-      setNodes(tree ?? [])
+      const folderItems = await ListWorkspaceFolders().catch(() => [] as WorkspaceFolder[])
+      const effectiveFolders = folderItems.length > 0 ? folderItems : [{ path: d, name: workspaceName(d), role: 'root' }]
+      setFolders(effectiveFolders)
+      setExpanded(prev => {
+        if (prev.size > 0) return prev
+        return new Set(effectiveFolders.map(folder => `root:${folder.path}`))
+      })
+      const entries = await Promise.all(effectiveFolders.map(async folder => {
+        const tree = await GetFileTree(folder.path).catch(() => [] as FileNode[])
+        return [folder.path, tree ?? []] as const
+      }))
+      setRootTrees(Object.fromEntries(entries))
+      const status = await GetLabStatus().catch(() => null)
+      setLabStatus(status)
+      setTargetDraft(status?.target ?? '')
+      setVpnDraft(status?.vpn_interface ?? '')
     } catch (_e) {}
   }, [])
 
@@ -70,6 +91,33 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
   const handleCwdChange = async () => {
     const dir = await SelectWorkingDir(cwd).catch(() => '')
     if (dir && dir !== cwd) await refresh(dir)
+  }
+
+  const addOpenFolder = async () => {
+    const dir = await SelectWorkspaceFolder(cwd).catch(() => '')
+    if (!dir) return
+    await AddWorkspaceFolder(dir, 'folder').catch(() => [])
+    await refresh()
+  }
+
+  const removeOpenFolder = async (path: string) => {
+    await RemoveWorkspaceFolder(path).catch(() => [])
+    await refresh()
+  }
+
+  const saveLabContext = async () => {
+    const status = await UpdateLabContext(targetDraft, vpnDraft, labStatus?.latest_artifact ?? '').catch(() => null)
+    if (status) setLabStatus(status)
+  }
+
+  const scaffoldFolders = async () => {
+    const names = scaffoldDraft.split(/[,\s]+/).map(s => s.trim()).filter(Boolean)
+    if (names.length === 0) return
+    await ScaffoldWorkspaceFolders(cwd, names).catch(() => [])
+    for (const name of names) {
+      await AddWorkspaceFolder(`${cwd.replace(/[\\/]+$/, '')}/${name}`, folderRoleFromName(name)).catch(() => [])
+    }
+    await refresh()
   }
 
   const goUp = async () => {
@@ -153,16 +201,31 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
     <aside className="file-tree">
       <div className="file-tree-header">
         <span className="file-tree-title">EXPLORER</span>
-        <button className="icon-btn" onClick={() => void goUp()} title="Parent directory">Up</button>
-        <button className="icon-btn" onClick={() => void goHome()} title="Home directory">Home</button>
-        <button className="icon-btn" onClick={() => void handleCwdChange()} title="Change directory">Cd</button>
+        <button className="icon-btn" onClick={() => void addOpenFolder()} title="Add folder">Add</button>
+        <button className="icon-btn" onClick={() => void handleCwdChange()} title="Change agent root">Root</button>
         <button className="icon-btn" onClick={() => void refresh()} title="Refresh">Refresh</button>
       </div>
-      <button className="file-tree-cwd" title={cwd} onClick={() => void handleCwdChange()}>
-        <span className="file-tree-cwd-label">Workspace</span>
+      <div className="file-tree-cwd" title={cwd}>
+        <span className="file-tree-cwd-label">Agent Root</span>
         <span className="file-tree-cwd-name">{workspaceName(cwd)}</span>
         <span className="file-tree-cwd-path">{cwd}</span>
-      </button>
+        <span className="file-tree-cwd-actions">
+          <button onClick={() => void goUp()} title="Parent directory">Up</button>
+          <button onClick={() => void goHome()} title="Home directory">Home</button>
+        </span>
+      </div>
+
+      <div className="lab-status-card">
+        <div className="lab-status-title">Run Context</div>
+        <input placeholder="Target IP/URL" value={targetDraft} onChange={e => setTargetDraft(e.target.value)} onBlur={() => void saveLabContext()} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
+        <input placeholder="VPN/interface" value={vpnDraft} onChange={e => setVpnDraft(e.target.value)} onBlur={() => void saveLabContext()} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
+        <div className="lab-status-line">Shell: {shellLabel(labStatus)}</div>
+        <div className="lab-status-line" title={labStatus?.latest_artifact || ''}>Latest: {labStatus?.latest_artifact ? workspaceName(labStatus.latest_artifact) : 'none'}</div>
+        <div className="scaffold-row">
+          <input value={scaffoldDraft} onChange={e => setScaffoldDraft(e.target.value)} title="Folders to create under agent root" />
+          <button onClick={() => void scaffoldFolders()} title="Create folders and add them to Explorer">Make</button>
+        </div>
+      </div>
 
       {creating && (
         <div className="file-tree-create">
@@ -181,20 +244,37 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
       )}
 
       <div className="file-tree-body">
-        <NodeList
-          nodes={nodes}
-          expanded={expanded}
-          onToggle={toggleExpand}
-          onOpenFile={onOpenFile}
-          onDropFile={onDropFile}
-          onCtxMenu={openCtxMenu}
-          renaming={renaming}
-          renameVal={renameVal}
-          onRenameChange={setRenameVal}
-          onRenameSubmit={submitRename}
-          onRenameCancel={() => setRenaming(null)}
-          depth={0}
-        />
+        {folders.map(folder => {
+          const isRoot = samePath(folder.path, cwd)
+          return (
+            <div key={folder.path} className="workspace-root">
+              <div className={`workspace-root-header ${isRoot ? 'agent-root' : ''}`}>
+                <button onClick={() => toggleExpand(`root:${folder.path}`)} title={folder.path}>
+                  {expanded.has(`root:${folder.path}`) ? 'v' : '>'} {folder.name || workspaceName(folder.path)}
+                </button>
+                <span>{isRoot ? 'agent' : folder.role || 'folder'}</span>
+                {!isRoot && <button onClick={() => void changeDir(folder.path)} title="Set as agent root">Root</button>}
+                {!isRoot && <button onClick={() => void removeOpenFolder(folder.path)} title="Remove from Explorer">x</button>}
+              </div>
+              {expanded.has(`root:${folder.path}`) && (
+                <NodeList
+                  nodes={rootTrees[folder.path] ?? []}
+                  expanded={expanded}
+                  onToggle={toggleExpand}
+                  onOpenFile={onOpenFile}
+                  onDropFile={onDropFile}
+                  onCtxMenu={openCtxMenu}
+                  renaming={renaming}
+                  renameVal={renameVal}
+                  onRenameChange={setRenameVal}
+                  onRenameSubmit={submitRename}
+                  onRenameCancel={() => setRenaming(null)}
+                  depth={0}
+                />
+              )}
+            </div>
+          )
+        })}
       </div>
 
       {ctxMenu && (
@@ -358,6 +438,27 @@ function workspaceName(path: string): string {
   const clean = path.replace(/[\\/]+$/, '')
   const parts = clean.split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] || clean || 'Select folder'
+}
+
+function samePath(a: string, b: string): boolean {
+  return a.replace(/[\\/]+$/, '').toLowerCase() === b.replace(/[\\/]+$/, '').toLowerCase()
+}
+
+function shellLabel(status: LabStatus | null): string {
+  if (!status) return 'unknown'
+  let label = status.shell_backend || 'auto'
+  if (status.shell_distro) label += ` ${status.shell_distro}`
+  if (status.shell_user) label += ` as ${status.shell_user}`
+  return label
+}
+
+function folderRoleFromName(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.includes('scan')) return 'scans'
+  if (lower.includes('loot')) return 'loot'
+  if (lower.includes('script')) return 'scripts'
+  if (lower.includes('note')) return 'notes'
+  return 'folder'
 }
 
 function languageFromExt(ext: string): string {

@@ -43,6 +43,21 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	}
 }
 
+func TestNormaliseSettingsPreservesEmptyProtectedPaths(t *testing.T) {
+	cfg := Settings{
+		Tools: ToolsConfig{
+			ProtectedPaths: []string{},
+		},
+		Memory: MemoryConfig{MaxEntries: 10},
+	}
+
+	normaliseSettings(&cfg)
+
+	if len(cfg.Tools.ProtectedPaths) != 0 {
+		t.Fatalf("empty protected paths should stay empty, got %#v", cfg.Tools.ProtectedPaths)
+	}
+}
+
 func TestNormaliseSettingsBackfillsEmptyMemoryConfig(t *testing.T) {
 	cfg := Settings{}
 
@@ -131,5 +146,62 @@ func TestDefaultProfilesIncludeModernLocalProviderPresets(t *testing.T) {
 	}
 	if qwen.NoThink.PresencePenalty != 1.5 {
 		t.Fatalf("nothinking presence_penalty = %v, want 1.5", qwen.NoThink.PresencePenalty)
+	}
+
+	gemmaQAT, ok := pf.Profiles["gemma4-26b-a4b-qat"]
+	if !ok {
+		t.Fatalf("missing gemma4-26b-a4b-qat default profile")
+	}
+	if gemmaQAT.ModelID != "gemma-4-26B-A4B-it-QAT-Q4_0.gguf" {
+		t.Fatalf("gemma4-26b-a4b-qat model_id = %q, want live InferenceBridge id", gemmaQAT.ModelID)
+	}
+	if gemmaQAT.CtxTokens != 49152 || gemmaQAT.Thinking || gemmaQAT.PreserveThink {
+		t.Fatalf("gemma4-26b-a4b-qat defaults = %#v, want snappy 49,152-token nothinking profile", gemmaQAT)
+	}
+	if gemmaQAT.NoThink.Temperature != 1.0 || gemmaQAT.NoThink.TopP != 0.95 || gemmaQAT.NoThink.TopK != 64 || gemmaQAT.NoThink.MinP != 0.05 {
+		t.Fatalf("gemma4-26b-a4b-qat sampling = %#v, want live InferenceBridge temp/top_p/top_k/min_p", gemmaQAT.NoThink)
+	}
+}
+
+func TestMigrateProvidersBackfillsGemma426BQATAndRemovesStale12B(t *testing.T) {
+	pf := &ProfilesFile{
+		Providers: map[string]Provider{},
+		Profiles: map[string]Profile{
+			"gemma4-12b":     {Name: "gemma4-12b", Provider: "llamacpp-local", ModelID: "google/gemma-4-12B-it"},
+			"gemma4-12b-qat": {Name: "gemma4-12b-qat", Provider: "llamacpp-local", ModelID: "google/gemma-4-12B-it-QAT"},
+		},
+	}
+
+	migrateProviders(pf)
+
+	if _, ok := pf.Profiles["gemma4-26b-a4b-qat"]; !ok {
+		t.Fatalf("gemma4-26b-a4b-qat profile was not backfilled: %#v", pf.Profiles)
+	}
+	if _, ok := pf.Profiles["gemma4-12b"]; ok {
+		t.Fatalf("stale gemma4-12b profile was not removed")
+	}
+	if _, ok := pf.Profiles["gemma4-12b-qat"]; ok {
+		t.Fatalf("stale gemma4-12b-qat profile was not removed")
+	}
+}
+
+func TestMigrateProvidersRepairsBadGemma426BQATDefaults(t *testing.T) {
+	pf := &ProfilesFile{
+		Providers: map[string]Provider{},
+		Profiles: map[string]Profile{
+			"gemma4-26b-a4b-qat": {
+				Name:      "gemma4-26b-a4b-qat",
+				Provider:  "llamacpp-local",
+				ModelID:   "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+				CtxTokens: 131072,
+			},
+		},
+	}
+
+	migrateProviders(pf)
+
+	got := pf.Profiles["gemma4-26b-a4b-qat"]
+	if got.ModelID != "gemma-4-26B-A4B-it-QAT-Q4_0.gguf" || got.CtxTokens != 49152 {
+		t.Fatalf("repaired profile = %#v, want live InferenceBridge model id and context", got)
 	}
 }

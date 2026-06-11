@@ -3,7 +3,7 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: #151515;
+  background: var(--c-pane);
   color: var(--text);
 }
 
@@ -14,7 +14,7 @@
   gap: 20px;
   padding: 18px 22px 14px;
   border-bottom: 1px solid var(--border);
-  background: #181818;
+  background: var(--c-panel);
 }
 
 .logs-header h1 {
@@ -61,7 +61,7 @@
 .logs-filters {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: #151515;
+  background: var(--c-pane);
 }
 
 .logs-filters input {
@@ -87,7 +87,7 @@
   min-width: 0;
   overflow: auto;
   border-right: 1px solid var(--border);
-  background: #141414;
+  background: var(--c-list);
   padding: 10px;
 }
 
@@ -106,7 +106,7 @@
 .logs-run-card:hover,
 .logs-run-card.active {
   border-color: var(--accent);
-  background: #242424;
+  background: var(--c-card-hover);
 }
 
 .logs-run-line,
@@ -289,7 +289,7 @@
 .logs-tool {
   border: 1px solid var(--border);
   border-radius: 7px;
-  background: #202020;
+  background: var(--c-card);
   overflow: hidden;
 }
 
@@ -321,6 +321,110 @@
   padding: 18px;
   color: var(--text-dim);
   font-size: 13px;
+}
+
+/* Compact left run-list: tighter cards, single-line prompt */
+.logs-list.compact .logs-run-card {
+  margin-bottom: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.logs-list.compact .logs-run-title {
+  margin-top: 4px;
+  font-size: 12px;
+}
+.logs-list.compact .logs-run-prompt {
+  margin-top: 2px;
+  -webkit-line-clamp: 1;
+  font-size: 11px;
+}
+.logs-list.compact .logs-run-meta {
+  margin-top: 4px;
+}
+
+/* ── Density toggle ─────────────────────────────────── */
+.logs-density {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.logs-density button {
+  height: 30px;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg2);
+  color: var(--text-dim);
+  padding: 0 10px;
+}
+.logs-density button.active {
+  background: var(--c-card-hover);
+  color: var(--text-bright);
+}
+
+/* ── Compact mode: flatten the cards into dense rows ─── */
+.logs-timeline.compact,
+.logs-tools.compact {
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.logs-timeline.compact .logs-event,
+.logs-tools.compact .logs-tool {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+}
+.logs-timeline.compact .logs-event:last-child,
+.logs-tools.compact .logs-tool:last-child {
+  border-bottom: 0;
+}
+
+/* Rows have exactly 3 cells: [status/kind] [message] [time]. */
+.logs-timeline.compact .logs-event > summary,
+.logs-tools.compact .logs-tool > summary {
+  grid-template-columns: 150px minmax(0, 1fr) 60px;
+  gap: 10px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+/* status reads as a left-aligned text token (no pill), ellipsized if long */
+.logs-timeline.compact .logs-event > summary > .logs-status,
+.logs-tools.compact .logs-tool > summary > .logs-status {
+  justify-content: flex-start;
+  min-height: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* message column */
+.logs-timeline.compact .logs-event > summary > span:nth-child(2),
+.logs-tools.compact .logs-tool > summary > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* time column, right-aligned */
+.logs-timeline.compact .logs-event > summary > time,
+.logs-tools.compact .logs-tool > summary > time {
+  text-align: right;
+}
+.logs-timeline.compact .logs-event[open] > summary,
+.logs-tools.compact .logs-tool[open] > summary {
+  background: var(--c-card-hover);
+}
+.logs-timeline.compact .logs-event > summary:hover,
+.logs-tools.compact .logs-tool > summary:hover {
+  background: var(--c-card);
 }
 
 @media (max-width: 900px) {

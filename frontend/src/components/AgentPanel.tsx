@@ -7,21 +7,27 @@ import {
   ClearTodos,
   DeleteMemoryEntry,
   DeleteSkill,
+  GetProjectInstructionsSummary,
   GetSettings,
   GetUserProfile,
+  KillLocalInferenceServers,
   ListMemory,
   RunDoctor,
   ListSkills,
   ListTaskRuns,
   ListTodos,
   ReindexSessionRecall,
+  RestartWSL,
   SaveMemoryEntry,
   SaveSkill,
   SaveUserProfile,
   SearchSessionRecall,
+  SelectProjectInstructionDirectory,
+  SelectProjectInstructionFile,
   SetAgentModeOverride,
   StopAgent,
   UpdateSettings,
+  UseProjectInstructionFile,
   type DoctorResult,
   type MemoryEntry,
   type SessionSearchResult,
@@ -191,23 +197,29 @@ export function AgentPanel({
   const [viewingSkill, setViewingSkill] = useState<Skill | null>(null)
   const [editingSkill, setEditingSkill] = useState<Skill | null>(null)
   const [skillDraft, setSkillDraft] = useState<Skill | null>(null)
+  const [projectSkillPath, setProjectSkillPath] = useState('')
+  const [projectInstructionSummary, setProjectInstructionSummary] = useState('')
   const [userProfile, setUserProfile] = useState('')
   const [editingUserProfile, setEditingUserProfile] = useState(false)
   const [userProfileDraft, setUserProfileDraft] = useState('')
   const [doctorResult, setDoctorResult] = useState<DoctorResult | null>(null)
   const [doctorRunning, setDoctorRunning] = useState(false)
+  const [maintenanceRunning, setMaintenanceRunning] = useState('')
   const [panelStatus, setPanelStatus] = useState('')
 
   const load = async () => {
-    const [s, mem, taskRuns, todoItems, skillItems, profileText] = await Promise.all([
+    const [s, mem, taskRuns, todoItems, skillItems, profileText, instructionSummary] = await Promise.all([
       GetSettings().catch(() => null),
       ListMemory().catch(() => [] as MemoryEntry[]),
       ListTaskRuns().catch(() => [] as TaskRun[]),
       ListTodos().catch(() => [] as TodoItem[]),
       ListSkills().catch(() => [] as Skill[]),
       GetUserProfile().catch(() => ''),
+      GetProjectInstructionsSummary().catch(() => ''),
     ])
     setSettings(s)
+    setProjectSkillPath('')
+    setProjectInstructionSummary(instructionSummary)
     setMemory(mem)
     setRuns(taskRuns)
     setTodos(todoItems)
@@ -245,6 +257,46 @@ export function AgentPanel({
     window.setTimeout(() => setPanelStatus(current => current === message ? '' : current), 2200)
   }
 
+  const refreshProjectInstructionSummary = async () => {
+    setProjectInstructionSummary(await GetProjectInstructionsSummary().catch(() => ''))
+  }
+
+  const activateProjectSkillPath = async (path: string) => {
+    setSaving(true)
+    try {
+      const next = await UseProjectInstructionFile(path.trim())
+      setSettings(next)
+      const skillItems = await ListSkills().catch(() => [] as Skill[])
+      setSkills(skillItems)
+      setProjectSkillPath('')
+      await refreshProjectInstructionSummary()
+      onSettingsChanged()
+      showPanelStatus(path.trim()
+        ? 'Master skill registered for lazy use'
+        : 'Master skill cleared')
+    } catch (e) {
+      showPanelStatus(`Project workflow failed: ${String(e)}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const pickProjectSkillPath = async () => {
+    const fallback = projectSkillPath || settings?.context?.workspace_dir || ''
+    const selected = await SelectProjectInstructionFile(fallback).catch(() => '')
+    if (!selected) return
+    setProjectSkillPath(selected)
+    await activateProjectSkillPath(selected)
+  }
+
+  const pickProjectSkillFolder = async () => {
+    const fallback = projectSkillPath || settings?.context?.workspace_dir || ''
+    const selected = await SelectProjectInstructionDirectory(fallback).catch(() => '')
+    if (!selected) return
+    setProjectSkillPath(selected)
+    await activateProjectSkillPath(selected)
+  }
+
   const runDoctor = async () => {
     setDoctorRunning(true)
     setPanelStatus('')
@@ -255,6 +307,34 @@ export function AgentPanel({
       showPanelStatus(`Doctor failed: ${String(e)}`)
     } finally {
       setDoctorRunning(false)
+    }
+  }
+
+  const killInferenceServers = async () => {
+    if (!confirm('Stop local InferenceBridge and llama-server processes?')) return
+    setMaintenanceRunning('inference')
+    setPanelStatus('')
+    try {
+      const result = await KillLocalInferenceServers()
+      showPanelStatus(result.summary)
+    } catch (e) {
+      showPanelStatus(`Inference cleanup failed: ${String(e)}`)
+    } finally {
+      setMaintenanceRunning('')
+    }
+  }
+
+  const restartWSL = async () => {
+    if (!confirm('Restart WSL now? This stops all running WSL distributions.')) return
+    setMaintenanceRunning('wsl')
+    setPanelStatus('')
+    try {
+      const result = await RestartWSL()
+      showPanelStatus(result.summary)
+    } catch (e) {
+      showPanelStatus(`WSL restart failed: ${String(e)}`)
+    } finally {
+      setMaintenanceRunning('')
     }
   }
 
@@ -1027,6 +1107,35 @@ export function AgentPanel({
           <>
             <div className="agent-section-title">Skills</div>
 
+            <div className="skill-suggestion-card skill-source-card">
+              <div className="skill-suggestion-title">Project Workflow Source</div>
+              <div className="skill-suggestion-reason">
+                Register a master_skill.md, master_skills.md, or instruction folder as the selectable master skill.
+              </div>
+              <input
+                className="agent-input"
+                placeholder={skills.some(skill => skill.name === 'master' && skill.source_path) ? 'Master skill registered. Pick a file/folder to replace it.' : 'Path to master_skill.md, master_skills.md, or an instruction folder'}
+                value={projectSkillPath}
+                onChange={e => setProjectSkillPath(e.target.value)}
+              />
+              {skills.some(skill => skill.name === 'master' && skill.source_path) && (
+                <div className="skill-suggestion-reason">Master skill is registered for lazy use.</div>
+              )}
+              <div className="skill-suggestion-actions">
+                <button onClick={pickProjectSkillPath} disabled={saving}>Pick file</button>
+                <button onClick={pickProjectSkillFolder} disabled={saving}>Pick folder</button>
+                <button onClick={() => void activateProjectSkillPath(projectSkillPath)} disabled={saving}>
+                  Add Master Skill
+                </button>
+                <button onClick={() => void activateProjectSkillPath('')} disabled={saving || !skills.some(skill => skill.name === 'master' && skill.source_path)}>
+                  Clear
+                </button>
+              </div>
+              {projectInstructionSummary && (
+                <pre className="skill-viewer-body">{projectInstructionSummary}</pre>
+              )}
+            </div>
+
             {/* Post-run learning suggestion card */}
             {skillSuggestion && (
               <div className="skill-suggestion-card">
@@ -1041,6 +1150,7 @@ export function AgentPanel({
                         description: '',
                         version: '1.0.0',
                         tags: [],
+                        source_path: '',
                         body: '',
                         raw: skillSuggestion.template,
                         created_at: '',
@@ -1139,7 +1249,7 @@ export function AgentPanel({
                   </div>
                 </div>
                 {viewingSkill.description && <div className="skill-viewer-desc">{viewingSkill.description}</div>}
-                <pre className="skill-viewer-body">{viewingSkill.raw || viewingSkill.body}</pre>
+                <pre className="skill-viewer-body">{skillViewerText(viewingSkill)}</pre>
               </div>
             )}
 
@@ -1154,12 +1264,12 @@ export function AgentPanel({
                     onChange={e => setSkillFilter(e.target.value)}
                   />
                   <button onClick={() => {
-                    setSkillDraft({ name: '', description: '', version: '1.0.0', tags: [], body: '', raw: '', created_at: '', updated_at: '' })
+                    setSkillDraft({ name: '', description: '', version: '1.0.0', tags: [], source_path: '', body: '', raw: '', created_at: '', updated_at: '' })
                     setEditingSkill(null)
                   }}>+ New</button>
                   <button onClick={() => void load()}>↺</button>
                 </div>
-                <div className="agent-memory-list">
+                <div className="agent-memory-list skill-list">
                   {skills.filter(s => {
                     const f = skillFilter.trim().toLowerCase()
                     if (!f) return true
@@ -1271,6 +1381,16 @@ export function AgentPanel({
           disabled={doctorRunning}
           title="Run health checks"
         >{doctorRunning ? '...' : 'Doctor'}</button>
+        <button
+          onClick={() => void killInferenceServers()}
+          disabled={maintenanceRunning !== ''}
+          title="Stop stale InferenceBridge and llama-server processes"
+        >{maintenanceRunning === 'inference' ? '...' : 'Kill Inference'}</button>
+        <button
+          onClick={() => void restartWSL()}
+          disabled={maintenanceRunning !== ''}
+          title="Run wsl.exe --shutdown"
+        >{maintenanceRunning === 'wsl' ? '...' : 'Restart WSL'}</button>
         <button onClick={onOpenSettings}>Settings</button>
       </div>
     </aside>
@@ -1287,6 +1407,19 @@ function fmtDuration(ms: number): string {
 
 function trimActivity(text: string) {
   return text.length > 1200 ? `${text.slice(0, 1200)}\n...` : text
+}
+
+function skillViewerText(skill: Skill): string {
+  if (skill.name === 'master' && skill.source_path) {
+    return [
+      'External master skill source is registered for lazy use.',
+      '',
+      'Use skill_view with name "master" and an optional focused query to read only the needed sections.',
+      '',
+      'The local source path is stored internally and hidden from this view.',
+    ].join('\n')
+  }
+  return skill.raw || skill.body
 }
 
 function activityStatusClass(status: string): string {
@@ -1327,4 +1460,3 @@ function todoStatusClass(status: string): string {
     default: return 'agent-muted'
   }
 }
-

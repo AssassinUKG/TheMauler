@@ -119,6 +119,9 @@ func (r *Registry) Run(ctx context.Context, call llm.ToolCallDef) (string, error
 		return "", fmt.Errorf("unknown tool: %s", call.Function.Name)
 	}
 	args := coerceJSONArguments(t.Schema(), call.Function.Arguments)
+	if err := validateRequiredArguments(t.Schema(), args); err != nil {
+		return "", err
+	}
 	return t.Run(ctx, args)
 }
 
@@ -132,8 +135,8 @@ func defaults() []Tool {
 		&ReadPDF{},
 		&WriteFile{},
 		&EditFile{},
-		&Shell{TimeoutSecs: 30},
-		&Bash{TimeoutSecs: 30},
+		&Shell{TimeoutSecs: 120},
+		&Bash{TimeoutSecs: 120},
 		&Glob{},
 		&Grep{},
 		&SessionSearch{},
@@ -162,10 +165,13 @@ func defaults() []Tool {
 
 type jsonObjectSchema struct {
 	Properties map[string]jsonPropertySchema `json:"properties"`
+	Required   []string                      `json:"required"`
 }
 
 type jsonPropertySchema struct {
-	Type any `json:"type"`
+	Type       any                           `json:"type"`
+	Properties map[string]jsonPropertySchema `json:"properties"`
+	Items      *jsonPropertySchema           `json:"items"`
 }
 
 func coerceJSONArguments(schema, raw json.RawMessage) json.RawMessage {
@@ -177,47 +183,7 @@ func coerceJSONArguments(schema, raw json.RawMessage) json.RawMessage {
 	if len(schema) == 0 || json.Unmarshal(schema, &params) != nil || len(params.Properties) == 0 {
 		return raw
 	}
-	changed := false
-	for name, prop := range params.Properties {
-		value, ok := object[name]
-		if !ok {
-			continue
-		}
-		text, ok := value.(string)
-		if !ok {
-			continue
-		}
-		text = strings.TrimSpace(text)
-		fieldChanged := false
-		for _, typ := range schemaTypes(prop.Type) {
-			switch typ {
-			case "integer":
-				parsed, ok := parseInteger(text)
-				if ok {
-					object[name] = parsed
-					changed = true
-					fieldChanged = true
-				}
-			case "number":
-				parsed, err := strconv.ParseFloat(text, 64)
-				if err == nil {
-					object[name] = parsed
-					changed = true
-					fieldChanged = true
-				}
-			case "boolean":
-				parsed, err := strconv.ParseBool(strings.ToLower(text))
-				if err == nil {
-					object[name] = parsed
-					changed = true
-					fieldChanged = true
-				}
-			}
-			if fieldChanged {
-				break
-			}
-		}
-	}
+	changed := coerceObjectValues(object, params.Properties)
 	if !changed {
 		return raw
 	}
@@ -226,6 +192,115 @@ func coerceJSONArguments(schema, raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 	return out
+}
+
+func coerceObjectValues(object map[string]any, properties map[string]jsonPropertySchema) bool {
+	changed := false
+	for name, prop := range properties {
+		value, ok := object[name]
+		if !ok {
+			continue
+		}
+		if coerceValueForProperty(object, name, value, prop) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func coerceValueForProperty(parent map[string]any, name string, value any, prop jsonPropertySchema) bool {
+	switch typed := value.(type) {
+	case string:
+		coerced, ok := coerceStringValue(typed, prop)
+		if ok {
+			parent[name] = coerced
+			return true
+		}
+	case map[string]any:
+		return coerceObjectValues(typed, prop.Properties)
+	case []any:
+		return coerceArrayValues(typed, prop)
+	}
+	return false
+}
+
+func coerceArrayValues(values []any, prop jsonPropertySchema) bool {
+	if prop.Items == nil {
+		return false
+	}
+	changed := false
+	for i, value := range values {
+		switch typed := value.(type) {
+		case string:
+			coerced, ok := coerceStringValue(typed, *prop.Items)
+			if ok {
+				values[i] = coerced
+				changed = true
+			}
+		case map[string]any:
+			if coerceObjectValues(typed, prop.Items.Properties) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func coerceStringValue(value string, prop jsonPropertySchema) (any, bool) {
+	text := strings.TrimSpace(value)
+	for _, typ := range schemaTypes(prop.Type) {
+		switch typ {
+		case "integer":
+			if parsed, ok := parseInteger(text); ok {
+				return parsed, true
+			}
+		case "number":
+			if parsed, err := strconv.ParseFloat(text, 64); err == nil {
+				return parsed, true
+			}
+		case "boolean":
+			if parsed, err := strconv.ParseBool(strings.ToLower(text)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func validateRequiredArguments(schema, raw json.RawMessage) error {
+	var params jsonObjectSchema
+	if len(schema) == 0 || json.Unmarshal(schema, &params) != nil || len(params.Required) == 0 {
+		return nil
+	}
+	var object map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &object) != nil {
+		return fmt.Errorf("tool arguments must be a JSON object with required fields: %s", strings.Join(params.Required, ", "))
+	}
+	missing := make([]string, 0)
+	for _, name := range params.Required {
+		if isEmptyArgValue(object[name]) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required tool argument(s): %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func isEmptyArgValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(typed) == ""
+	case []any:
+		return len(typed) == 0
+	case map[string]any:
+		return len(typed) == 0
+	default:
+		return false
+	}
 }
 
 func schemaTypes(value any) []string {

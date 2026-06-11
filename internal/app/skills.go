@@ -9,27 +9,29 @@ import (
 	"time"
 
 	"mauler/internal/settings"
+	"mauler/internal/tools"
 )
 
 // Skill is a procedural-memory document in SKILL.md format.
 // Each skill is stored as an individual Markdown file with YAML-style
 // frontmatter so the agent can also read/write them as plain text.
 type Skill struct {
-	Name        string   `json:"name"`         // slug used as filename (e.g. "fix-go-tool-calls")
-	Description string   `json:"description"`  // one-line trigger description
-	Version     string   `json:"version"`      // semver string
+	Name        string   `json:"name"`        // slug used as filename (e.g. "fix-go-tool-calls")
+	Description string   `json:"description"` // one-line trigger description
+	Version     string   `json:"version"`     // semver string
 	Tags        []string `json:"tags"`
-	Body        string   `json:"body"`         // full Markdown body after frontmatter
-	Raw         string   `json:"raw"`          // full file content (frontmatter + body)
+	SourcePath  string   `json:"source_path"` // optional external file/folder backing this skill
+	Body        string   `json:"body"`        // full Markdown body after frontmatter
+	Raw         string   `json:"raw"`         // full file content (frontmatter + body)
 	CreatedAt   string   `json:"created_at"`
 	UpdatedAt   string   `json:"updated_at"`
 }
 
 // SkillSuggestion is emitted after a complex run as a learning prompt.
 type SkillSuggestion struct {
-	Type    string `json:"type"`    // "skill" | "memory"
-	Title   string `json:"title"`
-	Reason  string `json:"reason"`
+	Type     string `json:"type"` // "skill" | "memory"
+	Title    string `json:"title"`
+	Reason   string `json:"reason"`
 	Template string `json:"template"` // pre-filled SKILL.md content the user can edit
 }
 
@@ -124,6 +126,7 @@ func saveSkill(skill Skill) (Skill, error) {
 	}
 	skill.UpdatedAt = now
 	skill.Tags = normaliseTags(skill.Tags)
+	skill.SourcePath = strings.TrimSpace(skill.SourcePath)
 
 	content := renderSkillMD(skill)
 	skill.Raw = content
@@ -133,6 +136,96 @@ func saveSkill(skill Skill) (Skill, error) {
 		return skill, err
 	}
 	return skill, nil
+}
+
+func saveMasterSkillSource(path string) (Skill, string, error) {
+	normalized, prompt, err := readMasterSkillSourcePrompt(path)
+	if err != nil {
+		return Skill{}, "", err
+	}
+	skill := Skill{
+		Name:        "master",
+		Description: "Use when the user explicitly asks to apply the selected master workflow/instruction source.",
+		Version:     "1.0.0",
+		Tags:        []string{"master", "workflow", "instructions"},
+		SourcePath:  normalized,
+		Body:        "External master skill source is registered for lazy use.\n\nLarge external sources are loaded lazily. Use `skills_list` to discover it, then `skill_view` with name `master` and an optional focused query to read only the needed sections.",
+	}
+	saved, err := saveSkill(skill)
+	if err != nil {
+		return saved, "", err
+	}
+	return saved, prompt, nil
+}
+
+func deleteMasterSkillSource() error {
+	dir, err := skillsDir()
+	if err != nil {
+		return err
+	}
+	err = os.Remove(filepath.Join(dir, "master.md"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func readMasterSkillSourcePrompt(path string) (string, string, error) {
+	normalized := strings.TrimSpace(path)
+	if normalized == "" {
+		return "", "", fmt.Errorf("master skill path is required")
+	}
+	normalized = tools.NormalizeHostPath(normalized)
+	abs, err := filepath.Abs(normalized)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", "", fmt.Errorf("master skill source: %w", err)
+	}
+	docs := readInstructionSource(abs, settings.DefaultSettings().Context.ProjectDocMaxBytes)
+	if len(docs) == 0 {
+		return "", "", fmt.Errorf("master skill source contains no readable markdown instructions")
+	}
+	var sb strings.Builder
+	sb.WriteString("Master skill source registered (lazy-load):\n")
+	for _, doc := range docs {
+		sb.WriteString("\n--- Source: " + displayInstructionSourcePath(abs, doc.Path))
+		if doc.Partial {
+			sb.WriteString(" (truncated)")
+		}
+		sb.WriteString(" ---\n")
+		sb.WriteString(firstMarkdownHeadings(doc.Content, 24))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\nUse skill_view with name `master` and a focused query when the task needs instructions from this source.")
+	return filepath.ToSlash(abs), sb.String(), nil
+}
+
+func displayInstructionSourcePath(root, path string) string {
+	root = tools.NormalizeHostPath(root)
+	path = tools.NormalizeHostPath(path)
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.Base(path)
+}
+
+func firstMarkdownHeadings(content string, limit int) string {
+	var lines []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			lines = append(lines, trimmed)
+			if len(lines) >= limit {
+				break
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return "(no markdown headings found)"
+	}
+	return strings.Join(lines, "\n")
 }
 
 // relevantSkills returns skills whose description/tags match the prompt.
@@ -151,6 +244,9 @@ func relevantSkills(cfg settings.SkillsConfig, prompt string) []Skill {
 	}
 	var candidates []scored
 	for _, s := range skills {
+		if s.Name == "master" && !masterSkillRequested(terms) {
+			continue
+		}
 		score := scoreSkill(s, terms)
 		if score > 0 {
 			candidates = append(candidates, scored{skill: s, score: score})
@@ -171,6 +267,10 @@ func relevantSkills(cfg settings.SkillsConfig, prompt string) []Skill {
 		out[i] = candidates[i].skill
 	}
 	return out
+}
+
+func masterSkillRequested(terms map[string]bool) bool {
+	return terms["master"] || terms["master_skill"] || terms["master-skills"] || terms["master_skills"]
 }
 
 func scoreSkill(s Skill, terms map[string]bool) float64 {
@@ -301,6 +401,8 @@ func parseSkillMD(name, content string) Skill {
 					s.Tags = append(s.Tags, t)
 				}
 			}
+		case "source_path":
+			s.SourcePath = val
 		case "created_at":
 			s.CreatedAt = val
 		case "updated_at":
@@ -321,6 +423,9 @@ func renderSkillMD(s Skill) string {
 	sb.WriteString("version: " + s.Version + "\n")
 	if len(s.Tags) > 0 {
 		sb.WriteString("tags: [" + strings.Join(s.Tags, ", ") + "]\n")
+	}
+	if strings.TrimSpace(s.SourcePath) != "" {
+		sb.WriteString("source_path: " + strings.TrimSpace(s.SourcePath) + "\n")
 	}
 	if s.CreatedAt != "" {
 		sb.WriteString("created_at: " + s.CreatedAt + "\n")

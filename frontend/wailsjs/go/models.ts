@@ -42,6 +42,40 @@ export namespace app {
 	        this.error = source["error"];
 	    }
 	}
+	export class BenchmarkSpecInput {
+	    name: string;
+	    system: string;
+	    user: string;
+	    max_tokens: number;
+	    temperature: number;
+	    top_p: number;
+	    top_k: number;
+	    min_p: number;
+	    presence_penalty: number;
+	    seed: number;
+	    expect_json: boolean;
+	    tool_mode: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BenchmarkSpecInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.system = source["system"];
+	        this.user = source["user"];
+	        this.max_tokens = source["max_tokens"];
+	        this.temperature = source["temperature"];
+	        this.top_p = source["top_p"];
+	        this.top_k = source["top_k"];
+	        this.min_p = source["min_p"];
+	        this.presence_penalty = source["presence_penalty"];
+	        this.seed = source["seed"];
+	        this.expect_json = source["expect_json"];
+	        this.tool_mode = source["tool_mode"];
+	    }
+	}
 	export class ChatAttachment {
 	    id?: string;
 	    name: string;
@@ -174,6 +208,64 @@ export namespace app {
 	        this.rollback_len = source["rollback_len"];
 	    }
 	}
+	export class LabStatus {
+	    agent_root: string;
+	    shell_backend: string;
+	    shell_distro: string;
+	    shell_user: string;
+	    target: string;
+	    vpn_interface: string;
+	    latest_artifact: string;
+	    open_folders: settings.WorkspaceFolder[];
+	
+	    static createFrom(source: any = {}) {
+	        return new LabStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.agent_root = source["agent_root"];
+	        this.shell_backend = source["shell_backend"];
+	        this.shell_distro = source["shell_distro"];
+	        this.shell_user = source["shell_user"];
+	        this.target = source["target"];
+	        this.vpn_interface = source["vpn_interface"];
+	        this.latest_artifact = source["latest_artifact"];
+	        this.open_folders = this.convertValues(source["open_folders"], settings.WorkspaceFolder);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class MaintenanceResult {
+	    summary: string;
+	    lines: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MaintenanceResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.summary = source["summary"];
+	        this.lines = source["lines"];
+	    }
+	}
 	export class MemoryEntry {
 	    id: string;
 	    scope: string;
@@ -293,6 +385,7 @@ export namespace app {
 	    description: string;
 	    version: string;
 	    tags: string[];
+	    source_path: string;
 	    body: string;
 	    raw: string;
 	    created_at: string;
@@ -308,6 +401,7 @@ export namespace app {
 	        this.description = source["description"];
 	        this.version = source["version"];
 	        this.tags = source["tags"];
+	        this.source_path = source["source_path"];
 	        this.body = source["body"];
 	        this.raw = source["raw"];
 	        this.created_at = source["created_at"];
@@ -523,6 +617,38 @@ export namespace settings {
 		    return a;
 		}
 	}
+	export class LabContext {
+	    target: string;
+	    vpn_interface: string;
+	    latest_artifact: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LabContext(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.target = source["target"];
+	        this.vpn_interface = source["vpn_interface"];
+	        this.latest_artifact = source["latest_artifact"];
+	    }
+	}
+	export class WorkspaceFolder {
+	    path: string;
+	    name: string;
+	    role: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkspaceFolder(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.name = source["name"];
+	        this.role = source["role"];
+	    }
+	}
 	export class ContextConfig {
 	    auto_inject_file: boolean;
 	    auto_inject_cursor: boolean;
@@ -532,6 +658,8 @@ export namespace settings {
 	    project_doc_max_bytes: number;
 	    project_doc_fallback_filenames: string[];
 	    workspace_dir: string;
+	    open_folders: WorkspaceFolder[];
+	    lab: LabContext;
 	
 	    static createFrom(source: any = {}) {
 	        return new ContextConfig(source);
@@ -547,7 +675,27 @@ export namespace settings {
 	        this.project_doc_max_bytes = source["project_doc_max_bytes"];
 	        this.project_doc_fallback_filenames = source["project_doc_fallback_filenames"];
 	        this.workspace_dir = source["workspace_dir"];
+	        this.open_folders = this.convertValues(source["open_folders"], WorkspaceFolder);
+	        this.lab = this.convertValues(source["lab"], LabContext);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class GenerationParams {
 	    temperature: number;
@@ -593,6 +741,7 @@ export namespace settings {
 	        this.wsl_path_translate = source["wsl_path_translate"];
 	    }
 	}
+	
 	export class LoggingConfig {
 	    enabled: boolean;
 	    log_tool_inputs: boolean;
@@ -646,6 +795,7 @@ export namespace settings {
 	    nothinking: GenerationParams;
 	    spec_type: string;
 	    spec_draft_n_max: number;
+	    spec_draft_model: string;
 	    backend?: string;
 	    base_url?: string;
 	    api_key_env?: string;
@@ -668,6 +818,7 @@ export namespace settings {
 	        this.nothinking = this.convertValues(source["nothinking"], GenerationParams);
 	        this.spec_type = source["spec_type"];
 	        this.spec_draft_n_max = source["spec_draft_n_max"];
+	        this.spec_draft_model = source["spec_draft_model"];
 	        this.backend = source["backend"];
 	        this.base_url = source["base_url"];
 	        this.api_key_env = source["api_key_env"];
@@ -752,6 +903,9 @@ export namespace settings {
 	    syntax_highlight: boolean;
 	    diff_colours: boolean;
 	    chat_timestamps: boolean;
+	    tool_countdown: boolean;
+	    terminal_default_open: boolean;
+	    terminal_height: number;
 	    tree_width: number;
 	    chat_width: number;
 	    artifact_width: number;
@@ -771,6 +925,9 @@ export namespace settings {
 	        this.syntax_highlight = source["syntax_highlight"];
 	        this.diff_colours = source["diff_colours"];
 	        this.chat_timestamps = source["chat_timestamps"];
+	        this.tool_countdown = source["tool_countdown"];
+	        this.terminal_default_open = source["terminal_default_open"];
+	        this.terminal_height = source["terminal_height"];
 	        this.tree_width = source["tree_width"];
 	        this.chat_width = source["chat_width"];
 	        this.artifact_width = source["artifact_width"];
@@ -821,6 +978,9 @@ export namespace settings {
 	    confirm_exec: boolean;
 	    bash_timeout: number;
 	    shell_backend: string;
+	    shell_mode: string;
+	    shell_distro: string;
+	    shell_user: string;
 	    artifact_timeout: number;
 	    web_engine: string;
 	    web_base_url: string;
@@ -831,6 +991,8 @@ export namespace settings {
 	    max_failed_fetches: number;
 	    max_browser_actions: number;
 	    max_tool_result_chars: number;
+	    protected_paths: string[];
+	    redact_secrets: boolean;
 	    active_toolset: string;
 	    toolsets: Record<string, Array<string>>;
 	    enabled_tools: Record<string, boolean>;
@@ -848,6 +1010,9 @@ export namespace settings {
 	        this.confirm_exec = source["confirm_exec"];
 	        this.bash_timeout = source["bash_timeout"];
 	        this.shell_backend = source["shell_backend"];
+	        this.shell_mode = source["shell_mode"];
+	        this.shell_distro = source["shell_distro"];
+	        this.shell_user = source["shell_user"];
 	        this.artifact_timeout = source["artifact_timeout"];
 	        this.web_engine = source["web_engine"];
 	        this.web_base_url = source["web_base_url"];
@@ -858,6 +1023,8 @@ export namespace settings {
 	        this.max_failed_fetches = source["max_failed_fetches"];
 	        this.max_browser_actions = source["max_browser_actions"];
 	        this.max_tool_result_chars = source["max_tool_result_chars"];
+	        this.protected_paths = source["protected_paths"];
+	        this.redact_secrets = source["redact_secrets"];
 	        this.active_toolset = source["active_toolset"];
 	        this.toolsets = source["toolsets"];
 	        this.enabled_tools = source["enabled_tools"];
@@ -930,6 +1097,7 @@ export namespace settings {
 		    return a;
 		}
 	}
+	
 	
 	
 	

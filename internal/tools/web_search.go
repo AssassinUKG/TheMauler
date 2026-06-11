@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -352,15 +353,54 @@ func (t *FetchURL) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	if maxChars > 30000 {
 		maxChars = 30000
 	}
-	text, err := getText(ctx, u.String(), maxChars*2)
+	if text, ok := fetchGitHubReadable(ctx, u, maxChars); ok {
+		return fmt.Sprintf("# %s\n\n%s", u.String(), strings.TrimSpace(text)), nil
+	}
+	text, err := getText(ctx, u.String(), 1<<20)
 	if err != nil {
 		return "", err
 	}
-	text = htmlToText(text)
+	text = readableHTMLToText(text)
 	if len(text) > maxChars {
 		text = text[:maxChars] + "\n[truncated]"
 	}
 	return fmt.Sprintf("# %s\n\n%s", u.String(), strings.TrimSpace(text)), nil
+}
+
+func fetchGitHubReadable(ctx context.Context, u *url.URL, maxChars int) (string, bool) {
+	if !strings.EqualFold(u.Host, "github.com") {
+		return "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	owner, repo := parts[0], parts[1]
+	if len(parts) >= 5 && (parts[2] == "blob" || parts[2] == "raw") {
+		rawURL := "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + strings.Join(parts[3:], "/")
+		text, err := getText(ctx, rawURL, min(1<<20, maxChars*4))
+		if err == nil && strings.TrimSpace(text) != "" {
+			return clampReadableText(text, maxChars), true
+		}
+	}
+	var body struct {
+		Name     string `json:"name"`
+		Path     string `json:"path"`
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	apiURL := "https://api.github.com/repos/" + owner + "/" + repo + "/readme"
+	if err := getJSON(ctx, apiURL, map[string]string{"Accept": "application/vnd.github+json"}, &body); err != nil {
+		return "", false
+	}
+	if body.Encoding != "base64" {
+		return "", false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(body.Content, "\n", ""))
+	if err != nil {
+		return "", false
+	}
+	return clampReadableText("# "+body.Path+"\n\n"+string(decoded), maxChars), true
 }
 
 func getJSON(ctx context.Context, target string, headers map[string]string, out interface{}) error {
@@ -486,6 +526,43 @@ func htmlToText(s string) string {
 	}
 	s = strings.Join(lines, "\n")
 	return strings.TrimSpace(blankRE.ReplaceAllString(s, "\n\n"))
+}
+
+func readableHTMLToText(s string) string {
+	s = stripHTMLComments(s)
+	s = scriptRE.ReplaceAllString(s, " ")
+	for _, tag := range []string{"article", "main", "body"} {
+		if section := largestTagText(s, tag); len(section) > 40 {
+			return section
+		}
+	}
+	return htmlToText(s)
+}
+
+func largestTagText(page, tag string) string {
+	re := regexp.MustCompile(`(?is)<` + tag + `\b[^>]*>(.*?)</` + tag + `>`)
+	matches := re.FindAllStringSubmatch(page, -1)
+	best := ""
+	for _, match := range matches {
+		text := htmlToText(match[1])
+		if len(text) > len(best) {
+			best = text
+		}
+	}
+	return best
+}
+
+func stripHTMLComments(s string) string {
+	commentRE := regexp.MustCompile(`(?is)<!--.*?-->`)
+	return commentRE.ReplaceAllString(s, " ")
+}
+
+func clampReadableText(text string, maxChars int) string {
+	text = strings.TrimSpace(text)
+	if maxChars > 0 && len(text) > maxChars {
+		return text[:maxChars] + "\n[truncated]"
+	}
+	return text
 }
 
 func cleanText(s string) string {

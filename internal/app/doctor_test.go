@@ -156,3 +156,30 @@ func TestAgentPresetBudgetCheckDocumentsWorkingBudgetOnly(t *testing.T) {
 		t.Fatalf("detail should explain launch context separation: %#v", checks[0])
 	}
 }
+
+func TestSharedBackendSubagentCheckWarnsWhenEnabled(t *testing.T) {
+	var checks []DoctorCheck
+	add := func(c DoctorCheck) { checks = append(checks, c) }
+	cfg := settings.DefaultSettings()
+	cfg.Tools.Enabled = true
+	cfg.Tools.ActiveToolset = "balanced"
+	cfg.Tools.EnabledTools["subagent_research"] = true
+
+	addSharedBackendSubagentCheck(add, cfg, settings.Profile{Backend: "llamacpp"})
+
+	if len(checks) != 1 || checks[0].Name != "Subagent backend isolation" || checks[0].Status != "info" {
+		t.Fatalf("expected shared backend info check, got %#v", checks)
+	}
+	if !strings.Contains(checks[0].Detail, "lower-context subagent requests are now reused") {
+		t.Fatalf("detail should mention lower-context reuse: %#v", checks[0])
+	}
+}
+
+func TestSharedBackendSubagentCheckSkipsNonLlamaCpp(t *testing.T) {
+	var checks []DoctorCheck
+	addSharedBackendSubagentCheck(func(c DoctorCheck) { checks = append(checks, c) }, settings.DefaultSettings(), settings.Profile{Backend: "lmstudio"})
+
+	if len(checks) != 0 {
+		t.Fatalf("non-llamacpp provider should not emit shared backend check: %#v", checks)
+	}
+}

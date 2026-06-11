@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,18 @@ func TestWriteFileAppendCreatesFileIfMissing(t *testing.T) {
 	got, _ := os.ReadFile(path)
 	if string(got) != "hello\n" {
 		t.Fatalf("file content = %q, want hello", string(got))
+	}
+}
+
+func TestShouldWriteViaWSLRequiresLinuxAbsolutePathOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("WSL write routing is Windows-specific")
+	}
+	if shouldWriteViaWSL(`/mnt/c/tmp/file.txt`) {
+		t.Fatalf("/mnt/c paths are host paths and should not use WSL stdin writes")
+	}
+	if shouldWriteViaWSL(`C:\tmp\file.txt`) {
+		t.Fatalf("Windows paths should not use WSL stdin writes")
 	}
 }
 

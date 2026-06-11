@@ -124,13 +124,18 @@ export function FileViewer({ file, artifactOutput = '', artifactRunning = false,
             {languages.map(lang => <option key={lang} value={lang}>{lang}</option>)}
           </select>
           {language === 'markdown' && (
-            <button
-              className={showPreview ? 'active-btn' : ''}
-              onClick={() => { setShowPreview(v => !v); setShowDiff(false) }}
-              title="Toggle rendered preview"
-            >
-              {showPreview ? 'Edit' : 'Preview'}
-            </button>
+            <div className="fv-seg" role="group" aria-label="Markdown view">
+              <button
+                className={!showPreview ? 'active-btn' : ''}
+                onClick={() => setShowPreview(false)}
+                title="Edit source"
+              >Edit</button>
+              <button
+                className={showPreview ? 'active-btn' : ''}
+                onClick={() => { setShowPreview(true); setShowDiff(false) }}
+                title="Rendered preview"
+              >Preview</button>
+            </div>
           )}
           {!showDiff && !showPreview && <button onClick={() => void format()}>Format</button>}
           {dirty && !showPreview && (
