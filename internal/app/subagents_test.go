@@ -19,15 +19,32 @@ func TestSubagentSpecsExposeExpectedTools(t *testing.T) {
 			t.Fatalf("subagent spec missing toolset/contract: %#v", spec)
 		}
 	}
-	for _, name := range []string{"subagent_research", "subagent_review", "subagent_testfix", "subagent_summarize"} {
+	for _, name := range []string{"subagent_explore", "subagent_research", "subagent_review", "subagent_testfix", "subagent_summarize"} {
 		if !got[name] {
 			t.Fatalf("missing subagent tool %q in %#v", name, got)
 		}
 	}
 }
 
+func TestSubagentExploreReadOnlyToolset(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "explore"
+	effective := settings.EffectiveEnabledTools(cfg)
+
+	for _, name := range []string{"read_file", "read_many", "glob", "grep"} {
+		if !effective[name] {
+			t.Fatalf("explore toolset should include %s: %#v", name, effective)
+		}
+	}
+	for _, name := range []string{"write_file", "edit_file", "shell", "bash", "web_search", "fetch_url"} {
+		if effective[name] {
+			t.Fatalf("explore toolset should exclude %s: %#v", name, effective)
+		}
+	}
+}
+
 func TestBuildSubagentSystemPromptIncludesBoundsAndWorkspace(t *testing.T) {
-	spec := subagentSpecs()[0]
+	spec := mustSubagentSpec(t, "subagent_research")
 	profile := settings.Profile{Name: "qwen-test", CtxTokens: 32768}
 	prompt := buildSubagentSystemPrompt(spec, profile, 30, 2)
 
@@ -47,7 +64,7 @@ func TestBuildSubagentSystemPromptIncludesBoundsAndWorkspace(t *testing.T) {
 }
 
 func TestSubagentFinalReportIncludesMetadata(t *testing.T) {
-	spec := subagentSpecs()[1]
+	spec := mustSubagentSpec(t, "subagent_review")
 	out := finalSubagentReport(spec, "found issue", nil, 3, "turn budget exhausted")
 
 	for _, want := range []string{"Subagent: Reviewer", "Toolset: safe", "Tool calls used: 3", "Stop: turn budget exhausted", "found issue"} {
@@ -58,7 +75,7 @@ func TestSubagentFinalReportIncludesMetadata(t *testing.T) {
 }
 
 func TestSubagentFinalReportFallsBackToEvidence(t *testing.T) {
-	spec := subagentSpecs()[0]
+	spec := mustSubagentSpec(t, "subagent_research")
 	out := finalSubagentReport(spec, "", []string{
 		`web_search: No results found for "FreePBX 16.0.40.7 exploit"`,
 		`fetch_url: blocked by timeout`,
@@ -79,4 +96,15 @@ func TestSubagentFinalReportFallsBackToEvidence(t *testing.T) {
 	if strings.Contains(out, "No subagent output was produced") {
 		t.Fatalf("fallback report should not return the old blank-output message:\n%s", out)
 	}
+}
+
+func mustSubagentSpec(t *testing.T, toolName string) subagentSpec {
+	t.Helper()
+	for _, spec := range subagentSpecs() {
+		if spec.ToolName == toolName {
+			return spec
+		}
+	}
+	t.Fatalf("missing subagent spec %q", toolName)
+	return subagentSpec{}
 }

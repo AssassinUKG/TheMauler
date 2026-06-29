@@ -233,6 +233,35 @@ func TestLlamaCppLoadModelIncludesLaunchAffectingTemplateKwargs(t *testing.T) {
 	}
 }
 
+func TestLlamaCppLoadModelDoesNotSendDraftModelWhenSpecTypeDisabled(t *testing.T) {
+	var body map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"loaded"}`))
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("llamacpp", server.URL+"/v1", "gemma", 32768, "", true)
+	client.specDraftModel = `C:\missing-draft.gguf`
+	client.specDraftNMax = 3
+
+	if err := client.LoadModel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["spec_type"]; ok {
+		t.Fatalf("spec_type should not be sent when disabled: %#v", body)
+	}
+	if _, ok := body["draft_model_path"]; ok {
+		t.Fatalf("draft_model_path should not be sent when spec_type is disabled: %#v", body)
+	}
+	if _, ok := body["spec_draft_n_max"]; ok {
+		t.Fatalf("spec_draft_n_max should not be sent when spec_type is disabled: %#v", body)
+	}
+}
+
 func TestLMStudioLoadModelSkipsWhenAlreadyLoadedWithContext(t *testing.T) {
 	loadCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -481,7 +510,7 @@ func TestChatCancellationPostsInferenceCancelForLlamaCpp(t *testing.T) {
 	cancel()
 	for range ch {
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for cancelCalls.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

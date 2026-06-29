@@ -6,7 +6,16 @@
 > local skills, toolsets, and post-run skill suggestions. Remaining planned
 > foundation work is bounded subagents, diagnostics polish, live in-run state
 > polish, sandbox shell backends, and later skill import/marketplace support.
-> The UI polish work is still active and should not be removed.
+> The UI polish work is still active and should not be removed. The current
+> "smarter over time without context bloat" architecture track is
+> `docs/brain-memory-ledger-tracker.md`.
+>
+> **Agent reliability track (2026-06-22):** the live, detailed plan for keeping
+> the agent loop stable and reliable — eval harness, config validation,
+> checkpoint/resume, wall-clock budget, sub-agent context hygiene, frontier
+> escalation, grammar-constrained tool args — is in
+> `docs/agent-reliability-roadmap.md` (each item is spec'd so another agent can
+> implement it cold). The analysis behind it is `docs/agent-loop-research-report.md`.
 
 > Go TUI agent app for WSL. Streaming agentic loop, artifact runner, multimodal chat,
 > project context engine, and a live settings editor for everything.

@@ -10,7 +10,7 @@
 .file-tree-header {
   display: flex;
   align-items: center;
-  padding: 10px 10px 6px;
+  padding: 8px 8px 5px;
   gap: 4px;
   flex-shrink: 0;
 }
@@ -30,7 +30,7 @@
   padding: 2px 5px;
   font-size: 11px;
   cursor: pointer;
-  border-radius: 7px;
+  border-radius: 5px;
   transition: background var(--transition), color var(--transition);
 }
 .icon-btn:hover { background: var(--bg3); color: var(--text); }
@@ -40,7 +40,7 @@
   background: transparent;
   border: 0;
   border-bottom: 1px solid var(--border);
-  padding: 7px 10px 9px;
+  padding: 6px 8px 7px;
   font-size: 11px;
   color: var(--text-dim);
   text-align: left;
@@ -88,7 +88,7 @@
 .file-tree-cwd-actions button,
 .workspace-root-header button,
 .scaffold-row button {
-  background: var(--bg3);
+  background: #1b2521;
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
@@ -99,9 +99,9 @@
 
 .lab-status-card {
   border-bottom: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 7px 8px;
   display: grid;
-  gap: 6px;
+  gap: 5px;
   flex-shrink: 0;
 }
 
@@ -116,12 +116,12 @@
 .lab-status-card input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg1);
+  background: #0c1110;
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 12px;
   padding: 4px 7px;
-  border-radius: 6px;
+  border-radius: 5px;
   outline: none;
 }
 
@@ -159,7 +159,7 @@
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 4px;
   align-items: center;
-  padding: 3px 8px;
+  padding: 3px 6px;
 }
 
 .workspace-root-header button:first-child {
@@ -187,16 +187,16 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
-  margin: 1px 6px;
+  padding: 2px 7px;
+  margin: 1px 4px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
-  font-size: 13px;
-  border-radius: 8px;
+  font-size: 12px;
+  border-radius: 5px;
   transition: background var(--transition), color var(--transition);
 }
-.file-entry:hover { background: var(--bg3); }
+.file-entry:hover { background: #202924; }
 .file-entry.dir { color: var(--text); }
 .file-entry.file { color: var(--text-dim); }
 .file-entry.file:hover { color: var(--text); }
@@ -218,9 +218,9 @@
   position: fixed;
   z-index: 1000;
   min-width: 164px;
-  background: var(--bg2);
+  background: #151918;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 5px;
   padding: 4px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
 }

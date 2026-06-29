@@ -199,7 +199,7 @@ func openSQLiteReadOnly(path string) (*sql.DB, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	dsn := "file:" + filepath.ToSlash(abs) + "?mode=ro&immutable=1"
+	dsn := "file:" + filepath.ToSlash(abs) + "?mode=ro&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, "", err

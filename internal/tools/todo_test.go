@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"mauler/internal/store"
 )
 
 func withTempHome(t *testing.T) {
 	t.Helper()
+	SetTodoDB(nil)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 }
@@ -62,8 +65,52 @@ func TestTodoClear(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("expected cleared todos, got %#v", items)
 	}
+	db, cleanup, err := todoStore()
+	if err != nil {
+		t.Fatalf("todo store: %v", err)
+	}
+	defer cleanup()
+	count, err := todoCountDB(db)
+	if err != nil {
+		t.Fatalf("todo count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected sqlite todos to be cleared, got %d", count)
+	}
+}
+
+func TestTodoMigratesLegacyJSONIntoSQLite(t *testing.T) {
+	withTempHome(t)
+	legacy := []TodoItem{
+		{ID: "todo-1", Text: "legacy", Status: "in_progress", CreatedAt: "2026-06-15T10:00:00Z", UpdatedAt: "2026-06-15T10:00:00Z"},
+	}
+	if err := saveTodosJSON(legacy); err != nil {
+		t.Fatalf("legacy save: %v", err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	SetTodoDB(db)
+	t.Cleanup(func() { SetTodoDB(nil) })
+
+	imported, err := MigrateTodosJSONToDB(db)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if imported != 1 {
+		t.Fatalf("imported = %d, want 1", imported)
+	}
+	items, err := LoadTodos()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(items) != 1 || items[0].Text != "legacy" {
+		t.Fatalf("unexpected migrated todos: %#v", items)
+	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".config", "mauler", "todos.json")); err != nil {
-		t.Fatalf("expected todo file to exist: %v", err)
+		t.Fatalf("legacy todo file should remain available: %v", err)
 	}
 }
 

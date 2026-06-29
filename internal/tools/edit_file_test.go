@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"mauler/internal/settings"
 )
 
 func runEditFile(t *testing.T, params any) (string, error) {
@@ -132,5 +137,64 @@ func TestEditFileNotFoundOnDisk(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestApplyExactEditKeepsHostAndWSLRoutesIdentical(t *testing.T) {
+	got, oldLines, newLines, err := applyExactEdit("a\nold\nz\n", "old\n", "new\nline\n", "/tmp/example.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "a\nnew\nline\nz\n" {
+		t.Fatalf("content = %q", got)
+	}
+	if oldLines != 2 || newLines != 3 {
+		t.Fatalf("line counts = %d/%d, want 2/3", oldLines, newLines)
+	}
+}
+
+func TestEditFileWSLAbsolutePathRoutesToWSL(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("WSL edit routing is Windows-specific")
+	}
+	cfg := settings.DefaultSettings().Tools
+	cfg.ShellBackend = "wsl"
+	SetConfigSnapshot(cfg)
+	t.Cleanup(ResetConfigSnapshot)
+	if !ShouldUseWSLForPath("/tmp/mauler_edit_route_probe.txt") {
+		t.Skip("WSL backend is not active for Linux-absolute paths")
+	}
+	if _, err := exec.LookPath("wsl.exe"); err != nil {
+		t.Skip("wsl.exe not available")
+	}
+
+	name := "mauler_edit_file_test_" + strings.ReplaceAll(filepath.Base(t.TempDir()), "\\", "_") + ".txt"
+	wslPath := "/tmp/" + name
+	seed := "alpha\nold block\nomega\n"
+	createCmd := exec.Command("wsl.exe", "--", "bash", "-lc", "printf '%s' "+shellQuote(seed)+" > "+shellQuote(wslPath))
+	if out, err := createCmd.CombinedOutput(); err != nil {
+		t.Skipf("WSL not usable for test setup: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("wsl.exe", "--", "bash", "-lc", "rm -f -- "+shellQuote(wslPath)).Run()
+	})
+
+	out, err := runEditFile(t, map[string]any{
+		"path":       wslPath,
+		"old_string": "old block",
+		"new_string": "new block",
+	})
+	if err != nil {
+		t.Fatalf("edit_file should edit WSL-internal /tmp path, got: %v", err)
+	}
+	if !strings.Contains(out, "(WSL)") {
+		t.Fatalf("result should identify WSL edit route: %q", out)
+	}
+	data, err := ReadFileViaWSL(wslPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "alpha\nnew block\nomega\n" {
+		t.Fatalf("WSL file content = %q", data)
 	}
 }

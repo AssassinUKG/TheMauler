@@ -33,6 +33,7 @@ func Load() (*Settings, error) {
 	path := filepath.Join(dir, "settings.toml")
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		logValidationAdjustments("settings", s.Validate())
 		return &s, nil
 	}
 
@@ -40,6 +41,7 @@ func Load() (*Settings, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	normaliseSettings(&s)
+	logValidationAdjustments("settings", s.Validate())
 	return &s, nil
 }
 
@@ -50,15 +52,26 @@ func normaliseSettings(s *Settings) {
 	}
 	if s.Tools.MaxSearches <= 0 {
 		s.Tools.MaxSearches = defaults.Tools.MaxSearches
+	} else if s.Tools.MaxSearches == 8 {
+		s.Tools.MaxSearches = defaults.Tools.MaxSearches
 	}
 	if s.Tools.MaxFetches <= 0 {
+		s.Tools.MaxFetches = defaults.Tools.MaxFetches
+	} else if s.Tools.MaxFetches == 12 {
 		s.Tools.MaxFetches = defaults.Tools.MaxFetches
 	}
 	if s.Tools.MaxFailedFetches <= 0 {
 		s.Tools.MaxFailedFetches = defaults.Tools.MaxFailedFetches
+	} else if s.Tools.MaxFailedFetches == 5 {
+		s.Tools.MaxFailedFetches = defaults.Tools.MaxFailedFetches
 	}
 	if s.Tools.MaxBrowserActions <= 0 {
 		s.Tools.MaxBrowserActions = defaults.Tools.MaxBrowserActions
+	} else if s.Tools.MaxBrowserActions == 35 {
+		s.Tools.MaxBrowserActions = defaults.Tools.MaxBrowserActions
+	}
+	if s.Tools.MaxToolResultChars == 8000 {
+		s.Tools.MaxToolResultChars = defaults.Tools.MaxToolResultChars
 	}
 	if s.Tools.BashTimeout <= 0 {
 		s.Tools.BashTimeout = defaults.Tools.BashTimeout
@@ -82,14 +95,22 @@ func normaliseSettings(s *Settings) {
 			}
 		}
 	}
+	emptyAgentsConfig := s.Agents.ModeOverride == "" &&
+		s.Agents.DefaultAutonomy == "" &&
+		s.Agents.MaxToolCalls == 0 &&
+		s.Agents.MaxRunSeconds == 0 &&
+		s.Agents.Presets == nil
 	if s.Agents.ModeOverride == "" {
 		s.Agents.ModeOverride = defaults.Agents.ModeOverride
 	}
 	if s.Agents.DefaultAutonomy == "" {
 		s.Agents.DefaultAutonomy = defaults.Agents.DefaultAutonomy
 	}
-	if s.Agents.MaxToolCalls <= 0 || s.Agents.MaxToolCalls == 40 {
+	if s.Agents.MaxToolCalls <= 0 || s.Agents.MaxToolCalls == 40 || s.Agents.MaxToolCalls == 100 {
 		s.Agents.MaxToolCalls = defaults.Agents.MaxToolCalls
+	}
+	if emptyAgentsConfig {
+		s.Agents.MaxRunSeconds = defaults.Agents.MaxRunSeconds
 	}
 	if s.Agents.Presets == nil {
 		s.Agents.Presets = defaults.Agents.Presets
@@ -99,6 +120,7 @@ func normaliseSettings(s *Settings) {
 				s.Agents.Presets[name] = preset
 			}
 		}
+		migrateOpsPreset(s.Agents.Presets, defaults.Agents.Presets)
 	}
 	if s.Context.CompactionAt <= 0 {
 		s.Context.CompactionAt = defaults.Context.CompactionAt
@@ -145,6 +167,33 @@ func normaliseSettings(s *Settings) {
 	if s.UI.TerminalHeight <= 0 {
 		s.UI.TerminalHeight = defaults.UI.TerminalHeight
 		s.UI.TerminalDefaultOpen = defaults.UI.TerminalDefaultOpen
+	}
+	s.UI.Theme = strings.TrimSpace(s.UI.Theme)
+	if s.UI.Theme == "" {
+		s.UI.Theme = defaults.UI.Theme
+	}
+	if s.UI.AccentColor == "" {
+		s.UI.AccentColor = defaults.UI.AccentColor
+	}
+	if s.UI.PrimaryColor == "" {
+		s.UI.PrimaryColor = defaults.UI.PrimaryColor
+	}
+}
+
+func migrateOpsPreset(presets, defaults map[string]AgentModePreset) {
+	if presets == nil || defaults == nil {
+		return
+	}
+	current, ok := presets["Ops"]
+	next, hasDefault := defaults["Ops"]
+	if !ok || !hasDefault {
+		return
+	}
+	if strings.EqualFold(current.Toolset, "local-code") &&
+		current.ToolPermissions != nil &&
+		!current.ToolPermissions["web_search"] &&
+		!current.ToolPermissions["fetch_url"] {
+		presets["Ops"] = next
 	}
 }
 
@@ -306,6 +355,7 @@ func LoadProfiles() (*ProfilesFile, error) {
 	path := filepath.Join(dir, "profiles.toml")
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		p := DefaultProfiles()
+		logValidationAdjustments("profiles", p.Validate())
 		return &p, nil
 	}
 
@@ -317,7 +367,14 @@ func LoadProfiles() (*ProfilesFile, error) {
 		pf.Profiles = make(map[string]Profile)
 	}
 	migrateProviders(&pf)
+	logValidationAdjustments("profiles", pf.Validate())
 	return &pf, nil
+}
+
+func logValidationAdjustments(scope string, adjustments []string) {
+	for _, adjustment := range adjustments {
+		_, _ = fmt.Fprintf(os.Stderr, "[settings] %s auto-corrected: %s\n", scope, adjustment)
+	}
 }
 
 func migrateProviders(pf *ProfilesFile) {
@@ -340,12 +397,11 @@ func migrateProviders(pf *ProfilesFile) {
 	delete(pf.Profiles, "gemma4-12b-qat")
 	canonical := make(map[string]string)
 	for name, provider := range pf.Providers {
-		if provider.Backend == "anthropic" {
-			delete(pf.Providers, name)
-			continue
-		}
 		provider.Name = name
 		provider.BaseURL = strings.TrimRight(provider.BaseURL, "/")
+		if provider.Backend == "anthropic" && provider.BaseURL == "" {
+			provider.BaseURL = "https://api.anthropic.com/v1"
+		}
 		pf.Providers[name] = provider
 		key := providerKey(provider.Backend, provider.BaseURL)
 		if existing, ok := canonical[key]; ok {
@@ -357,7 +413,7 @@ func migrateProviders(pf *ProfilesFile) {
 		}
 	}
 	for name, profile := range pf.Profiles {
-		if profile.Backend == "anthropic" || name == "claude-sonnet" || providerOnlyProfile(name, profile) {
+		if name == "claude-sonnet" || providerOnlyProfile(name, profile) {
 			delete(pf.Profiles, name)
 			continue
 		}
@@ -424,6 +480,8 @@ func providerNameForProfile(name string, profile Profile, pf *ProfilesFile, cano
 	baseURL := strings.TrimRight(profile.BaseURL, "/")
 	if baseURL == "" && backend == "llamacpp" {
 		baseURL = "http://localhost:8080/v1"
+	} else if baseURL == "" && backend == "anthropic" {
+		baseURL = "https://api.anthropic.com/v1"
 	}
 	if baseURL == "" {
 		baseURL = "http://localhost:1234/v1"

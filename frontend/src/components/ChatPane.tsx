@@ -2,7 +2,7 @@ import { useRef, useEffect, useState, useCallback, useMemo, type KeyboardEvent }
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Undo, EncodeFileBase64, PickSaveFilePath, SaveFileContent, GetWorkingDir, type ChatAttachment } from '../wailsjs/go'
-import type { ChatMessage, ToolCountdown } from '../App'
+import type { ChatMessage, RunStatePayload, ToolCountdown } from '../App'
 import './ChatPane.css'
 
 interface Props {
@@ -15,8 +15,10 @@ interface Props {
   autonomous: boolean
   pendingInterrupt: boolean
   toolCountdown: ToolCountdown | null
+  runState: RunStatePayload | null
   onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[]) => void
   onCancelPending: () => void
+  onCancelTool: (name: string) => void
   onStopAgent: () => void
   onClearChat: () => void
   onArtifact: (code: string, lang: string) => void
@@ -34,8 +36,10 @@ export function ChatPane({
   autonomous,
   pendingInterrupt,
   toolCountdown,
+  runState,
   onSubmitMessage,
   onCancelPending,
+  onCancelTool,
   onStopAgent,
   onClearChat,
   onArtifact,
@@ -321,15 +325,17 @@ export function ChatPane({
               <ThinkingBlock text={thinkingBuffer} live />
             )}
             {toolCountdown && (
-              <ToolCountdownCard countdown={toolCountdown} nowMs={nowMs} onCancel={onStopAgent} />
+              <ToolCountdownCard countdown={toolCountdown} nowMs={nowMs} onCancel={onCancelTool} />
             )}
             {streamBuffer ? (
               <div className="msg-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamBuffer}</ReactMarkdown>
               </div>
             ) : !thinkingBuffer ? (
-              <div className="msg-body thinking-dots">
-                <span /><span /><span />
+              <div className="msg-body agent-live-status">
+                <div className="agent-live-title">{formatRunState(runState?.state || 'working')}</div>
+                <div className="agent-live-detail">{runState?.detail || 'Waiting for model text or tool output...'}</div>
+                <div className="thinking-dots"><span /><span /><span /></div>
               </div>
             ) : null}
           </div>
@@ -429,6 +435,11 @@ export function ChatPane({
   )
 }
 
+function formatRunState(state: string): string {
+  if (!state) return 'Working'
+  return state.replaceAll('_', ' ').replace(/\b\w/g, ch => ch.toUpperCase())
+}
+
 function attachmentSubtitle(att: ChatAttachment): string {
   if (att.kind === 'pdf') return 'PDF'
   if (att.kind === 'document') return 'Document'
@@ -462,7 +473,7 @@ function ToolCountdownCard({
 }: {
   countdown: ToolCountdown
   nowMs: number
-  onCancel: () => void
+  onCancel: (name: string) => void
 }) {
   const remainingMs = Math.max(0, countdown.deadline - nowMs)
   const remainingSec = Math.ceil(remainingMs / 1000)
@@ -477,7 +488,7 @@ function ToolCountdownCard({
           <span>{countdown.name}</span>
           <span>{formatDuration(remainingSec)} left</span>
         </div>
-        <button className="tool-countdown-cancel" onClick={onCancel} title={isShell ? 'Cancel this shell call' : 'Stop the current tool call'}>
+        <button className="tool-countdown-cancel" onClick={() => onCancel(countdown.name)} title={isShell ? 'Interrupt this shell call' : 'Stop the current tool call'}>
           {isShell ? 'Cancel shell' : 'Cancel'}
         </button>
       </div>

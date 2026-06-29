@@ -22,6 +22,7 @@ type ProfileBenchmarkResult struct {
 	ProviderName       string           `json:"provider_name,omitempty"`
 	ModelID            string           `json:"model_id,omitempty"`
 	CtxTokens          int              `json:"ctx_tokens,omitempty"`
+	ActualCtxTokens    int              `json:"actual_ctx_tokens,omitempty"`
 	ContextTier        string           `json:"context_tier,omitempty"`
 	ContextRole        string           `json:"context_role,omitempty"`
 	Score              int              `json:"score,omitempty"`
@@ -80,6 +81,49 @@ func (a *App) BenchmarkProfileWithCases(profile settings.Profile, provider setti
 	return a.runBenchmarkProfile(profile, provider, inputs)
 }
 
+func (a *App) LoadBenchmarkModel(profile settings.Profile, provider settings.Provider) ProfileBenchmarkResult {
+	profile.Backend = provider.Backend
+	profile.BaseURL = provider.BaseURL
+	profile.APIKeyEnv = provider.APIKeyEnv
+	result := ProfileBenchmarkResult{
+		Status:             "ok",
+		ID:                 fmt.Sprintf("bench-load-%s", time.Now().Format("20060102-150405")),
+		CreatedAt:          time.Now().Format(time.RFC3339),
+		ProfileName:        profile.Name,
+		ProviderName:       provider.Name,
+		ModelID:            profile.ModelID,
+		CtxTokens:          profile.CtxTokens,
+		ContextTier:        contextTier(profile.CtxTokens),
+		ContextRole:        contextRole(profile.CtxTokens),
+		Summary:            "Model loaded for benchmark.",
+		RecommendedProfile: profile,
+	}
+	client, err := buildClientForAgent(profile)
+	if err != nil {
+		result.Status = "warn"
+		result.Summary = "Provider client could not be created."
+		result.Notes = append(result.Notes, err.Error())
+		return result
+	}
+	loadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := a.ensureModelLoaded(loadCtx, client, profile); err != nil {
+		result.Status = "warn"
+		result.Summary = "Provider could not load the requested benchmark context."
+		result.Notes = append(result.Notes, err.Error())
+		return result
+	}
+	result.ActualCtxTokens = benchmarkActualContext(loadCtx, client)
+	if result.ActualCtxTokens > 0 {
+		result.Summary = fmt.Sprintf("Loaded %s at requested %d context; backend reports %d.", profile.ModelID, profile.CtxTokens, result.ActualCtxTokens)
+	}
+	if result.ActualCtxTokens > 0 && result.ActualCtxTokens < profile.CtxTokens {
+		result.Status = "warn"
+		result.Notes = append(result.Notes, fmt.Sprintf("Backend reported actual context %d after requesting %d.", result.ActualCtxTokens, profile.CtxTokens))
+	}
+	return result
+}
+
 func (a *App) runBenchmarkProfile(profile settings.Profile, provider settings.Provider, inputs []BenchmarkSpecInput) ProfileBenchmarkResult {
 	profile.Backend = provider.Backend
 	profile.BaseURL = provider.BaseURL
@@ -104,12 +148,26 @@ func (a *App) runBenchmarkProfile(profile settings.Profile, provider settings.Pr
 		_ = saveBenchmarkRun(result)
 	}()
 
-	client, err := buildClient(recommended)
+	client, err := buildClientForAgent(recommended)
 	if err != nil {
 		result.Status = "warn"
 		result.Summary = "Recommendations generated, but the provider client could not be created."
 		result.Notes = append(result.Notes, err.Error())
 		return result
+	}
+	loadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := a.ensureModelLoaded(loadCtx, client, recommended); err != nil {
+		cancel()
+		result.Status = "warn"
+		result.Summary = "Recommendations generated, but the provider could not load the requested benchmark context."
+		result.Notes = append(result.Notes, err.Error())
+		return result
+	}
+	result.ActualCtxTokens = benchmarkActualContext(loadCtx, client)
+	cancel()
+	if result.ActualCtxTokens > 0 && result.ActualCtxTokens < recommended.CtxTokens {
+		result.Status = "warn"
+		result.Notes = append(result.Notes, fmt.Sprintf("Backend reported actual context %d after requesting %d; this run is not a valid %dk context measurement.", result.ActualCtxTokens, recommended.CtxTokens, recommended.CtxTokens/1024))
 	}
 
 	cases := benchmarkCases(recommended)
@@ -168,6 +226,18 @@ func (a *App) ClearBenchmarkRuns() error {
 		return err
 	}
 	return nil
+}
+
+func benchmarkActualContext(ctx context.Context, client llm.Client) int {
+	cq, ok := client.(interface {
+		ActualContextLength(context.Context) int
+	})
+	if !ok {
+		return 0
+	}
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return cq.ActualContextLength(qctx)
 }
 
 type benchmarkSpec struct {

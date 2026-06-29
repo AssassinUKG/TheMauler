@@ -86,6 +86,22 @@ func TestGlobNoMatch(t *testing.T) {
 	}
 }
 
+func TestGlobMasterSkillNoMatchHintsRegisteredSkill(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("MAULER_CONFIG_DIR", cfgDir)
+	sourceDir := t.TempDir()
+	saveToolSkill(t, cfgDir, sourceDir)
+	root := makeTree(t)
+
+	out, err := runGlob(t, map[string]any{"pattern": "**/master_skill*", "dir": root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "skill_view") || !strings.Contains(out, "name\":\"master") {
+		t.Fatalf("expected registered master skill hint, got %q", out)
+	}
+}
+
 func TestGlobMissingPatternError(t *testing.T) {
 	_, err := runGlob(t, map[string]any{"pattern": ""})
 	if err == nil {

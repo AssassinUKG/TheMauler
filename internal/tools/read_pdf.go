@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -50,12 +52,30 @@ func (t *ReadPDF) Run(_ context.Context, raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("read_pdf: path is required")
 	}
 
-	path := NormalizeHostPath(p.Path)
-	f, reader, err := pdf.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("read_pdf: %w", err)
+	var path string
+	var reader *pdf.Reader
+	if shouldWriteViaWSL(strings.TrimSpace(p.Path)) {
+		// PDF lives inside the WSL filesystem; pdf.Open can't reach it, so read
+		// the bytes via WSL and parse from memory.
+		data, display, err := ReadRouted(p.Path)
+		if err != nil {
+			return "", fmt.Errorf("read_pdf: %w", err)
+		}
+		path = display
+		reader, err = pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			return "", fmt.Errorf("read_pdf: %w", err)
+		}
+	} else {
+		hostPath := NormalizeHostPath(p.Path)
+		path = filepath.ToSlash(hostPath)
+		f, r, err := pdf.Open(hostPath)
+		if err != nil {
+			return "", fmt.Errorf("read_pdf: %w", err)
+		}
+		defer f.Close()
+		reader = r
 	}
-	defer f.Close()
 
 	total := reader.NumPage()
 	if total <= 0 {

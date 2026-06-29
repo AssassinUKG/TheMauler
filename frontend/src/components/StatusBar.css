@@ -50,6 +50,8 @@
 .status-token-used { font-weight: 600; }
 .status-token-sep { opacity: 0.5; }
 .status-token-budget { opacity: 0.6; }
+.status-token-reserve { opacity: 0.5; font-size: 10px; color: var(--yellow, #d9a441); }
+.status-token-window { opacity: 0.45; }
 .status-token-pct {
   margin-left: 3px;
   font-weight: 700;
@@ -89,7 +91,8 @@
 }
 
 .status-run-recovering .status-run-dot,
-.status-run-blocked .status-run-dot {
+.status-run-blocked .status-run-dot,
+.status-run-stopped .status-run-dot {
   background: var(--orange);
 }
 
@@ -119,6 +122,21 @@
   border-radius: 4px;
   overflow: visible;
   flex-shrink: 0;
+}
+
+/* Reserved tail — context held back for the model's reply */
+.ctx-bar-reserve {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(217,164,65,0.30),
+    rgba(217,164,65,0.30) 3px,
+    rgba(217,164,65,0.10) 3px,
+    rgba(217,164,65,0.10) 6px
+  );
 }
 
 /* Coloured fill segments */

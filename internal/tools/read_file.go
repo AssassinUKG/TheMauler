@@ -45,15 +45,14 @@ func (t *ReadFile) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	if p.Path == "" {
 		return "", fmt.Errorf("read_file: path is required")
 	}
-	p.Path = NormalizeHostPath(p.Path)
-
-	data, err := os.ReadFile(p.Path)
+	data, displayPath, err := ReadRouted(p.Path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("read_file: %w\n%s", err, MissingPathHint())
 		}
 		return "", fmt.Errorf("read_file: %w", err)
 	}
+	p.Path = displayPath
 
 	lines := strings.Split(string(data), "\n")
 	total := len(lines)

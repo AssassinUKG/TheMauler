@@ -59,6 +59,8 @@ export function MemoryPage({ version }: { version: number }) {
       content: draft.content.trim(),
       tags: draft.tags,
       kind: draft.kind || 'note',
+      confidence: draft.confidence || 'confirmed',
+      source: draft.source || 'user',
       importance: draft.importance || 3,
       pinned: draft.pinned,
     })
@@ -145,6 +147,7 @@ export function MemoryPage({ version }: { version: number }) {
             >
               <div className="memory-card-line">
                 <span className={item.pinned ? 'memory-pill pinned' : 'memory-pill'}>{item.kind || 'note'}</span>
+                <span className="memory-pill">{item.confidence || 'confirmed'}</span>
                 <span className="memory-importance">i{item.importance || 3}</span>
               </div>
               <div className="memory-card-title">{item.title || 'Project note'}</div>
@@ -183,7 +186,7 @@ export function MemoryPage({ version }: { version: number }) {
                 <div className="memory-selected-head">
                   <div>
                     <div className="memory-selected-title">{selected.title || 'Project note'}</div>
-                    <div className="memory-selected-meta">{selected.kind || 'note'} / importance {selected.importance || 3}</div>
+                    <div className="memory-selected-meta">{selected.kind || 'note'} / {selected.confidence || 'confirmed'} / {selected.source || 'user'} / importance {selected.importance || 3}</div>
                   </div>
                   <div className="memory-button-row">
                     <button onClick={() => setEditing(selected)}>Edit</button>
@@ -259,6 +262,8 @@ function blankMemory(): MemoryEntry {
     content: '',
     tags: [],
     kind: 'note',
+    confidence: 'confirmed',
+    source: 'user',
     importance: 3,
     pinned: false,
     created_at: '',
@@ -284,6 +289,12 @@ function MemoryEditor({
       <div className="memory-editor-row">
         <select value={entry.kind || 'note'} onChange={e => onChange({ ...entry, kind: e.target.value })}>
           {['note', 'preference', 'constraint', 'fact', 'workflow', 'decision'].map(kind => <option key={kind}>{kind}</option>)}
+        </select>
+        <select value={entry.confidence || 'confirmed'} onChange={e => onChange({ ...entry, confidence: e.target.value })}>
+          {['confirmed', 'likely', 'hypothesis', 'stale'].map(confidence => <option key={confidence}>{confidence}</option>)}
+        </select>
+        <select value={entry.source || 'user'} onChange={e => onChange({ ...entry, source: e.target.value })}>
+          {['user', 'agent', 'tool', 'model', 'previous_run', 'auto_distill', 'system'].map(source => <option key={source}>{source}</option>)}
         </select>
         <input
           type="number"

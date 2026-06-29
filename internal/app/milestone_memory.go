@@ -64,6 +64,8 @@ func buildRunMilestoneMemory(run *TaskRun) *MemoryEntry {
 		Title:      title,
 		Content:    sanitizeMilestoneMemory(strings.Join(lines, "\n")),
 		Kind:       "fact",
+		Confidence: "likely",
+		Source:     "previous_run",
 		Importance: milestoneImportance(run, milestones),
 		Tags:       milestoneTags(run, target),
 	}

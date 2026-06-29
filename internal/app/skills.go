@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"mauler/internal/ledger"
 	"mauler/internal/settings"
 	"mauler/internal/tools"
 )
@@ -16,15 +17,19 @@ import (
 // Each skill is stored as an individual Markdown file with YAML-style
 // frontmatter so the agent can also read/write them as plain text.
 type Skill struct {
-	Name        string   `json:"name"`        // slug used as filename (e.g. "fix-go-tool-calls")
-	Description string   `json:"description"` // one-line trigger description
-	Version     string   `json:"version"`     // semver string
-	Tags        []string `json:"tags"`
-	SourcePath  string   `json:"source_path"` // optional external file/folder backing this skill
-	Body        string   `json:"body"`        // full Markdown body after frontmatter
-	Raw         string   `json:"raw"`         // full file content (frontmatter + body)
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	Name          string   `json:"name"`        // slug used as filename (e.g. "fix-go-tool-calls")
+	Description   string   `json:"description"` // one-line trigger description
+	Version       string   `json:"version"`     // semver string
+	Tags          []string `json:"tags"`
+	SourcePath    string   `json:"source_path"` // optional external file/folder backing this skill
+	RequiredTools []string `json:"required_tools"`
+	ShellBackend  string   `json:"shell_backend"` // optional: wsl | bash | powershell | cmd | auto
+	NeedsNetwork  bool     `json:"needs_network"`
+	NeedsWrite    bool     `json:"needs_write"`
+	Body          string   `json:"body"` // full Markdown body after frontmatter
+	Raw           string   `json:"raw"`  // full file content (frontmatter + body)
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
 }
 
 // SkillSuggestion is emitted after a complex run as a learning prompt.
@@ -46,7 +51,23 @@ func (a *App) GetSkill(name string) (Skill, error) {
 }
 
 func (a *App) SaveSkill(skill Skill) (Skill, error) {
-	return saveSkill(skill)
+	saved, err := saveSkill(skill)
+	if err != nil {
+		return saved, err
+	}
+	a.recordLedger(ledger.Event{
+		Kind:    "skill_write",
+		Source:  "skills",
+		Status:  "saved",
+		Message: saved.Name,
+		Detail:  saved.Description,
+		Output:  saved.Raw,
+		Metadata: map[string]string{
+			"version": saved.Version,
+			"tags":    strings.Join(saved.Tags, ","),
+		},
+	})
+	return saved, nil
 }
 
 func (a *App) DeleteSkill(name string) error {
@@ -54,7 +75,17 @@ func (a *App) DeleteSkill(name string) error {
 	if err != nil {
 		return err
 	}
-	return os.Remove(filepath.Join(dir, slugify(name)+".md"))
+	slug := slugify(name)
+	if err := os.Remove(filepath.Join(dir, slug+".md")); err != nil {
+		return err
+	}
+	a.recordLedger(ledger.Event{
+		Kind:    "skill_delete",
+		Source:  "skills",
+		Status:  "deleted",
+		Message: slug,
+	})
+	return nil
 }
 
 // ---------- Internal helpers ----------
@@ -127,6 +158,8 @@ func saveSkill(skill Skill) (Skill, error) {
 	skill.UpdatedAt = now
 	skill.Tags = normaliseTags(skill.Tags)
 	skill.SourcePath = strings.TrimSpace(skill.SourcePath)
+	skill.RequiredTools = normaliseTags(skill.RequiredTools)
+	skill.ShellBackend = strings.TrimSpace(skill.ShellBackend)
 
 	content := renderSkillMD(skill)
 	skill.Raw = content
@@ -230,6 +263,10 @@ func firstMarkdownHeadings(content string, limit int) string {
 
 // relevantSkills returns skills whose description/tags match the prompt.
 func relevantSkills(cfg settings.SkillsConfig, prompt string) []Skill {
+	return relevantSkillsForSettings(cfg, settings.DefaultSettings(), prompt)
+}
+
+func relevantSkillsForSettings(cfg settings.SkillsConfig, appCfg settings.Settings, prompt string) []Skill {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -247,6 +284,7 @@ func relevantSkills(cfg settings.SkillsConfig, prompt string) []Skill {
 		if s.Name == "master" && !masterSkillRequested(terms) {
 			continue
 		}
+		s = annotateSkillAvailability(s, appCfg)
 		score := scoreSkill(s, terms)
 		if score > 0 {
 			candidates = append(candidates, scored{skill: s, score: score})
@@ -269,8 +307,69 @@ func relevantSkills(cfg settings.SkillsConfig, prompt string) []Skill {
 	return out
 }
 
+func annotateSkillAvailability(skill Skill, cfg settings.Settings) Skill {
+	problems := skillAvailabilityProblems(skill, cfg)
+	if len(problems) == 0 {
+		return skill
+	}
+	note := "Tool availability note: this skill may not be fully usable in the current run because " + strings.Join(problems, "; ") + ". If those capabilities are needed, ask the user to switch toolset/shell profile instead of repeatedly trying blocked tools."
+	if strings.TrimSpace(skill.Body) == "" {
+		skill.Body = note
+		return skill
+	}
+	if !strings.Contains(skill.Body, "Tool availability note:") {
+		skill.Body = note + "\n\n" + skill.Body
+	}
+	return skill
+}
+
+func skillAvailabilityProblems(skill Skill, cfg settings.Settings) []string {
+	var problems []string
+	effective := settings.EffectiveEnabledTools(cfg.Tools)
+	for _, name := range skill.RequiredTools {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if !toolEnabled(effective, name) {
+			problems = append(problems, fmt.Sprintf("required tool %q is not enabled by active toolset %q", name, cfg.Tools.ActiveToolset))
+		}
+	}
+	if skill.NeedsWrite && !toolEnabled(effective, "write_file") && !toolEnabled(effective, "edit_file") {
+		problems = append(problems, "write/edit tools are unavailable")
+	}
+	if skill.NeedsNetwork && !toolEnabled(effective, "web_search") && !toolEnabled(effective, "fetch_url") && !toolEnabled(effective, "shell") {
+		problems = append(problems, "network-capable tools are unavailable")
+	}
+	if backend := strings.ToLower(strings.TrimSpace(skill.ShellBackend)); backend != "" && backend != "auto" {
+		active := strings.ToLower(strings.TrimSpace(cfg.Tools.ShellBackend))
+		if active == "" {
+			active = "auto"
+		}
+		if active != backend {
+			problems = append(problems, fmt.Sprintf("skill expects shell backend %q but active backend is %q", backend, active))
+		}
+	}
+	return dedupeStrings(problems)
+}
+
 func masterSkillRequested(terms map[string]bool) bool {
-	return terms["master"] || terms["master_skill"] || terms["master-skills"] || terms["master_skills"]
+	if terms["master"] || terms["master_skill"] || terms["master-skill"] || terms["master-skills"] || terms["master_skills"] {
+		return true
+	}
+	if terms["masterskill"] || terms["masterskil"] {
+		return true
+	}
+	for _, term := range []string{
+		"pentest", "hacking", "exploit", "exploits", "exploitation", "foothold",
+		"recon", "enumeration", "privsec", "privesc", "cve", "payload", "shell",
+		"htb", "freepbx",
+	} {
+		if terms[term] {
+			return true
+		}
+	}
+	return false
 }
 
 func scoreSkill(s Skill, terms map[string]bool) float64 {
@@ -403,6 +502,14 @@ func parseSkillMD(name, content string) Skill {
 			}
 		case "source_path":
 			s.SourcePath = val
+		case "required_tools":
+			s.RequiredTools = parseFrontmatterList(val)
+		case "shell_backend":
+			s.ShellBackend = val
+		case "needs_network":
+			s.NeedsNetwork = parseFrontmatterBool(val)
+		case "needs_write":
+			s.NeedsWrite = parseFrontmatterBool(val)
 		case "created_at":
 			s.CreatedAt = val
 		case "updated_at":
@@ -427,6 +534,18 @@ func renderSkillMD(s Skill) string {
 	if strings.TrimSpace(s.SourcePath) != "" {
 		sb.WriteString("source_path: " + strings.TrimSpace(s.SourcePath) + "\n")
 	}
+	if len(s.RequiredTools) > 0 {
+		sb.WriteString("required_tools: [" + strings.Join(s.RequiredTools, ", ") + "]\n")
+	}
+	if strings.TrimSpace(s.ShellBackend) != "" {
+		sb.WriteString("shell_backend: " + strings.TrimSpace(s.ShellBackend) + "\n")
+	}
+	if s.NeedsNetwork {
+		sb.WriteString("needs_network: true\n")
+	}
+	if s.NeedsWrite {
+		sb.WriteString("needs_write: true\n")
+	}
 	if s.CreatedAt != "" {
 		sb.WriteString("created_at: " + s.CreatedAt + "\n")
 	}
@@ -449,6 +568,44 @@ func extractSkillBody(content string) string {
 		return content
 	}
 	return strings.TrimSpace(rest[end+4:])
+}
+
+func parseFrontmatterList(val string) []string {
+	val = strings.Trim(strings.TrimSpace(val), "[]")
+	if val == "" {
+		return nil
+	}
+	var out []string
+	for _, item := range strings.Split(val, ",") {
+		item = strings.Trim(strings.TrimSpace(item), `"'`)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return normaliseTags(out)
+}
+
+func parseFrontmatterBool(val string) bool {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(val), `"'`)) {
+	case "true", "yes", "1", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func dedupeStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 // ---------- Path / util helpers ----------

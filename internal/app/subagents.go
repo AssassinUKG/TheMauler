@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mauler/internal/agent"
+	"mauler/internal/ledger"
 	"mauler/internal/llm"
 	"mauler/internal/settings"
 	"mauler/internal/tools"
@@ -17,6 +18,7 @@ type subagentKind string
 
 const (
 	subagentResearcher subagentKind = "Researcher"
+	subagentExplorer   subagentKind = "Explorer"
 	subagentReviewer   subagentKind = "Reviewer"
 	subagentTestFix    subagentKind = "Test/Fix"
 	subagentSummarizer subagentKind = "Summarizer"
@@ -52,10 +54,26 @@ func (a *App) registerAppTools() {
 	for _, spec := range subagentSpecs() {
 		a.registry.Register(&subagentTool{app: a, spec: spec})
 	}
+	a.registry.Register(&memoryTool{app: a})
+	a.registry.Register(&fileChangesTool{app: a})
+	a.registry.Register(&httpProbeTool{app: a})
+	a.registry.Register(&evidenceBundleTool{app: a})
 }
 
 func subagentSpecs() []subagentSpec {
 	return []subagentSpec{
+		{
+			ToolName:      "subagent_explore",
+			ModeName:      "Planner",
+			Kind:          subagentExplorer,
+			Toolset:       "explore",
+			TimeoutSecs:   180,
+			MaxTurns:      6,
+			MaxToolCalls:  20,
+			MaxOutput:     2200,
+			ContextBudget: 24576,
+			Contract:      "Return: Scope inspected, Key files/symbols found, Relevant snippets or line references, Gaps/uncertainty, Recommended next inspection or implementation step. Do not edit files.",
+		},
 		{
 			ToolName:      "subagent_research",
 			ModeName:      "Researcher",
@@ -151,15 +169,49 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	profile := activeProfile(&cfg, &profiles)
 	timeout := boundedValue(args.TimeoutSeconds, spec.TimeoutSecs, 10, spec.TimeoutSecs)
 	maxToolCalls := boundedValue(args.MaxToolCalls, spec.MaxToolCalls, 0, spec.MaxToolCalls)
+	subagentID := fmt.Sprintf("subagent-%d", time.Now().UnixNano())
+	a.recordLedger(ledger.Event{
+		ID:      subagentID,
+		Kind:    "subagent_start",
+		Source:  "subagent",
+		Tool:    spec.ToolName,
+		Status:  "running",
+		Message: string(spec.Kind),
+		Input:   args.Task,
+		Detail:  args.Context,
+		Metadata: map[string]string{
+			"toolset":        spec.Toolset,
+			"timeout_secs":   fmt.Sprintf("%d", timeout),
+			"max_tool_calls": fmt.Sprintf("%d", maxToolCalls),
+			"profile":        profile.Name,
+			"model":          profile.ModelID,
+		},
+	})
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	client, err := buildClient(profile)
 	if err != nil {
+		a.recordLedger(ledger.Event{
+			Kind:    "subagent_done",
+			Source:  "subagent",
+			Tool:    spec.ToolName,
+			Status:  "error",
+			Message: subagentID,
+			Error:   err.Error(),
+		})
 		return "", err
 	}
 	if err := a.ensureModelLoaded(ctx, client, profile); err != nil {
+		a.recordLedger(ledger.Event{
+			Kind:    "subagent_done",
+			Source:  "subagent",
+			Tool:    spec.ToolName,
+			Status:  "error",
+			Message: subagentID,
+			Error:   err.Error(),
+		})
 		return "", err
 	}
 
@@ -181,7 +233,17 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	toolCallsUsed := 0
 	for turn := 0; turn < spec.MaxTurns; turn++ {
 		if ctx.Err() != nil {
-			return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "timeout or cancellation"), ctx.Err()
+			report := finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "timeout or cancellation")
+			a.recordLedger(ledger.Event{
+				Kind:    "subagent_done",
+				Source:  "subagent",
+				Tool:    spec.ToolName,
+				Status:  "cancelled",
+				Message: subagentID,
+				Output:  report,
+				Error:   ctx.Err().Error(),
+			})
+			return report, ctx.Err()
 		}
 		reqToolDefs := toolDefs
 		toolChoice := "auto"
@@ -190,18 +252,38 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 			toolChoice = "none"
 			msgs = append(msgs, llm.NewTextMessage(llm.RoleUser, "Your subagent tool budget is exhausted. Do not call tools. Return the required output contract now using only the evidence already gathered, including searches tried and uncertainty."))
 		}
-		req := buildChatRequest(profile, msgs, reqToolDefs, toolChoice, false, subagentUsesCodingParams(spec.Kind))
+		req := buildChatRequest(profile, msgs, reqToolDefs, toolChoice, false, subagentUsesCodingParams(spec.Kind), "medium")
 		req.MaxTokens = spec.MaxOutput
 		req.Temperature = 0.2
 		ch, err := client.Chat(ctx, req)
 		if err != nil {
-			return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, err.Error()), err
+			report := finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, err.Error())
+			a.recordLedger(ledger.Event{
+				Kind:    "subagent_done",
+				Source:  "subagent",
+				Tool:    spec.ToolName,
+				Status:  "error",
+				Message: subagentID,
+				Output:  report,
+				Error:   err.Error(),
+			})
+			return report, err
 		}
 		var text strings.Builder
 		var calls []llm.ToolCallDef
 		for delta := range ch {
 			if delta.Error != nil {
-				return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, delta.Error.Error()), delta.Error
+				report := finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, delta.Error.Error())
+				a.recordLedger(ledger.Event{
+					Kind:    "subagent_done",
+					Source:  "subagent",
+					Tool:    spec.ToolName,
+					Status:  "error",
+					Message: subagentID,
+					Output:  report,
+					Error:   delta.Error.Error(),
+				})
+				return report, delta.Error
 			}
 			text.WriteString(delta.Content)
 			if len(delta.ToolCalls) > 0 {
@@ -215,7 +297,16 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 			msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: "", ToolCalls: calls})
 		}
 		if len(calls) == 0 {
-			return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, ""), nil
+			report := finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "")
+			a.recordLedger(ledger.Event{
+				Kind:    "subagent_done",
+				Source:  "subagent",
+				Tool:    spec.ToolName,
+				Status:  "done",
+				Message: subagentID,
+				Output:  report,
+			})
+			return report, nil
 		}
 		for _, call := range calls {
 			if maxToolCalls >= 0 && toolCallsUsed >= maxToolCalls {
@@ -227,7 +318,9 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 				msgs = append(msgs, newToolResultMsg(call.ID, call.Function.Name, "blocked: this subagent is read-only."))
 				continue
 			}
+			var beforeMutation fileChangeSnapshot
 			if spec.Destructive && isWriteTool(call.Function.Name) {
+				beforeMutation = snapshotToolTarget(call)
 				if snapPath := extractPath(call); snapPath != "" {
 					_ = a.rollback.Push(agent.OpWrite, tools.NormalizeHostPath(snapPath))
 				}
@@ -238,8 +331,22 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 			} else if spec.Destructive && isWriteTool(call.Function.Name) {
 				if verification := verifyMutationResult(call); verification != "" {
 					result = result + "\n" + verification
+					a.recordFileChange("", call, beforeMutation, verification, 0)
 				}
 			}
+			status := "done"
+			if runErr != nil {
+				status = "error"
+			}
+			a.recordLedger(ledger.Event{
+				Kind:    "subagent_tool",
+				Source:  "subagent",
+				Tool:    call.Function.Name,
+				Status:  status,
+				Message: subagentID,
+				Input:   string(call.Function.Arguments),
+				Output:  result,
+			})
 			if guarded, findings := guardToolResult(call.Function.Name, result, cfg.Tools.RedactSecrets); len(findings) > 0 {
 				result = guarded
 			}
@@ -247,7 +354,16 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 			msgs = append(msgs, newToolResultMsg(call.ID, call.Function.Name, truncateToolResult(result, cfg.Tools.MaxToolResultChars)))
 		}
 	}
-	return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "turn budget exhausted"), nil
+	report := finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "turn budget exhausted")
+	a.recordLedger(ledger.Event{
+		Kind:    "subagent_done",
+		Source:  "subagent",
+		Tool:    spec.ToolName,
+		Status:  "exhausted",
+		Message: subagentID,
+		Output:  report,
+	})
+	return report, nil
 }
 
 func buildSubagentSystemPrompt(spec subagentSpec, profile settings.Profile, timeout, maxToolCalls int) string {
@@ -288,7 +404,7 @@ func finalSubagentReport(spec subagentSpec, output string, evidence []string, to
 
 func subagentUsesCodingParams(kind subagentKind) bool {
 	switch kind {
-	case subagentReviewer, subagentTestFix:
+	case subagentExplorer, subagentReviewer, subagentTestFix:
 		return true
 	default:
 		return false

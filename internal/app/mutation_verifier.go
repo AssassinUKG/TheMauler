@@ -39,25 +39,24 @@ func verifyWriteFileMutation(tc llm.ToolCallDef) string {
 	if err := json.Unmarshal(tc.Function.Arguments, &p); err != nil {
 		return fmt.Sprintf("Verification failed: could not parse write_file arguments: %v", err)
 	}
-	path := tools.NormalizeHostPath(p.Path)
-	data, info, verifyErr := readVerifiedFile(path)
+	vf, verifyErr := readVerifiedFile(p.Path)
 	if verifyErr != "" {
 		return verifyErr
 	}
 
 	var status string
 	if p.Append {
-		if p.Content != "" && !strings.HasSuffix(string(data), p.Content) {
-			status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but it does not end with the appended content.", filepath.ToSlash(path), info.Size())
+		if p.Content != "" && !strings.HasSuffix(string(vf.data), p.Content) {
+			status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but it does not end with the appended content.", vf.displayPath, vf.size)
 		} else {
-			status = fmt.Sprintf("Verification: append confirmed for %s (%d bytes).", filepath.ToSlash(path), info.Size())
+			status = fmt.Sprintf("Verification: append confirmed for %s (%d bytes).", vf.displayPath, vf.size)
 		}
-	} else if string(data) != p.Content {
-		status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but file content differs from write_file input (%d bytes).", filepath.ToSlash(path), info.Size(), len(p.Content))
+	} else if string(vf.data) != p.Content {
+		status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but file content differs from write_file input (%d bytes).", vf.displayPath, vf.size, len(p.Content))
 	} else {
-		status = fmt.Sprintf("Verification: write confirmed for %s (%d bytes).", filepath.ToSlash(path), info.Size())
+		status = fmt.Sprintf("Verification: write confirmed for %s (%d bytes).", vf.displayPath, vf.size)
 	}
-	return appendLint(status, path)
+	return appendLint(status, vf)
 }
 
 func verifyEditFileMutation(tc llm.ToolCallDef) string {
@@ -65,44 +64,69 @@ func verifyEditFileMutation(tc llm.ToolCallDef) string {
 	if err := json.Unmarshal(tc.Function.Arguments, &p); err != nil {
 		return fmt.Sprintf("Verification failed: could not parse edit_file arguments: %v", err)
 	}
-	path := tools.NormalizeHostPath(p.Path)
-	data, info, verifyErr := readVerifiedFile(path)
+	vf, verifyErr := readVerifiedFile(p.Path)
 	if verifyErr != "" {
 		return verifyErr
 	}
-	content := string(data)
+	content := string(vf.data)
 
 	var status string
 	if p.NewString != "" && !strings.Contains(content, p.NewString) {
-		status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but new_string was not found after edit.", filepath.ToSlash(path), info.Size())
+		status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but new_string was not found after edit.", vf.displayPath, vf.size)
 	} else if p.OldString != "" && p.OldString != p.NewString && !strings.Contains(p.NewString, p.OldString) && strings.Contains(content, p.OldString) {
-		status = fmt.Sprintf("Verification warning: %s exists (%d bytes), but old_string is still present after edit.", filepath.ToSlash(path), info.Size())
+		status = fmt.Sprintf("Verification warning: %s exists (%d bytes), but old_string is still present after edit.", vf.displayPath, vf.size)
 	} else {
-		status = fmt.Sprintf("Verification: edit confirmed for %s (%d bytes).", filepath.ToSlash(path), info.Size())
+		status = fmt.Sprintf("Verification: edit confirmed for %s (%d bytes).", vf.displayPath, vf.size)
 	}
-	return appendLint(status, path)
+	return appendLint(status, vf)
 }
 
-func readVerifiedFile(path string) ([]byte, os.FileInfo, string) {
-	if strings.TrimSpace(path) == "" {
-		return nil, nil, "Verification failed: tool arguments did not include a path."
+// verifiedFile is the result of reading a just-mutated file back for
+// verification. hostPath is set only when the file lives on the Windows host (so
+// it can be linted); WSL-routed files leave it empty.
+type verifiedFile struct {
+	data        []byte
+	size        int64
+	displayPath string
+	hostPath    string
+}
+
+func readVerifiedFile(rawPath string) (verifiedFile, string) {
+	raw := strings.TrimSpace(rawPath)
+	if raw == "" {
+		return verifiedFile{}, "Verification failed: tool arguments did not include a path."
 	}
+	// Mirror write_file's routing: a Linux-absolute path on a WSL-backed host was
+	// written inside WSL, so it must be read back inside WSL too — os.Stat on the
+	// Windows host would look for \tmp\... and fail.
+	if tools.ShouldUseWSLForPath(raw) {
+		display := filepath.ToSlash(strings.ReplaceAll(raw, "\\", "/"))
+		data, err := tools.ReadFileViaWSL(raw)
+		if err != nil {
+			return verifiedFile{}, fmt.Sprintf("Verification failed: read %s (WSL): %v", display, err)
+		}
+		return verifiedFile{data: data, size: int64(len(data)), displayPath: display}, ""
+	}
+	path := tools.NormalizeHostPath(raw)
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("Verification failed: stat %s: %v", filepath.ToSlash(path), err)
+		return verifiedFile{}, fmt.Sprintf("Verification failed: stat %s: %v", filepath.ToSlash(path), err)
 	}
 	if info.IsDir() {
-		return nil, nil, fmt.Sprintf("Verification failed: %s is a directory, not a file.", filepath.ToSlash(path))
+		return verifiedFile{}, fmt.Sprintf("Verification failed: %s is a directory, not a file.", filepath.ToSlash(path))
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("Verification failed: read %s: %v", filepath.ToSlash(path), err)
+		return verifiedFile{}, fmt.Sprintf("Verification failed: read %s: %v", filepath.ToSlash(path), err)
 	}
-	return data, info, ""
+	return verifiedFile{data: data, size: info.Size(), displayPath: filepath.ToSlash(path), hostPath: path}, ""
 }
 
-func appendLint(status, path string) string {
-	if lintOut := lintFile(path); lintOut != "" {
+func appendLint(status string, vf verifiedFile) string {
+	if vf.hostPath == "" {
+		return status // WSL-routed file: host linters can't reach it
+	}
+	if lintOut := lintFile(vf.hostPath); lintOut != "" {
 		return status + "\n" + lintOut
 	}
 	return status

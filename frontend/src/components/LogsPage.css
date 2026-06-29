@@ -3,7 +3,7 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--c-pane);
+  background: #101312;
   color: var(--text);
 }
 
@@ -11,41 +11,41 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 18px 22px 14px;
+  gap: 12px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--c-panel);
+  background: #151817;
 }
 
 .logs-header h1 {
   margin: 0;
   color: var(--text-bright);
-  font-size: 20px;
+  font-size: 16px;
   letter-spacing: 0;
 }
 
 .logs-header p {
-  margin: 4px 0 0;
+  margin: 3px 0 0;
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .logs-actions,
 .logs-filters {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
 }
 
 .logs-actions button,
 .logs-filters select {
-  height: 30px;
-  border-radius: 7px;
+  height: 28px;
+  border-radius: 5px;
   border: 1px solid var(--border);
   background: var(--bg2);
   color: var(--text);
-  font-size: 12px;
-  padding: 0 10px;
+  font-size: 11px;
+  padding: 0 9px;
 }
 
 .logs-actions .danger {
@@ -59,20 +59,20 @@
 }
 
 .logs-filters {
-  padding: 10px 14px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--c-pane);
+  background: #111514;
 }
 
 .logs-filters input {
   flex: 1;
   min-width: 0;
-  height: 32px;
+  height: 29px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 5px;
   background: var(--bg1);
   color: var(--text);
-  padding: 0 11px;
+  padding: 0 10px;
   font-size: 12px;
 }
 
@@ -87,59 +87,59 @@
   min-width: 0;
   overflow: auto;
   border-right: 1px solid var(--border);
-  background: var(--c-list);
-  padding: 10px;
+  background: #111514;
+  padding: 6px;
 }
 
 .logs-run-card {
   display: block;
   width: 100%;
-  margin: 0 0 8px;
-  padding: 10px;
+  margin: 0 0 4px;
+  padding: 6px 8px;
   text-align: left;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg1);
+  border-radius: 5px;
+  background: #171a19;
   color: var(--text);
 }
 
 .logs-run-card:hover,
 .logs-run-card.active {
   border-color: var(--accent);
-  background: var(--c-card-hover);
+  background: #202524;
 }
 
 .logs-run-line,
 .logs-run-meta {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 10.5px;
 }
 
 .logs-run-title {
-  margin-top: 8px;
+  margin-top: 4px;
   color: var(--text-bright);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
 }
 
 .logs-run-prompt {
   display: -webkit-box;
-  margin-top: 5px;
+  margin-top: 2px;
   overflow: hidden;
   color: var(--text);
-  font-size: 12px;
-  line-height: 1.45;
-  -webkit-line-clamp: 3;
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
 }
 
 .logs-run-meta {
   flex-wrap: wrap;
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .logs-time {
@@ -153,13 +153,13 @@
 .logs-status {
   display: inline-flex;
   align-items: center;
-  min-height: 18px;
-  padding: 0 6px;
+  min-height: 16px;
+  padding: 0 5px;
   border-radius: 999px;
   background: var(--bg3);
   color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 9.5px;
+  font-weight: 800;
   text-transform: uppercase;
 }
 
@@ -172,57 +172,58 @@
 .logs-detail {
   min-width: 0;
   overflow: auto;
-  padding: 16px;
+  padding: 8px;
 }
 
 .logs-detail-hero,
 .logs-kpis,
 .logs-section {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg1);
+  border-radius: 4px;
+  background: #151918;
 }
 
 .logs-detail-hero {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px;
+  padding: 9px 10px;
 }
 
 .logs-detail-title {
   color: var(--text-bright);
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 700;
 }
 
 .logs-detail-subtitle {
-  margin-top: 4px;
+  margin-top: 3px;
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .logs-detail-hero button {
   align-self: flex-start;
-  height: 30px;
+  height: 25px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 5px;
   background: var(--bg2);
   color: var(--text);
-  padding: 0 10px;
+  padding: 0 9px;
+  font-size: 11px;
 }
 
 .logs-kpis {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 0;
-  margin-top: 10px;
+  margin-top: 7px;
   overflow: hidden;
 }
 
 .logs-metric {
   min-width: 0;
-  padding: 11px 12px;
+  padding: 7px 9px;
   border-right: 1px solid var(--border);
 }
 
@@ -233,35 +234,40 @@
 .logs-metric span {
   display: block;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
 }
 
 .logs-metric strong {
   display: block;
-  margin-top: 4px;
+  margin-top: 3px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-bright);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .logs-section {
-  margin-top: 10px;
-  padding: 12px;
+  margin-top: 7px;
+  padding: 8px;
 }
 
 .logs-section.compact {
   border: 0;
-  margin-top: 8px;
+  margin-top: 6px;
   padding: 0;
   background: transparent;
 }
 
 .logs-section h2 {
-  margin: 0 0 8px;
-  color: var(--text-bright);
-  font-size: 12px;
+  margin: 0 0 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
   text-transform: uppercase;
 }
 
@@ -274,128 +280,58 @@
   word-break: break-word;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 11px;
+  line-height: 1.45;
+  user-select: text;
 }
 
 .logs-timeline,
 .logs-tools {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
 }
 
 .logs-event,
 .logs-tool {
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--c-card);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
   overflow: hidden;
+}
+
+.logs-event:last-child,
+.logs-tool:last-child {
+  border-bottom: 0;
 }
 
 .logs-event summary,
 .logs-tool summary {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 150px minmax(0, 1fr) 64px;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  cursor: pointer;
-  color: var(--text);
-  font-size: 12px;
-}
-
-.logs-event time,
-.logs-tool time {
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.logs-event pre,
-.logs-tool .logs-section {
-  padding: 10px;
-  border-top: 1px solid var(--border);
-}
-
-.logs-empty {
-  padding: 18px;
-  color: var(--text-dim);
-  font-size: 13px;
-}
-
-/* Compact left run-list: tighter cards, single-line prompt */
-.logs-list.compact .logs-run-card {
-  margin-bottom: 4px;
-  padding: 6px 8px;
-  border-radius: 6px;
-}
-.logs-list.compact .logs-run-title {
-  margin-top: 4px;
-  font-size: 12px;
-}
-.logs-list.compact .logs-run-prompt {
-  margin-top: 2px;
-  -webkit-line-clamp: 1;
-  font-size: 11px;
-}
-.logs-list.compact .logs-run-meta {
-  margin-top: 4px;
-}
-
-/* ── Density toggle ─────────────────────────────────── */
-.logs-density {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  overflow: hidden;
-}
-.logs-density button {
-  height: 30px;
-  border: 0;
-  border-radius: 0;
-  background: var(--bg2);
-  color: var(--text-dim);
-  padding: 0 10px;
-}
-.logs-density button.active {
-  background: var(--c-card-hover);
-  color: var(--text-bright);
-}
-
-/* ── Compact mode: flatten the cards into dense rows ─── */
-.logs-timeline.compact,
-.logs-tools.compact {
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  overflow: hidden;
-}
-
-.logs-timeline.compact .logs-event,
-.logs-tools.compact .logs-tool {
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  border-bottom: 1px solid var(--border);
-}
-.logs-timeline.compact .logs-event:last-child,
-.logs-tools.compact .logs-tool:last-child {
-  border-bottom: 0;
-}
-
-/* Rows have exactly 3 cells: [status/kind] [message] [time]. */
-.logs-timeline.compact .logs-event > summary,
-.logs-tools.compact .logs-tool > summary {
-  grid-template-columns: 150px minmax(0, 1fr) 60px;
   gap: 10px;
   padding: 3px 10px;
+  cursor: pointer;
+  color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
 }
-/* status reads as a left-aligned text token (no pill), ellipsized if long */
-.logs-timeline.compact .logs-event > summary > .logs-status,
-.logs-tools.compact .logs-tool > summary > .logs-status {
+
+.logs-event summary:hover,
+.logs-tool summary:hover,
+.logs-event[open] summary,
+.logs-tool[open] summary {
+  background: #202524;
+}
+
+.logs-event summary > .logs-status,
+.logs-tool summary > .logs-status {
   justify-content: flex-start;
   min-height: 0;
   padding: 0;
@@ -406,25 +342,31 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* message column */
-.logs-timeline.compact .logs-event > summary > span:nth-child(2),
-.logs-tools.compact .logs-tool > summary > span:nth-child(2) {
+
+.logs-event summary > span:nth-child(2),
+.logs-tool summary > span:nth-child(2) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* time column, right-aligned */
-.logs-timeline.compact .logs-event > summary > time,
-.logs-tools.compact .logs-tool > summary > time {
+
+.logs-event time,
+.logs-tool time {
   text-align: right;
+  color: var(--text-dim);
+  font-size: 11px;
 }
-.logs-timeline.compact .logs-event[open] > summary,
-.logs-tools.compact .logs-tool[open] > summary {
-  background: var(--c-card-hover);
+
+.logs-event pre,
+.logs-tool .logs-section {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
 }
-.logs-timeline.compact .logs-event > summary:hover,
-.logs-tools.compact .logs-tool > summary:hover {
-  background: var(--c-card);
+
+.logs-empty {
+  padding: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 @media (max-width: 900px) {

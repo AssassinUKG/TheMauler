@@ -56,6 +56,22 @@ func WindowsPathToWSL(path string) string {
 	return strings.ReplaceAll(path, "\\", "/")
 }
 
+// ReadRouted reads a file by the same WSL routing that write_file and edit_file
+// use: a Linux-absolute path on a WSL-backed Windows host is read from inside the
+// WSL filesystem (where it was written), and everything else is read from the
+// host. It returns the file bytes and the display path that was actually read.
+func ReadRouted(rawPath string) ([]byte, string, error) {
+	raw := strings.TrimSpace(rawPath)
+	if shouldWriteViaWSL(raw) {
+		display := filepath.ToSlash(strings.ReplaceAll(raw, "\\", "/"))
+		data, err := ReadFileViaWSL(raw)
+		return data, display, err
+	}
+	host := NormalizeHostPath(raw)
+	data, err := os.ReadFile(host)
+	return data, host, err
+}
+
 func slashToBackslash(path string) string {
 	if path == "" {
 		return ""

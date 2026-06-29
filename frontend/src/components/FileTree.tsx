@@ -106,7 +106,7 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
   }
 
   const saveLabContext = async () => {
-    const status = await UpdateLabContext(targetDraft, vpnDraft, labStatus?.latest_artifact ?? '').catch(() => null)
+    const status = await UpdateLabContext(targetDraft, vpnDraft, labStatus?.latest_artifact ?? '', labStatus?.ops_profile ?? 'pentesting').catch(() => null)
     if (status) setLabStatus(status)
   }
 

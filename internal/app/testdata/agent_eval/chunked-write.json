@@ -1,0 +1,12 @@
+{
+  "name": "chunked-write",
+  "prompt": "Create generated/long.txt with at least 150 numbered lines. Use write_file and append chunks if needed.",
+  "workspace": {},
+  "mode": "Builder",
+  "max_tool_calls": 12,
+  "expect_files": {
+    "generated/long.txt": "Line 150"
+  },
+  "expect_status": "done",
+  "max_auto_continues": 4
+}

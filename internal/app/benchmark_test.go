@@ -1,8 +1,11 @@
 package app
 
 import (
+	"context"
 	"testing"
 
+	"mauler/internal/agent"
+	"mauler/internal/llm"
 	"mauler/internal/settings"
 )
 
@@ -140,3 +143,64 @@ func TestBenchmarkScorePenalizesLeaksAndMissingTools(t *testing.T) {
 		t.Fatalf("benchmarkScore should be penalized but positive, got %d", got)
 	}
 }
+
+func TestBenchmarkLoadsRequestedContextAndReportsActual(t *testing.T) {
+	oldBuilder := buildClientForAgent
+	mock := &benchmarkLoadMockClient{actualCtx: 8192}
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		return mock, nil
+	}
+	t.Cleanup(func() { buildClientForAgent = oldBuilder })
+
+	app := &App{history: agent.NewHistory(32768)}
+	result := app.runBenchmarkProfile(
+		settings.Profile{Name: "ctx-probe", ModelID: "model.gguf", CtxTokens: 32768},
+		settings.Provider{Name: "llama", Backend: "llamacpp", BaseURL: "http://localhost:8080/v1"},
+		[]BenchmarkSpecInput{{
+			Name:      "Tiny",
+			System:    "system",
+			User:      "hi",
+			MaxTokens: 8,
+			ToolMode:  "none",
+		}},
+	)
+
+	if mock.loadCalls != 1 {
+		t.Fatalf("load calls = %d, want 1", mock.loadCalls)
+	}
+	if result.ActualCtxTokens != 8192 {
+		t.Fatalf("actual ctx = %d, want 8192", result.ActualCtxTokens)
+	}
+	if result.Status != "warn" {
+		t.Fatalf("expected warning when actual ctx is below requested: %#v", result)
+	}
+}
+
+type benchmarkLoadMockClient struct {
+	loadCalls int
+	actualCtx int
+}
+
+func (c *benchmarkLoadMockClient) LoadModel(context.Context) error {
+	c.loadCalls++
+	return nil
+}
+
+func (c *benchmarkLoadMockClient) ActualContextLength(context.Context) int {
+	return c.actualCtx
+}
+
+func (c *benchmarkLoadMockClient) Chat(ctx context.Context, req llm.Request) (<-chan llm.Delta, error) {
+	ch := make(chan llm.Delta, 1)
+	go func() {
+		defer close(ch)
+		ch <- llm.Delta{Content: "ok", Usage: &llm.Usage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3}}
+	}()
+	return ch, nil
+}
+
+func (c *benchmarkLoadMockClient) Models(context.Context) ([]string, error) {
+	return []string{"model.gguf"}, nil
+}
+func (c *benchmarkLoadMockClient) Ping(context.Context) error { return nil }
+func (c *benchmarkLoadMockClient) Name() string               { return "benchmark-load-mock" }

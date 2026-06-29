@@ -39,6 +39,16 @@ func SetConfigSnapshot(c settings.ToolsConfig) {
 	cfgSnapshotMu.Unlock()
 }
 
+// ResetConfigSnapshot clears the cached snapshot so the accessors fall back to
+// settings.Load() again. Tests that install a snapshot must reset to this state
+// (not to DefaultSettings, which is itself a non-nil snapshot) so they don't
+// shadow the real config for later tests in the package.
+func ResetConfigSnapshot() {
+	cfgSnapshotMu.Lock()
+	cfgSnapshot = nil
+	cfgSnapshotMu.Unlock()
+}
+
 func currentConfigSnapshot() *toolConfigSnapshot {
 	cfgSnapshotMu.RLock()
 	defer cfgSnapshotMu.RUnlock()

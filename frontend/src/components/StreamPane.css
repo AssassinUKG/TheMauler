@@ -1,0 +1,195 @@
+.stream-pane {
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: #0f1416;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.stream-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 32px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: #171b1d;
+}
+
+.stream-header > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.stream-title {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.stream-state {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--text-dim);
+  background: #111618;
+  font-size: 11px;
+}
+
+.stream-state.active {
+  border-color: rgba(59,130,246,.4);
+  color: #93c5fd;
+}
+
+.stream-header-actions {
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.stream-countdown {
+  color: #facc15;
+  font-size: 11px;
+}
+
+.stream-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg3);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.stream-btn:disabled {
+  opacity: .45;
+}
+
+.stream-btn-danger {
+  color: #fca5a5;
+}
+
+.stream-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.stream-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #121719;
+}
+
+.stream-card-title,
+.stream-thinking summary {
+  padding: 7px 9px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.stream-phase,
+.stream-empty {
+  padding: 9px;
+  color: var(--text);
+}
+
+.stream-empty {
+  color: var(--text-dim);
+}
+
+.stream-card pre,
+.stream-tool pre {
+  margin: 0;
+  padding: 9px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 12px/1.45 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+  color: #d7e4f2;
+}
+
+.stream-thinking pre {
+  color: #a8b5c4;
+}
+
+.stream-tool-list {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+}
+
+.stream-tool {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0f1416;
+}
+
+.stream-tool summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  cursor: pointer;
+}
+
+.stream-tool summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-bright);
+  font-weight: 700;
+}
+
+.stream-tool summary strong {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.stream-tool.running summary strong {
+  color: #facc15;
+}
+
+.stream-tool.done summary strong {
+  color: #86efac;
+}
+
+.stream-tool.error summary strong,
+.stream-tool.blocked summary strong,
+.stream-tool.denied summary strong {
+  color: #fca5a5;
+}
+
+.stream-tool-label {
+  padding: 7px 8px 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}

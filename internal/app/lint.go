@@ -87,28 +87,41 @@ func lintPython(path string) string {
 }
 
 func lintShell(path string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	if _, err := exec.LookPath("bash"); err != nil {
 		return ""
 	}
-	candidates := []string{path}
+	candidates := []string{}
 	if runtime.GOOS == "windows" {
-		candidates = append(candidates, filepath.ToSlash(path), tools.WindowsPathToWSL(path))
+		candidates = append(candidates, tools.WindowsPathToWSL(path), filepath.ToSlash(path))
 	}
+	candidates = append(candidates, path)
 	var lastOut []byte
+	seen := map[string]bool{}
 	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cmd := exec.CommandContext(ctx, "bash", "-n", candidate)
 		out, err := cmd.CombinedOutput()
+		timedOut := ctx.Err() == context.DeadlineExceeded
+		cancel()
 		out = bytes.TrimSpace(out)
 		if err == nil {
 			return "[ok] bash -n syntax OK"
 		}
 		lastOut = out
+		if timedOut {
+			continue
+		}
 		if !strings.Contains(strings.ToLower(string(out)), "no such file") {
 			break
 		}
+	}
+	if len(lastOut) == 0 {
+		return ""
 	}
 	return fmt.Sprintf("[fail] bash syntax error:\n%s", string(lastOut))
 }

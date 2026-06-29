@@ -15,7 +15,7 @@ const (
 
 // ContentBlock is one piece of multimodal message content.
 type ContentBlock struct {
-	Type     string    `json:"type"`               // "text" | "image_url"
+	Type     string    `json:"type"` // "text" | "image_url"
 	Text     string    `json:"text,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
@@ -29,7 +29,7 @@ type ImageURL struct {
 // Message is a single conversation turn.
 type Message struct {
 	Role       string        `json:"role"`
-	Content    interface{}   `json:"content"`                 // string or []ContentBlock
+	Content    interface{}   `json:"content"` // string or []ContentBlock
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCallDef `json:"tool_calls,omitempty"`
 	Name       string        `json:"name,omitempty"`
@@ -72,7 +72,7 @@ type Delta struct {
 	Thinking  string        // reasoning_content / thinking tokens (Qwen3, DeepSeek-R1, etc.)
 	ToolCalls []ToolCallDef // populated on finish_reason == "tool_calls"
 	Done      bool
-	Truncated bool  // true when finish_reason == "length" (hit max_tokens)
+	Truncated bool // true when finish_reason == "length" (hit max_tokens)
 	Error     error
 	Usage     *Usage
 }
@@ -88,7 +88,7 @@ type Usage struct {
 type Request struct {
 	Messages        []Message
 	Tools           []ToolDef
-	System          string          // prepended as a system message
+	System          string // prepended as a system message
 	MaxTokens       int
 	Temperature     float64
 	TopP            float64
@@ -107,6 +107,7 @@ type Request struct {
 	// Thinking-mode controls (llama.cpp only)
 	EnableThinking   bool
 	PreserveThinking bool
+	ReasoningEffort  string
 	// MTP speculative decoding (llama.cpp b9180+).
 	// SpecType: "" (disabled) | "draft-mtp"
 	// SpecDraftNMax: draft tokens per step, 0 = server default

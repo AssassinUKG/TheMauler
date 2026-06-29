@@ -53,34 +53,61 @@ func (t *EditFile) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	if p.OldString == "" {
 		return "", fmt.Errorf("edit_file: old_string is required")
 	}
+
+	rawPath := strings.TrimSpace(p.Path)
 	p.Path = NormalizeHostPath(p.Path)
 	if err := rejectProtectedMutationPath(p.Path); err != nil {
 		return "", fmt.Errorf("edit_file: %w", err)
+	}
+	if shouldWriteViaWSL(rawPath) {
+		return editFileViaWSL(rawPath, p.OldString, p.NewString)
 	}
 
 	data, err := os.ReadFile(p.Path)
 	if err != nil {
 		return "", fmt.Errorf("edit_file: read %s: %w", p.Path, err)
 	}
-	content := string(data)
-
-	count := strings.Count(content, p.OldString)
-	switch count {
-	case 0:
-		return "", fmt.Errorf("edit_file: old_string not found in %s - check the exact text including whitespace", p.Path)
-	case 1:
-		// exactly one match — proceed
-	default:
-		return "", fmt.Errorf("edit_file: old_string matches %d locations in %s - provide more surrounding context to make it unique", count, p.Path)
+	newContent, oldLines, newLines, err := applyExactEdit(string(data), p.OldString, p.NewString, p.Path)
+	if err != nil {
+		return "", err
 	}
 
-	newContent := strings.Replace(content, p.OldString, p.NewString, 1)
+	newContent, note := guardFileContent(p.Path, newContent)
 	if err := os.WriteFile(p.Path, []byte(newContent), 0o644); err != nil {
 		return "", fmt.Errorf("edit_file: write %s: %w", p.Path, err)
 	}
 
-	// Report a compact diff summary
-	oldLines := strings.Count(p.OldString, "\n") + 1
-	newLines := strings.Count(p.NewString, "\n") + 1
-	return fmt.Sprintf("edited %s: replaced %d line(s) with %d line(s)", p.Path, oldLines, newLines), nil
+	return withGuardNote(fmt.Sprintf("edited %s: replaced %d line(s) with %d line(s)", p.Path, oldLines, newLines), note), nil
+}
+
+func applyExactEdit(content, oldString, newString, displayPath string) (string, int, int, error) {
+	count := strings.Count(content, oldString)
+	switch count {
+	case 0:
+		return "", 0, 0, fmt.Errorf("edit_file: old_string not found in %s - check the exact text including whitespace", displayPath)
+	case 1:
+		// exactly one match - proceed
+	default:
+		return "", 0, 0, fmt.Errorf("edit_file: old_string matches %d locations in %s - provide more surrounding context to make it unique", count, displayPath)
+	}
+	oldLines := strings.Count(oldString, "\n") + 1
+	newLines := strings.Count(newString, "\n") + 1
+	return strings.Replace(content, oldString, newString, 1), oldLines, newLines, nil
+}
+
+func editFileViaWSL(path, oldString, newString string) (string, error) {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	data, err := ReadFileViaWSL(path)
+	if err != nil {
+		return "", fmt.Errorf("edit_file: read %s (WSL): %w", path, err)
+	}
+	newContent, oldLines, newLines, err := applyExactEdit(string(data), oldString, newString, path)
+	if err != nil {
+		return "", err
+	}
+	newContent, note := guardFileContent(path, newContent)
+	if _, err := writeFileViaWSL(path, newContent, false); err != nil {
+		return "", fmt.Errorf("edit_file: write %s (WSL): %w", path, err)
+	}
+	return withGuardNote(fmt.Sprintf("edited %s (WSL): replaced %d line(s) with %d line(s)", path, oldLines, newLines), note), nil
 }

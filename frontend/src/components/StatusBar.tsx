@@ -117,6 +117,8 @@ export function StatusBar({ statsVersion, runState }: Props) {
   const pct = stats ? Math.round(stats.fraction * 100) : 0
   const used = stats?.token_count ?? 0
   const budget = stats?.budget ?? 0
+  const ctxWindow = stats?.window ?? budget
+  const reserve = stats?.reserve ?? 0
   const liveState = statusRunState(streaming, runState)
 
   return (
@@ -143,11 +145,17 @@ export function StatusBar({ statsVersion, runState }: Props) {
             {liveState.label}
           </span>
         )}
-        <ContextBar pct={pct} streaming={streaming} />
-        <div className="status-token-info">
+        <ContextBar pct={pct} used={used} budget={budget} window={ctxWindow} streaming={streaming} />
+        <div
+          className="status-token-info"
+          title={`${used.toLocaleString()} tokens used of ${budget.toLocaleString()} usable\n+${reserve.toLocaleString()} reserved for the model's reply\n= ${ctxWindow.toLocaleString()} total context window`}
+        >
           <span className="status-token-used">{used.toLocaleString()}</span>
           <span className="status-token-sep">/</span>
           <span className="status-token-budget">{budget.toLocaleString()}</span>
+          {reserve > 0 && <span className="status-token-reserve">+{reserve.toLocaleString()}</span>}
+          <span className="status-token-sep">/</span>
+          <span className="status-token-window">{ctxWindow.toLocaleString()}</span>
           <span className="status-token-pct" style={{ color: pct > 85 ? 'var(--red)' : pct > 65 ? 'var(--yellow)' : 'rgba(255,255,255,0.6)' }}>
             {pct}%
           </span>
@@ -209,22 +217,31 @@ function statusRunState(streaming: boolean, runState: RunStatePayload | null): {
   return { state: raw, label: labels[raw] || raw.replaceAll('_', ' '), detail: runState?.detail }
 }
 
-function ContextBar({ pct, streaming }: { pct: number; streaming: boolean }) {
-  // Zone boundaries (% of context)
+function ContextBar({ pct, used, budget, window, streaming }: { pct: number; used: number; budget: number; window: number; streaming: boolean }) {
+  // Zone boundaries as a % of the usable budget (where compaction logic lives).
   const WARN = 70
   const DANGER = 87
 
-  // Fill stops: green zone, yellow zone, red zone
-  const fillW = Math.min(pct, 100)
-  const greenW = Math.min(fillW, WARN)
-  const yellowW = fillW > WARN ? Math.min(fillW - WARN, DANGER - WARN) : 0
-  const redW = fillW > DANGER ? fillW - DANGER : 0
+  // Everything is drawn against the full window so the reserved tail is visible.
+  const budgetFrac = window > 0 ? Math.min(budget / window, 1) : 1 // where the reserve begins
+  const usedW = window > 0 ? Math.min((used / window) * 100, 100) : 0
+  const warnX = WARN * budgetFrac
+  const dangerX = DANGER * budgetFrac
+  const reserveX = budgetFrac * 100
+
+  // Split the used fill into colour zones by its share of the budget, so the
+  // colours still mean "approaching compaction".
+  const greenW = Math.min(usedW, warnX)
+  const yellowW = usedW > warnX ? Math.min(usedW - warnX, dangerX - warnX) : 0
+  const redW = usedW > dangerX ? usedW - dangerX : 0
 
   return (
-    <div className="ctx-bar-wrap" title={`Context: ${pct}% used`}>
+    <div className="ctx-bar-wrap" title={`${pct}% of usable budget`}>
+      {/* Reserved tail held back for the model's reply */}
+      <div className="ctx-bar-reserve" style={{ left: `${reserveX}%`, width: `${100 - reserveX}%` }} />
       {/* Zone markers */}
-      <div className="ctx-bar-zone-warn" style={{ left: `${WARN}%` }} />
-      <div className="ctx-bar-zone-danger" style={{ left: `${DANGER}%` }} />
+      <div className="ctx-bar-zone-warn" style={{ left: `${warnX}%` }} />
+      <div className="ctx-bar-zone-danger" style={{ left: `${dangerX}%` }} />
       {/* Fill segments */}
       <div className="ctx-bar-seg ctx-seg-green" style={{ width: `${greenW}%` }} />
       <div className="ctx-bar-seg ctx-seg-yellow" style={{ width: `${yellowW}%`, left: `${greenW}%` }} />

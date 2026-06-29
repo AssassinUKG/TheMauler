@@ -56,9 +56,8 @@ func (t *ReadMany) Run(_ context.Context, raw json.RawMessage) (string, error) {
 
 	var sb strings.Builder
 	missing := false
-	for _, path := range p.Paths {
-		path = NormalizeHostPath(path)
-		data, err := os.ReadFile(path)
+	for _, rawPath := range p.Paths {
+		data, path, err := ReadRouted(rawPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				missing = true

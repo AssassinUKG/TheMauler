@@ -1,16 +1,54 @@
 package app
 
 import (
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"mauler/internal/settings"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func doctorTestClient(handler http.HandlerFunc) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		rec := &doctorResponseRecorder{header: http.Header{}, status: http.StatusOK}
+		handler(rec, r)
+		return &http.Response{
+			StatusCode: rec.status,
+			Header:     rec.header,
+			Body:       io.NopCloser(strings.NewReader(rec.body.String())),
+			Request:    r,
+		}, nil
+	})}
+}
+
+type doctorResponseRecorder struct {
+	header http.Header
+	status int
+	body   strings.Builder
+}
+
+func (r *doctorResponseRecorder) Header() http.Header { return r.header }
+
+func (r *doctorResponseRecorder) Write(data []byte) (int, error) {
+	return r.body.Write(data)
+}
+
+func (r *doctorResponseRecorder) WriteHeader(statusCode int) {
+	r.status = statusCode
+}
+
 func TestFetchLMStudioModelInfoReadsCapabilitiesAndLoadedContext(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/models" {
 			http.NotFound(w, r)
 			return
@@ -28,10 +66,9 @@ func TestFetchLMStudioModelInfoReadsCapabilitiesAndLoadedContext(t *testing.T) {
 				}]
 			}]
 		}`))
-	}))
-	defer server.Close()
+	})
 
-	model, found, err := fetchLMStudioModelInfo(server.URL+"/v1", "qwen/qwen3.6-27b")
+	model, found, err := fetchLMStudioModelInfoWithClient("http://doctor.test/v1", "qwen/qwen3.6-27b", client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +110,7 @@ func TestLMStudioCapabilityChecksWarnWhenToolsMissing(t *testing.T) {
 }
 
 func TestFetchLlamacppBuiltinToolsDetectsDangerousServerTools(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/props" {
 			http.NotFound(w, r)
 			return
@@ -88,10 +125,9 @@ func TestFetchLlamacppBuiltinToolsDetectsDangerousServerTools(t *testing.T) {
 				"params": {"chat_format": "chatml-function-calling"}
 			}
 		}`))
-	}))
-	defer server.Close()
+	})
 
-	tools, err := fetchLlamacppBuiltinTools(server.URL + "/v1")
+	tools, err := fetchLlamacppBuiltinToolsWithClient("http://doctor.test/v1", client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +140,7 @@ func TestFetchLlamacppBuiltinToolsDetectsDangerousServerTools(t *testing.T) {
 }
 
 func TestFetchLlamacppBuiltinToolsIgnoresOrdinaryProps(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"default_generation_settings": {
@@ -114,10 +150,9 @@ func TestFetchLlamacppBuiltinToolsIgnoresOrdinaryProps(t *testing.T) {
 				}
 			}
 		}`))
-	}))
-	defer server.Close()
+	})
 
-	tools, err := fetchLlamacppBuiltinTools(server.URL + "/v1")
+	tools, err := fetchLlamacppBuiltinToolsWithClient("http://doctor.test/v1", client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,5 +216,46 @@ func TestSharedBackendSubagentCheckSkipsNonLlamaCpp(t *testing.T) {
 
 	if len(checks) != 0 {
 		t.Fatalf("non-llamacpp provider should not emit shared backend check: %#v", checks)
+	}
+}
+
+func TestShellNetworkBoundaryCheckWarnsForWindowsHostToolsWithWSL(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific host/WSL boundary check")
+	}
+	var checks []DoctorCheck
+	cfg := settings.DefaultSettings()
+	cfg.Tools.ShellBackend = "wsl"
+	cfg.Tools.ShellDistro = "kali-linux"
+	cfg.Tools.ActiveToolset = "balanced"
+
+	addShellNetworkBoundaryCheck(func(c DoctorCheck) { checks = append(checks, c) }, cfg, "wsl")
+
+	if len(checks) != 1 || checks[0].Name != "WSL/Kali target routing" || checks[0].Status != "warn" {
+		t.Fatalf("expected WSL/Kali routing warning, got %#v", checks)
+	}
+	for _, want := range []string{"browser/fetch tools run from Windows", "kali-linux", "Use the local-code/offline toolset"} {
+		if !strings.Contains(checks[0].Message+" "+checks[0].Detail, want) {
+			t.Fatalf("expected check to mention %q, got %#v", want, checks[0])
+		}
+	}
+}
+
+func TestReadInferenceBridgeConfigPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inference-bridge.toml")
+	if err := os.WriteFile(path, []byte(`
+[models]
+default_context = 8192
+
+[server]
+host = "127.0.0.1"
+port = 8802
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	port, ok := readInferenceBridgeConfigPort(path)
+	if !ok || port != "8802" {
+		t.Fatalf("port=%q ok=%v, want 8802 true", port, ok)
 	}
 }

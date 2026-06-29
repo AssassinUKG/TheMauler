@@ -31,3 +31,104 @@ func TestRelevantSkillsDoesNotAutoInjectMasterUnlessExplicitlyRequested(t *testi
 		t.Fatal("master skill should keep source path internally for lazy loading")
 	}
 }
+
+func TestBuildSystemPromptPointsMasterRequestsAtSkillView(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	source := filepath.Join(t.TempDir(), "master_skill.md")
+	mustWrite(t, source, "# Master\n\nUse this workflow.")
+	if _, _, err := saveMasterSkillSource(source); err != nil {
+		t.Fatal(err)
+	}
+	cfg := settings.DefaultSettings()
+	cfg.Context.MAULERMDPath = "C:/does/not/exist/MAULER.md"
+
+	prompt := buildSystemPrompt(cfg, AgentMode{Name: "Ops"}, nil, nil)
+
+	for _, want := range []string{"registered as skill `master`", "call skill_view with name `master`", "instead of searching the workspace for master_skill.md"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestMasterSkillRequestedForPentestTerms(t *testing.T) {
+	for _, prompt := range []string{
+		"research exploits for the web target",
+		"continue HTB foothold",
+		"verify CVE payload",
+	} {
+		if !masterSkillRequested(keywordSet(prompt)) {
+			t.Fatalf("master skill should be requested for pentest prompt %q", prompt)
+		}
+	}
+}
+
+func TestSkillRequirementFrontmatterRoundTrip(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	saved, err := saveSkill(Skill{
+		Name:          "http-probe",
+		Description:   "Use for probing HTTP services",
+		Version:       "1.0.0",
+		Tags:          []string{"http", "probe"},
+		RequiredTools: []string{"shell", "fetch_url"},
+		ShellBackend:  "wsl",
+		NeedsNetwork:  true,
+		NeedsWrite:    true,
+		Body:          "Run a compact probe.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"required_tools: [fetch_url, shell]",
+		"shell_backend: wsl",
+		"needs_network: true",
+		"needs_write: true",
+	} {
+		if !strings.Contains(saved.Raw, want) {
+			t.Fatalf("saved skill missing %q:\n%s", want, saved.Raw)
+		}
+	}
+	loaded, err := loadSkill("http-probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.NeedsNetwork || !loaded.NeedsWrite || loaded.ShellBackend != "wsl" {
+		t.Fatalf("requirements did not round-trip: %#v", loaded)
+	}
+	if strings.Join(loaded.RequiredTools, ",") != "fetch_url,shell" {
+		t.Fatalf("required tools did not round-trip sorted/deduped: %#v", loaded.RequiredTools)
+	}
+}
+
+func TestRelevantSkillsAnnotatesUnavailableRequirements(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	_, err := saveSkill(Skill{
+		Name:          "shell-probe",
+		Description:   "Use for shell probe work",
+		Version:       "1.0.0",
+		Tags:          []string{"probe"},
+		RequiredTools: []string{"shell", "write_file"},
+		ShellBackend:  "wsl",
+		NeedsWrite:    true,
+		Body:          "Run the probe.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := settings.DefaultSettings()
+	cfg.Skills = settings.SkillsConfig{Enabled: true, AutoInject: true, MaxInject: 3}
+	cfg.Tools.ActiveToolset = "safe"
+	cfg.Tools.ShellBackend = "powershell"
+
+	got := relevantSkillsForSettings(cfg.Skills, cfg, "please do probe work")
+	if len(got) != 1 {
+		t.Fatalf("expected one relevant skill, got %#v", got)
+	}
+	body := got[0].Body
+	for _, want := range []string{"Tool availability note:", "required tool \"shell\"", "write/edit tools", "expects shell backend \"wsl\""} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("skill body missing availability warning %q:\n%s", want, body)
+		}
+	}
+}

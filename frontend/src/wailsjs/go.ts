@@ -34,6 +34,7 @@ export interface Settings {
     max_failed_fetches: number
     max_browser_actions: number
     max_tool_result_chars: number
+    redact_secrets: boolean
     protected_paths: string[]
     active_toolset: string
     toolsets: Record<string, string[]>
@@ -43,12 +44,14 @@ export interface Settings {
   agents: {
     mode_override: string
     default_autonomy: string
-    offline_only: boolean
-    max_tool_calls: number
-    require_plan: boolean
-    no_think_after_tool_calls: number
-    presets: Record<string, AgentModePreset>
-  }
+      offline_only: boolean
+      max_tool_calls: number
+      max_run_seconds: number
+      escalation_profile: string
+      require_plan: boolean
+      no_think_after_tool_calls: number
+      presets: Record<string, AgentModePreset>
+    }
   context: {
     auto_inject_file: boolean
     auto_inject_cursor: boolean
@@ -64,6 +67,7 @@ export interface Settings {
   memory: {
     enabled: boolean
     auto_inject: boolean
+    disable_auto_distill: boolean
     max_entries: number
     max_inject: number
     max_entry_chars: number
@@ -136,6 +140,7 @@ export interface LabContext {
   target: string
   vpn_interface: string
   latest_artifact: string
+  ops_profile: string
 }
 
 export interface LabStatus {
@@ -146,6 +151,7 @@ export interface LabStatus {
   target: string
   vpn_interface: string
   latest_artifact: string
+  ops_profile: string
   open_folders: WorkspaceFolder[]
 }
 
@@ -199,6 +205,8 @@ export interface HistoryStats {
   budget: number
   fraction: number
   rollback_len: number
+  window: number
+  reserve: number
 }
 
 export interface SessionChatMessage {
@@ -225,6 +233,8 @@ export interface MemoryEntry {
   content: string
   tags: string[]
   kind: string
+  confidence: string
+  source: string
   importance: number
   pinned: boolean
   created_at: string
@@ -249,6 +259,10 @@ export interface Skill {
   version: string
   tags: string[]
   source_path: string
+  required_tools: string[]
+  shell_backend: string
+  needs_network: boolean
+  needs_write: boolean
   body: string
   raw: string
   created_at: string
@@ -309,6 +323,95 @@ export interface TaskRun {
   events?: TaskRunEvent[]
 }
 
+export interface AgentEvalResult {
+  name: string
+  pass: boolean
+  status: string
+  tool_calls: number
+  auto_continues: number
+  truncations: number
+  tool_errors: number
+  duration_ms: number
+  fail_reason?: string
+}
+
+export interface AgentEvalReport {
+  results: AgentEvalResult[]
+  pass_count: number
+  total: number
+  profile: string
+}
+
+export interface GrammarToolArgsProbeResult {
+  profile: string
+  backend: string
+  model_id: string
+  supported: boolean
+  structured_call: boolean
+  valid_arguments: boolean
+  tool_name?: string
+  arguments?: string
+  text?: string
+  error?: string
+  recommendation: string
+}
+
+export interface StorageItem {
+  id: string
+  label: string
+  path: string
+  kind: string
+  bytes: number
+  size: string
+  clearable: boolean
+  description: string
+}
+
+export interface RunCheckpoint {
+  run_id: string
+  prompt: string
+  mode: string
+  profile: string
+  messages: unknown[]
+  run: TaskRun
+  saved_at: string
+}
+
+export interface LedgerEvent {
+  id: string
+  run_id?: string
+  kind: string
+  source?: string
+  tool?: string
+  status?: string
+  state?: string
+  message?: string
+  detail?: string
+  input?: string
+  output?: string
+  error?: string
+  duration_ms?: number
+  files?: string[]
+  artifacts?: string[]
+  metadata?: Record<string, string>
+  timestamp: string
+}
+
+export interface LearningCandidate {
+  id: string
+  run_id?: string
+  type: string
+  title: string
+  reason: string
+  content: string
+  kind: string
+  importance: number
+  tags: string[]
+  evidence?: string[]
+  template?: string
+  created_at: string
+}
+
 export type ChatRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'system'
 
 // --- Bindings ---
@@ -349,6 +452,49 @@ export const GetAutoAgents = (): Promise<boolean> =>
 export const SetAgentModeOverride = (mode: string): Promise<void> =>
   call('app.App.SetAgentModeOverride', mode)
 
+// Auto-speculative (MTP) decoding plan for the active model.
+export interface SpecPlan {
+  enabled: boolean
+  spec_type: string
+  n_max: number
+  source: string // probe | name | registry | manual | disabled
+  reason: string
+  locked: boolean
+  model_id: string
+}
+
+export const GetSpecPlan = (): Promise<SpecPlan> =>
+  call('app.App.GetSpecPlan')
+
+// mode: "auto" | "on" | "off"
+export const SetSpecMode = (mode: string): Promise<SpecPlan> =>
+  call('app.App.SetSpecMode', mode)
+
+export interface SpecCalibrationSample {
+  n: number
+  tok_per_sec: number
+  note?: string
+}
+
+export interface SpecCalibration {
+  key: string
+  model_id: string
+  best_n: number
+  tok_per_sec: number
+  baseline_tok_per_sec: number
+  speedup: number
+  ran_at: string
+  samples: SpecCalibrationSample[]
+}
+
+// Sweeps spec_draft_n_max, caches the fastest, applies it. Heavy (reloads the
+// model per step); reject if the agent is busy or the model is not MTP-capable.
+export const CalibrateSpec = (profileName: string): Promise<SpecCalibration> =>
+  call('app.App.CalibrateSpec', profileName)
+
+export const GetSpecCalibration = (): Promise<SpecCalibration> =>
+  call('app.App.GetSpecCalibration')
+
 export const ApplySafetyPreset = (name: string): Promise<void> =>
   call('app.App.ApplySafetyPreset', name)
 
@@ -378,6 +524,12 @@ export const DeleteSession = (name: string): Promise<void> =>
 
 export const ListMemory = (): Promise<MemoryEntry[]> =>
   call('app.App.ListMemory')
+
+export const ExportMemoryJSON = (): Promise<string> =>
+  call('app.App.ExportMemoryJSON')
+
+export const ImportMemoryJSON = (raw: string): Promise<number> =>
+  call('app.App.ImportMemoryJSON', raw)
 
 export const SaveMemoryEntry = (entry: MemoryEntry): Promise<MemoryEntry> =>
   call('app.App.SaveMemoryEntry', entry)
@@ -412,11 +564,35 @@ export const ListTaskRuns = (): Promise<TaskRun[]> =>
 export const ClearTaskRuns = (): Promise<void> =>
   call('app.App.ClearTaskRuns')
 
+export const ExportTaskRunsJSON = (): Promise<string> =>
+  call('app.App.ExportTaskRunsJSON')
+
+export const ImportTaskRunsJSON = (raw: string): Promise<number> =>
+  call('app.App.ImportTaskRunsJSON', raw)
+
+export const ListLedgerEvents = (limit: number): Promise<LedgerEvent[]> =>
+  call('app.App.ListLedgerEvents', limit)
+
+export const ClearLedgerEvents = (): Promise<void> =>
+  call('app.App.ClearLedgerEvents')
+
+export const PruneLedgerEvents = (scope: string, ids: string[]): Promise<number> =>
+  call('app.App.PruneLedgerEvents', scope, ids)
+
+export const ListLearningCandidates = (limit: number): Promise<LearningCandidate[]> =>
+  call('app.App.ListLearningCandidates', limit)
+
+export const RecordLearningDecision = (candidate: LearningCandidate, decision: string, reason: string): Promise<void> =>
+  call('app.App.RecordLearningDecision', candidate, decision, reason)
+
 export const SendMessage = (text: string, images: string[], attachments: ChatAttachment[] = []): Promise<void> =>
   call('app.App.SendMessage', text, images, attachments)
 
 export const StopAgent = (): Promise<void> =>
   call('app.App.StopAgent')
+
+export const InterruptShellTool = (): Promise<void> =>
+  call('app.App.InterruptShellTool')
 
 export const RespondConfirm = (allow: boolean): Promise<void> =>
   call('app.App.RespondConfirm', allow)
@@ -460,8 +636,8 @@ export const SelectWorkspaceFolder = (defaultDir: string): Promise<string> =>
 export const GetLabStatus = (): Promise<LabStatus> =>
   call('app.App.GetLabStatus')
 
-export const UpdateLabContext = (target: string, vpnInterface: string, latestArtifact: string): Promise<LabStatus> =>
-  call('app.App.UpdateLabContext', target, vpnInterface, latestArtifact)
+export const UpdateLabContext = (target: string, vpnInterface: string, latestArtifact: string, opsProfile: string): Promise<LabStatus> =>
+  call('app.App.UpdateLabContext', target, vpnInterface, latestArtifact, opsProfile)
 
 export const ScaffoldWorkspaceFolders = (root: string, names: string[]): Promise<string[]> =>
   call('app.App.ScaffoldWorkspaceFolders', root, names)
@@ -539,6 +715,7 @@ export interface ProfileBenchmarkResult {
   provider_name?: string
   model_id?: string
   ctx_tokens?: number
+  actual_ctx_tokens?: number
   context_tier?: string
   context_role?: string
   score?: number
@@ -593,11 +770,20 @@ export const BenchmarkProfile = (profile: Profile, provider: Provider): Promise<
 export const BenchmarkProfileWithCases = (profile: Profile, provider: Provider, cases: BenchmarkSpecInput[]): Promise<ProfileBenchmarkResult> =>
   call('app.App.BenchmarkProfileWithCases', profile, provider, cases)
 
+export const LoadBenchmarkModel = (profile: Profile, provider: Provider): Promise<ProfileBenchmarkResult> =>
+  call('app.App.LoadBenchmarkModel', profile, provider)
+
 export const ListBenchmarkRuns = (): Promise<ProfileBenchmarkResult[]> =>
   call('app.App.ListBenchmarkRuns')
 
 export const ClearBenchmarkRuns = (): Promise<void> =>
   call('app.App.ClearBenchmarkRuns')
+
+export const ListStorageItems = (): Promise<StorageItem[]> =>
+  call('app.App.ListStorageItems')
+
+export const ClearStorageItem = (id: string): Promise<void> =>
+  call('app.App.ClearStorageItem', id)
 
 export interface DoctorCheck {
   name: string
@@ -614,6 +800,21 @@ export interface DoctorResult {
 
 export const RunDoctor = (): Promise<DoctorResult> =>
   call('app.App.RunDoctor')
+
+export const RunAgentEval = (profileName: string): Promise<AgentEvalReport> =>
+  call('app.App.RunAgentEval', profileName)
+
+export const RunMiniAgentLoopBenchmark = (profile: Profile, provider: Provider): Promise<AgentEvalResult> =>
+  call('app.App.RunMiniAgentLoopBenchmark', profile, provider)
+
+export const RunGrammarToolArgsProbe = (profileName: string): Promise<GrammarToolArgsProbeResult> =>
+  call('app.App.RunGrammarToolArgsProbe', profileName)
+
+export const ListResumableRuns = (): Promise<RunCheckpoint[]> =>
+  call('app.App.ListResumableRuns')
+
+export const ResumeRun = (runID: string): Promise<void> =>
+  call('app.App.ResumeRun', runID)
 
 // User profile bindings
 export const GetUserProfile = (): Promise<string> =>
@@ -641,6 +842,9 @@ export const OpenShell = (): Promise<string> =>
 
 export const ShellInput = (id: string, text: string): Promise<void> =>
   call('app.App.ShellInput', id, text)
+
+export const ShellResize = (id: string, cols: number, rows: number): Promise<void> =>
+  call('app.App.ShellResize', id, cols, rows)
 
 export const ShellClose = (id: string): Promise<void> =>
   call('app.App.ShellClose', id)

@@ -35,8 +35,11 @@ func (t *Shell) Description() string {
 	}
 	return fmt.Sprintf("Run a shell command in the current working directory using the %s backend. "+
 		"On Windows auto uses PowerShell; on Linux/WSL auto uses bash. If the backend is WSL, commands run inside the configured WSL distro. Use platform-native paths for the active backend. "+
-		"By default each call runs in a fresh isolated shell (reliable, cannot hang); set session=true only when state must persist (interactive/reverse shell, persistent cd/env). "+
-		"Write commands as plain text with literal operators (&, >, <, |, \"); never HTML-escape them (do not write &amp;, &gt;, &lt;, &quot;).", backend)
+		"Write commands as plain text with literal operators (&, >, <, |, \"); never HTML-escape them (do not write &amp;, &gt;, &lt;, &quot;). "+
+		"For long-running work (full nmap -p- scans, gobuster, hashcat) set background=true: the command runs detached and returns a job id immediately. "+
+		"Then call this tool again with job=\"<id>\" (and no command) to see its running/done state and latest output, instead of blocking on a timeout. "+
+		"Background job polling uses backoff: wait about 1s, 2s, 3s, 5s, 8s, 13s, then 30s between polls. "+
+		"Set verbose=true when you need fuller output or job metadata.", backend)
 }
 
 func (t *Shell) Schema() json.RawMessage {
@@ -45,16 +48,20 @@ func (t *Shell) Schema() json.RawMessage {
   "properties": {
     "command": {"type": "string", "description": "The command to run in the active shell"},
     "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 300). Use 120-300 for long-running scans/enumeration."},
-    "session": {"type": "boolean", "description": "Default false: run in a fresh isolated shell — reliable, deterministic, cannot hang the session. Set true ONLY when state must persist across commands: an interactive shell, a reverse/bind shell, or a cd/export/variable that later commands depend on. Most enumeration (nmap, curl, gobuster, ffuf) should leave this false."}
+    "background": {"type": "boolean", "description": "Run the command detached and return a job id immediately instead of waiting. Use for long scans (nmap -p-, gobuster, hashcat)."},
+    "job": {"type": "string", "description": "Poll a previously started background job by its id (e.g. \"j1\"). When set, omit command; returns the job's state and latest output. Respect the returned next-poll backoff instead of polling every turn."},
+    "verbose": {"type": "boolean", "description": "Return fuller diagnostic output when supported. For background job polls, returns up to 65000 bytes of job output plus job metadata/backoff details."}
   },
-  "required": ["command"],
   "additionalProperties": false
 }`)
 }
 
 type shellParams struct {
-	Command string `json:"command"`
-	Timeout int    `json:"timeout"`
+	Command    string `json:"command"`
+	Timeout    int    `json:"timeout"`
+	Background bool   `json:"background"`
+	Job        string `json:"job"`
+	Verbose    bool   `json:"verbose"`
 }
 
 func (t *Shell) Run(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -62,7 +69,10 @@ func (t *Shell) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("shell: bad params: %w", err)
 	}
-	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "")
+	if out, handled, err := runShellBackground(p); handled {
+		return out, err
+	}
+	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "", p.Verbose)
 }
 
 // Bash is a compatibility alias for older prompts/models that call bash.
@@ -84,10 +94,13 @@ func (t *Bash) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("bash: bad params: %w", err)
 	}
-	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "")
+	if out, handled, err := runShellBackground(p); handled {
+		return out, err
+	}
+	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "", p.Verbose)
 }
 
-func runShell(ctx context.Context, command string, requestedTimeout, defaultTimeout int, forcedBackend string) (string, error) {
+func runShell(ctx context.Context, command string, requestedTimeout, defaultTimeout int, forcedBackend string, verbose bool) (string, error) {
 	hadEntities := htmlEntityRE.MatchString(command)
 	prepared, err := PrepareShellCommand(command)
 	if err != nil {
@@ -192,6 +205,9 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 		result += "\n"
 	}
 	result += fmt.Sprintf("[%s exit %d, %s]", backend, exitCode, elapsed)
+	if verbose {
+		result += fmt.Sprintf("\n[verbose] cwd=%s timeout=%ds command=%q", wd, timeoutSecs, command)
+	}
 	if exitCode != 0 {
 		if hadEntities {
 			result += "\nhint: your command HTML-escaped shell operators (&amp;, &gt;, &lt;). Write them literally — &, >, <, | — and do NOT add more escaping. TheMauler already unescapes, so escalating the escaping will not help."

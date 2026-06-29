@@ -1,0 +1,14 @@
+{
+  "name": "edit-then-verify",
+  "prompt": "Fix the compile error in main.go. Use tools, then verify the file is fixed.",
+  "workspace": {
+    "main.go": "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n\nfunc broken() string {\n\treturn 123\n}\n"
+  },
+  "mode": "Fixer",
+  "max_tool_calls": 10,
+  "expect_files": {
+    "main.go": "return \"123\""
+  },
+  "expect_status": "done",
+  "max_auto_continues": 2
+}

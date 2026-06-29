@@ -2,15 +2,18 @@ package tools
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"mauler/internal/settings"
+	"mauler/internal/store"
 )
 
 type TodoItem struct {
@@ -25,6 +28,11 @@ type TodoItem struct {
 type todoFile struct {
 	Items []TodoItem `json:"items"`
 }
+
+var (
+	todoDBMu sync.RWMutex
+	todoDB   *sql.DB
+)
 
 type TodoCreate struct{}
 type TodoUpdate struct{}
@@ -216,7 +224,137 @@ func (t *TodoClear) Run(_ context.Context, _ json.RawMessage) (string, error) {
 	return "cleared active task plan", nil
 }
 
+// SetTodoDB makes todo tools use the app-owned state.db connection. Passing nil
+// restores the standalone fallback that opens the default store per call.
+func SetTodoDB(db *sql.DB) {
+	todoDBMu.Lock()
+	todoDB = db
+	todoDBMu.Unlock()
+}
+
+// MigrateTodosJSONToDB imports the legacy todos.json file into SQLite when the
+// todos table is empty. The JSON file is left in place as a recovery/export copy.
+func MigrateTodosJSONToDB(db *sql.DB) (int, error) {
+	if db == nil {
+		return 0, nil
+	}
+	count, err := todoCountDB(db)
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		return 0, nil
+	}
+	items, err := loadTodosJSON()
+	if err != nil {
+		return 0, err
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+	if err := saveTodosDB(db, items); err != nil {
+		return 0, err
+	}
+	return len(items), nil
+}
+
 func LoadTodos() ([]TodoItem, error) {
+	db, cleanup, err := todoStore()
+	if err == nil {
+		defer cleanup()
+		if _, err := MigrateTodosJSONToDB(db); err != nil {
+			return nil, err
+		}
+		return loadTodosDB(db)
+	}
+	return loadTodosJSON()
+}
+
+func SaveTodos(items []TodoItem) error {
+	return saveTodos(items)
+}
+
+func saveTodos(items []TodoItem) error {
+	db, cleanup, err := todoStore()
+	if err == nil {
+		defer cleanup()
+		return saveTodosDB(db, items)
+	}
+	return saveTodosJSON(items)
+}
+
+func todoStore() (*sql.DB, func(), error) {
+	todoDBMu.RLock()
+	db := todoDB
+	todoDBMu.RUnlock()
+	if db != nil {
+		return db, func() {}, nil
+	}
+	db, err := store.OpenDefault()
+	if err != nil {
+		return nil, nil, err
+	}
+	return db, func() { _ = db.Close() }, nil
+}
+
+func loadTodosDB(db *sql.DB) ([]TodoItem, error) {
+	rows, err := db.Query(`
+SELECT id, text, status, detail, created_at, updated_at
+FROM todos
+ORDER BY idx ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TodoItem
+	for rows.Next() {
+		var item TodoItem
+		if err := rows.Scan(&item.ID, &item.Text, &item.Status, &item.Detail, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func saveTodosDB(db *sql.DB, items []TodoItem) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM todos`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	stmt, err := tx.Prepare(`
+INSERT INTO todos (id, idx, text, status, detail, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for i, item := range items {
+		if _, err := stmt.Exec(item.ID, i, item.Text, normaliseTodoStatus(item.Status), item.Detail, item.CreatedAt, item.UpdatedAt); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func todoCountDB(db *sql.DB) (int, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM todos`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func loadTodosJSON() ([]TodoItem, error) {
 	path, err := todoPath()
 	if err != nil {
 		return nil, err
@@ -236,11 +374,7 @@ func LoadTodos() ([]TodoItem, error) {
 	return file.Items, nil
 }
 
-func SaveTodos(items []TodoItem) error {
-	return saveTodos(items)
-}
-
-func saveTodos(items []TodoItem) error {
+func saveTodosJSON(items []TodoItem) error {
 	path, err := todoPath()
 	if err != nil {
 		return err

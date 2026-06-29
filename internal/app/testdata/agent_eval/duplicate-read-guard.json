@@ -1,0 +1,11 @@
+{
+  "name": "duplicate-read-guard",
+  "prompt": "Inspect notes.txt once and summarize it. Do not keep re-reading the same file.",
+  "workspace": {
+    "notes.txt": "This note says the project has one config file and one report file.\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 6,
+  "expect_status": "done",
+  "max_auto_continues": 2
+}

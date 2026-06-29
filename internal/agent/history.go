@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"mauler/internal/llm"
@@ -105,6 +106,14 @@ func (h *History) ClearOldToolResults(keepRecent int) ToolClearStats {
 	toolIndexes := make([]int, 0)
 	for i, msg := range h.messages {
 		if msg.Role == llm.RoleTool && clearableToolResult(msg.Name) && !isClearedToolResult(msg) {
+			// Preserve compact results that carry extracted evidence (hashes, creds,
+			// leak markers, flags). Blind SQLi / enumeration accumulates many small
+			// outputs; clearing them mid-extraction makes the model re-fetch what it
+			// already had, which is exactly the churn we want to avoid. Large results
+			// are still clearable — they bloat context and are re-fetchable.
+			if isCompactEvidence(messageContentText(msg)) {
+				continue
+			}
 			toolIndexes = append(toolIndexes, i)
 		}
 	}
@@ -202,6 +211,35 @@ func estimateTokens(m llm.Message) int {
 		}
 	}
 	return n
+}
+
+// evidenceKeepMaxChars bounds how large a "compact evidence" result may be and
+// still be preserved from clearing. Extraction outputs are tiny; large bodies that
+// merely mention a keyword are not the accumulative-state case and stay clearable.
+const evidenceKeepMaxChars = 1200
+
+var evidencePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`~[^~\n]{2,}~`),                     // EXTRACTVALUE/XPath leak markers
+	regexp.MustCompile(`(?i)pass(word|wd)?\s*[:=]`),        // password: / passwd=
+	regexp.MustCompile(`(?i)BEGIN [A-Z0-9 ]*PRIVATE KEY`),  // private keys
+	regexp.MustCompile(`(?i)\b(flag|htb|root|user)\{`),     // CTF/HTB flags
+	regexp.MustCompile(`\b[a-f0-9]{16,64}\b`),              // hash-like hex (md5/sha/ntlm), bounded so it can't match long hex blobs
+	regexp.MustCompile(`(?i)uid=\d+\([^)]+\)\s+gid=`),      // id(1) output
+	regexp.MustCompile(`(?i)(api[_-]?key|secret|token)\s*[:=]\s*\S`),
+}
+
+// isCompactEvidence reports whether a small tool result carries extracted evidence
+// worth keeping in context across clears/compaction.
+func isCompactEvidence(text string) bool {
+	if len(text) == 0 || len(text) > evidenceKeepMaxChars {
+		return false
+	}
+	for _, re := range evidencePatterns {
+		if re.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }
 
 func clearableToolResult(name string) bool {

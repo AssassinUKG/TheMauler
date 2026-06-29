@@ -53,6 +53,40 @@ func TestSQLiteQueryRejectsWritesAndMultipleStatements(t *testing.T) {
 	}
 }
 
+func TestSQLiteReadOnlySeesWALCommittedRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	writer, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.Exec(`pragma journal_mode=WAL; create table ledger_events (id text primary key, kind text)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`insert into ledger_events values ('evt-1', 'file_change')`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&SQLiteQuery{}).Run(context.Background(), mustSQLiteJSON(t, map[string]any{
+		"path":  dbPath,
+		"query": "select id, kind from ledger_events",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "id=evt-1") || !strings.Contains(result, "kind=file_change") {
+		t.Fatalf("read-only query did not see WAL-committed row:\n%s", result)
+	}
+}
+
 func mustSQLiteJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(value)

@@ -111,6 +111,8 @@ type AgentsConfig struct {
 	DefaultAutonomy       string                     `toml:"default_autonomy" json:"default_autonomy"`
 	OfflineOnly           bool                       `toml:"offline_only" json:"offline_only"`
 	MaxToolCalls          int                        `toml:"max_tool_calls" json:"max_tool_calls"`
+	MaxRunSeconds         int                        `toml:"max_run_seconds" json:"max_run_seconds"` // 0 = unlimited
+	EscalationProfile     string                     `toml:"escalation_profile" json:"escalation_profile"`
 	RequirePlan           bool                       `toml:"require_plan" json:"require_plan"`
 	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (3)
 	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
@@ -126,6 +128,7 @@ type LabContext struct {
 	Target         string `toml:"target" json:"target"`
 	VPNInterface   string `toml:"vpn_interface" json:"vpn_interface"`
 	LatestArtifact string `toml:"latest_artifact" json:"latest_artifact"`
+	OpsProfile     string `toml:"ops_profile" json:"ops_profile"`
 }
 
 // ContextConfig holds context window and compaction settings.
@@ -144,11 +147,15 @@ type ContextConfig struct {
 
 // MemoryConfig holds durable project-memory settings.
 type MemoryConfig struct {
-	Enabled       bool `toml:"enabled" json:"enabled"`
-	AutoInject    bool `toml:"auto_inject" json:"auto_inject"`
-	MaxEntries    int  `toml:"max_entries" json:"max_entries"`
-	MaxInject     int  `toml:"max_inject" json:"max_inject"`
-	MaxEntryChars int  `toml:"max_entry_chars" json:"max_entry_chars"`
+	Enabled    bool `toml:"enabled" json:"enabled"`
+	AutoInject bool `toml:"auto_inject" json:"auto_inject"`
+	// DisableAutoDistill turns OFF auto-saving run lessons into memory at finish.
+	// Stored as an opt-out so the zero value (absent in older configs) keeps the
+	// default-on behavior; the UI presents it positively as "Auto-distill lessons".
+	DisableAutoDistill bool `toml:"disable_auto_distill" json:"disable_auto_distill"`
+	MaxEntries         int  `toml:"max_entries" json:"max_entries"`
+	MaxInject          int  `toml:"max_inject" json:"max_inject"`
+	MaxEntryChars      int  `toml:"max_entry_chars" json:"max_entry_chars"`
 }
 
 // SkillsConfig holds procedural-memory skill settings.
@@ -170,7 +177,7 @@ type ImageConfig struct {
 
 // UIConfig holds display and layout settings.
 type UIConfig struct {
-	Theme               string  `toml:"theme" json:"theme"` // dark | light
+	Theme               string  `toml:"theme" json:"theme"` // mauler-ops | slate | light | dark legacy
 	AccentColor         string  `toml:"accent_color" json:"accent_color"`
 	PrimaryColor        string  `toml:"primary_color" json:"primary_color"`
 	StatusBar           bool    `toml:"status_bar" json:"status_bar"`

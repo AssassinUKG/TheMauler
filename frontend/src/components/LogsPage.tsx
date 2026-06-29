@@ -14,14 +14,6 @@ export function LogsPage({ version }: { version: number }) {
   const [status, setStatus] = useState<StatusFilter>('all')
   const [selectedId, setSelectedId] = useState('')
   const [actionStatus, setActionStatus] = useState('')
-  const [density, setDensity] = useState<'cards' | 'compact'>(
-    () => (localStorage.getItem('logs-density') as 'cards' | 'compact') || 'compact'
-  )
-
-  const changeDensity = (next: 'cards' | 'compact') => {
-    setDensity(next)
-    localStorage.setItem('logs-density', next)
-  }
 
   const load = async () => {
     const next = await ListTaskRuns().catch(() => [] as TaskRun[])
@@ -94,21 +86,9 @@ export function LogsPage({ version }: { version: number }) {
       <header className="logs-header">
         <div>
           <h1>Logs</h1>
-          <p>Full run history, prompts, responses, timeline events, and tool I/O.</p>
+          <p>Compact run history, prompts, responses, timeline events, and tool I/O.</p>
         </div>
         <div className="logs-actions">
-          <div className="logs-density" role="group" aria-label="Display density">
-            <button
-              className={density === 'cards' ? 'active' : ''}
-              onClick={() => changeDensity('cards')}
-              title="Roomier cards"
-            >Cards</button>
-            <button
-              className={density === 'compact' ? 'active' : ''}
-              onClick={() => changeDensity('compact')}
-              title="Dense rows — see more at once"
-            >Compact</button>
-          </div>
           <button onClick={() => void refresh()}>Refresh</button>
           <button onClick={() => void exportLogs()}>Export JSON</button>
           <button className="danger" onClick={() => void clearLogs()}>Clear Logs</button>
@@ -132,7 +112,7 @@ export function LogsPage({ version }: { version: number }) {
       </div>
 
       <div className="logs-layout">
-        <aside className={`logs-list ${density === 'compact' ? 'compact' : ''}`}>
+        <aside className="logs-list compact">
           {filtered.length === 0 ? (
             <div className="logs-empty">{runs.length === 0 ? 'No logs yet' : 'No matching logs'}</div>
           ) : filtered.map(run => (
@@ -163,7 +143,7 @@ export function LogsPage({ version }: { version: number }) {
           {!selected ? (
             <div className="logs-empty">Select a run to inspect it.</div>
           ) : (
-            <RunDetail run={selected} density={density} />
+            <RunDetail run={selected} />
           )}
         </main>
       </div>
@@ -171,8 +151,7 @@ export function LogsPage({ version }: { version: number }) {
   )
 }
 
-function RunDetail({ run, density }: { run: TaskRun; density: 'cards' | 'compact' }) {
-  const compact = density === 'compact'
+function RunDetail({ run }: { run: TaskRun }) {
   return (
     <>
       <section className="logs-detail-hero">
@@ -201,9 +180,9 @@ function RunDetail({ run, density }: { run: TaskRun; density: 'cards' | 'compact
       {(run.events ?? []).length > 0 && (
         <section className="logs-section">
           <h2>Timeline</h2>
-          <div className={`logs-timeline ${compact ? 'compact' : ''}`}>
+          <div className="logs-timeline compact">
             {(run.events ?? []).map((event, index) => (
-              <details key={`${run.id}-event-${index}`} className={`logs-event ${compact ? 'compact' : ''}`}>
+              <details key={`${run.id}-event-${index}`} className="logs-event compact">
                 <summary>
                   <span className={`logs-status ${eventStatusClass(event.kind)}`}>{event.kind}</span>
                   <span>{event.message}</span>
@@ -219,9 +198,9 @@ function RunDetail({ run, density }: { run: TaskRun; density: 'cards' | 'compact
       {(run.tools ?? []).length > 0 && (
         <section className="logs-section">
           <h2>Tool Calls</h2>
-          <div className={`logs-tools ${compact ? 'compact' : ''}`}>
+          <div className="logs-tools compact">
             {(run.tools ?? []).map((tool, index) => (
-              <details key={`${run.id}-tool-${index}`} className={`logs-tool ${compact ? 'compact' : ''}`} open={tool.status !== 'ok' && tool.status !== 'done'}>
+              <details key={`${run.id}-tool-${index}`} className="logs-tool compact" open={tool.status !== 'ok' && tool.status !== 'done'}>
                 <summary>
                   <span className={`logs-status ${statusClass(tool.status)}`}>{tool.status}</span>
                   <span>{tool.name}</span>

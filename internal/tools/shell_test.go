@@ -7,7 +7,14 @@ import (
 	"testing"
 )
 
+func useDiskToolConfig(t *testing.T) {
+	t.Helper()
+	ResetConfigSnapshot()
+	t.Cleanup(ResetConfigSnapshot)
+}
+
 func TestDetectShellBackendAuto(t *testing.T) {
+	useDiskToolConfig(t)
 	got := detectShellBackend("auto")
 	if cfg, _ := settings.Load(); cfg != nil && cfg.Tools.ShellBackend != "" && cfg.Tools.ShellBackend != "auto" {
 		if got != cfg.Tools.ShellBackend {
@@ -36,6 +43,7 @@ func TestWSLShellCommandUsesConfiguredDistroAndCd(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("wsl.exe command shape is Windows-specific")
 	}
+	useDiskToolConfig(t)
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	cfg := settings.DefaultSettings()
 	cfg.Tools.ShellUser = "root"
@@ -167,6 +175,7 @@ func TestDecodeCommandOutputUTF16LE(t *testing.T) {
 }
 
 func TestProtectedShellMutationBlocksMalwareDirectory(t *testing.T) {
+	useDiskToolConfig(t)
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	cfg := settings.DefaultSettings()
 	cfg.Tools.ProtectedPaths = []string{`C:\Users\richa\Documents\MALWARE_TEST_DIR\AI malware`}
@@ -180,6 +189,7 @@ func TestProtectedShellMutationBlocksMalwareDirectory(t *testing.T) {
 }
 
 func TestProtectedShellMutationAllowsCopyOutOfProtectedDirectory(t *testing.T) {
+	useDiskToolConfig(t)
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	cfg := settings.DefaultSettings()
 	cfg.Tools.ProtectedPaths = []string{`C:\Users\richa\Documents\MALWARE_TEST_DIR\AI malware`}
@@ -197,6 +207,7 @@ func TestProtectedShellMutationAllowsCopyOutOfProtectedDirectory(t *testing.T) {
 }
 
 func TestProtectedShellMutationBlocksCopyIntoProtectedDirectory(t *testing.T) {
+	useDiskToolConfig(t)
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	cfg := settings.DefaultSettings()
 	cfg.Tools.ProtectedPaths = []string{`C:\Users\richa\Documents\MALWARE_TEST_DIR\AI malware`}

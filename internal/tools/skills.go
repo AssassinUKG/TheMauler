@@ -66,6 +66,9 @@ func (t *SkillsList) Run(_ context.Context, raw json.RawMessage) (string, error)
 		if len(s.tags) > 0 {
 			fmt.Fprintf(&sb, " [%s]", strings.Join(s.tags, ", "))
 		}
+		if req := formatSkillRequirements(s); req != "" {
+			fmt.Fprintf(&sb, " Requirements: %s", req)
+		}
 	}
 	if count == 0 {
 		return fmt.Sprintf("No skills matched filter %q.", p.Filter), nil
@@ -126,10 +129,14 @@ func (t *SkillView) Run(_ context.Context, raw json.RawMessage) (string, error) 
 // ---------- Low-level file helpers (skills package-private) ----------
 
 type skillMeta struct {
-	name        string
-	description string
-	tags        []string
-	sourcePath  string
+	name          string
+	description   string
+	tags          []string
+	sourcePath    string
+	requiredTools []string
+	shellBackend  string
+	needsNetwork  bool
+	needsWrite    bool
 }
 
 func toolsSkillsDir() (string, error) {
@@ -227,9 +234,59 @@ func parseSkillMeta(name, content string) skillMeta {
 			}
 		case "source_path":
 			m.sourcePath = val
+		case "required_tools":
+			m.requiredTools = parseToolsSkillList(val)
+		case "shell_backend":
+			m.shellBackend = strings.TrimSpace(val)
+		case "needs_network":
+			m.needsNetwork = parseToolsSkillBool(val)
+		case "needs_write":
+			m.needsWrite = parseToolsSkillBool(val)
 		}
 	}
 	return m
+}
+
+func formatSkillRequirements(meta skillMeta) string {
+	var parts []string
+	if len(meta.requiredTools) > 0 {
+		parts = append(parts, "tools="+strings.Join(meta.requiredTools, ","))
+	}
+	if strings.TrimSpace(meta.shellBackend) != "" {
+		parts = append(parts, "shell="+strings.TrimSpace(meta.shellBackend))
+	}
+	if meta.needsNetwork {
+		parts = append(parts, "network")
+	}
+	if meta.needsWrite {
+		parts = append(parts, "write")
+	}
+	return strings.Join(parts, "; ")
+}
+
+func parseToolsSkillList(val string) []string {
+	val = strings.Trim(strings.TrimSpace(val), "[]")
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range strings.Split(val, ",") {
+		item = strings.Trim(strings.ToLower(strings.TrimSpace(item)), `"'`)
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func parseToolsSkillBool(val string) bool {
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(val), `"'`)) {
+	case "true", "yes", "1", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func readExternalSkillSource(path, query string, maxBytes int) (string, error) {

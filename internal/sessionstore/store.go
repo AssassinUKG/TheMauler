@@ -4,15 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"mauler/internal/settings"
-
-	_ "modernc.org/sqlite"
+	"mauler/internal/store"
 )
 
 type Message struct {
@@ -33,12 +29,25 @@ type SearchResult struct {
 	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
+type CheckpointRecord struct {
+	RunID   string `json:"run_id"`
+	Prompt  string `json:"prompt"`
+	Mode    string `json:"mode"`
+	Profile string `json:"profile"`
+	Payload string `json:"payload"`
+	SavedAt string `json:"saved_at"`
+}
+
+type Store struct {
+	db *sql.DB
+}
+
+func NewStore(db *sql.DB) *Store {
+	return &Store{db: db}
+}
+
 func DefaultPath() (string, error) {
-	dir, err := settings.ConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "state.db"), nil
+	return store.DefaultPath()
 }
 
 func StoreDefaultSession(name, scope, model string, messages []Message) error {
@@ -74,18 +83,22 @@ func ClearDefault() error {
 }
 
 func StoreSession(dbPath, name, scope, model string, messages []Message) error {
-	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("session name is required")
-	}
 	db, err := open(dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	return NewStore(db).StoreSession(name, scope, model, messages)
+}
+
+func (s *Store) StoreSession(name, scope, model string, messages []Message) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("session name is required")
+	}
 
 	sessionID := sessionID(scope, name)
 	now := time.Now().Format(time.RFC3339)
-	return withTx(db, func(tx *sql.Tx) error {
+	return withTx(s.db, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)`, sessionID); err != nil {
 			return err
 		}
@@ -134,8 +147,12 @@ func DeleteSession(dbPath, name, scope string) error {
 		return err
 	}
 	defer db.Close()
+	return NewStore(db).DeleteSession(name, scope)
+}
+
+func (s *Store) DeleteSession(name, scope string) error {
 	id := sessionID(scope, name)
-	return withTx(db, func(tx *sql.Tx) error {
+	return withTx(s.db, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)`, id); err != nil {
 			return err
 		}
@@ -153,7 +170,11 @@ func Clear(dbPath string) error {
 		return err
 	}
 	defer db.Close()
-	return withTx(db, func(tx *sql.Tx) error {
+	return NewStore(db).Clear()
+}
+
+func (s *Store) Clear() error {
+	return withTx(s.db, func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM messages_fts`); err != nil {
 			return err
 		}
@@ -166,6 +187,15 @@ func Clear(dbPath string) error {
 }
 
 func Search(dbPath, query string, limit int) ([]SearchResult, error) {
+	db, err := open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	return NewStore(db).Search(query, limit)
+}
+
+func (s *Store) Search(query string, limit int) ([]SearchResult, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
@@ -173,14 +203,9 @@ func Search(dbPath, query string, limit int) ([]SearchResult, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
-	db, err := open(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
 
 	match := ftsQuery(query)
-	rows, err := db.Query(`
+	rows, err := s.db.Query(`
 SELECT m.id, m.session_id, s.name, m.role, m.content, m.tool_name, s.updated_at, bm25(messages_fts) AS rank
 FROM messages_fts
 JOIN messages m ON m.id = messages_fts.rowid
@@ -210,52 +235,84 @@ LIMIT ?`, match, limit)
 	return out, nil
 }
 
-func open(path string) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, err
+func (s *Store) SaveCheckpoint(record CheckpointRecord) error {
+	record.RunID = strings.TrimSpace(record.RunID)
+	record.SavedAt = strings.TrimSpace(record.SavedAt)
+	if record.RunID == "" {
+		return fmt.Errorf("run_id is required")
 	}
-	db, err := sql.Open("sqlite", path)
+	if strings.TrimSpace(record.Payload) == "" {
+		return fmt.Errorf("checkpoint payload is required")
+	}
+	if record.SavedAt == "" {
+		record.SavedAt = time.Now().Format(time.RFC3339)
+	}
+	_, err := s.db.Exec(`
+INSERT INTO run_checkpoints (run_id, prompt, mode, profile, payload, saved_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(run_id) DO UPDATE SET
+  prompt=excluded.prompt,
+  mode=excluded.mode,
+  profile=excluded.profile,
+  payload=excluded.payload,
+  saved_at=excluded.saved_at`,
+		record.RunID, record.Prompt, record.Mode, record.Profile, record.Payload, record.SavedAt)
+	return err
+}
+
+func (s *Store) LoadCheckpoint(runID string) (CheckpointRecord, bool, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return CheckpointRecord{}, false, nil
+	}
+	var record CheckpointRecord
+	err := s.db.QueryRow(`
+SELECT run_id, prompt, mode, profile, payload, saved_at
+FROM run_checkpoints
+WHERE run_id = ?`, runID).Scan(&record.RunID, &record.Prompt, &record.Mode, &record.Profile, &record.Payload, &record.SavedAt)
+	if err == sql.ErrNoRows {
+		return CheckpointRecord{}, false, nil
+	}
+	if err != nil {
+		return CheckpointRecord{}, false, err
+	}
+	return record, true, nil
+}
+
+func (s *Store) ListCheckpoints() ([]CheckpointRecord, error) {
+	rows, err := s.db.Query(`
+SELECT run_id, prompt, mode, profile, payload, saved_at
+FROM run_checkpoints
+ORDER BY saved_at DESC`)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
-		db.Close()
+	defer rows.Close()
+	var records []CheckpointRecord
+	for rows.Next() {
+		var record CheckpointRecord
+		if err := rows.Scan(&record.RunID, &record.Prompt, &record.Mode, &record.Profile, &record.Payload, &record.SavedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		_, _ = db.Exec(`PRAGMA journal_mode=DELETE`)
-	}
-	if err := initSchema(db); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return db, nil
+	return records, nil
 }
 
-func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS sessions (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  scope TEXT,
-  model TEXT,
-  updated_at TEXT NOT NULL,
-  message_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  idx INTEGER NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT,
-  tool_name TEXT,
-  tool_calls TEXT,
-  timestamp TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, idx);
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content);
-`)
+func (s *Store) DeleteCheckpoint(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM run_checkpoints WHERE run_id = ?`, runID)
 	return err
+}
+
+func open(path string) (*sql.DB, error) {
+	return store.Open(path)
 }
 
 func withTx(db *sql.DB, fn func(*sql.Tx) error) error {

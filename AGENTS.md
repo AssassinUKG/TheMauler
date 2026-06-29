@@ -257,6 +257,8 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
 - Durable project memory is stored in `~/.config/mauler/memory.json`, scoped to the workspace, and relevant entries are injected into new conversation system prompts. Memory entries support kind, importance, pinning, tags, updated/last-used timestamps, edit-in-place, filtering, and weighted retrieval so it can grow toward embeddings/RAG later.
 - Saved/autosaved sessions are also indexed into `~/.config/mauler/state.db` using SQLite FTS, and the `session_search` tool lets the agent recall prior chat decisions, errors, fixes, and tool trails without stuffing old sessions into the prompt. The Memory tab has session recall search, reindex, clear-index, and reset controls.
 - Task runs are stored in `~/.config/mauler/task-runs.json` with prompt, mode, profile, status, summary, tool trail, and a lifecycle timeline. The Logs tab can search, filter, refresh, export, or clear them.
+- RunLedger core slices are implemented in `internal/ledger`: task-run events, state transitions, tool results, stops, finishes, confirmations, artifact lifecycle/output, terminal shell lifecycle/input-size, memory writes/deletes, skill writes/deletes, learning suggestions, provider/model diagnostics, web/browser/planner/subagent category events, and bounded subagent lifecycle are mirrored to UTF-8 JSONL at `~/.config/mauler/run-ledger.jsonl`, with Wails bindings `ListLedgerEvents` and `ClearLedgerEvents`. The center-pane Brain tab reads this ledger with filters, signals, selected-event detail, export, and clear controls. Use this as the event spine for new Brain/Ops/logging work rather than adding another partial log path.
+- Reviewable learning candidates are exposed by `ListLearningCandidates`: it derives skill/reflection/evidence suggestions from recent ledger events, redacts sensitive snippets, and the Brain tab can approve them into Memory entries or Skills. Keep this approval-first pattern for future learning; do not silently promote model guesses into durable memory.
 - Full-page Logs and Memory views are available from the top bar and center tabs. Use them for serious run inspection, project memory editing, and session recall search; the Agent panel tabs remain compact quick views.
 - Default logging is full-detail: tool inputs, tool results, and model responses are captured, with a larger 500-run retention default.
 - Task runs include stop reason/detail fields for user stops, cancelled contexts, auto-continue exhaustion, tool denials, disabled tools, budget exhaustion, model/client errors, and tool errors. Logs surface the reason plus timeline events for model ready, truncation, auto-continue prompts, tool calls, blocks, failures, and completion.
@@ -282,6 +284,8 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
 - Anthropic/Claude defaults are removed; supported UI backends are local OpenAI-compatible providers: LM Studio and llama.cpp
 - **Artifact runner fully wired end-to-end**: Run/Stop buttons in FileViewer, streaming output panel with auto-scroll and pulsing indicator, `mauler:artifact_output` / `mauler:artifact_done` events consumed in App.tsx
 - **Terminal pane first-class for daily work**: terminal visibility/height persist in UI settings, the terminal opens by default when configured, includes a short Help panel, and can be used interactively while AI shell runs are visible in the same stream.
+- Bottom work area now has Terminal and Stream tabs. New agent runs auto-open the Stream tab while manual bottom-panel toggles open Terminal, so live model text/tool activity no longer consumes the main Ops page.
+- Ops page evidence is now profile-driven. Default `Pentesting` profile is attack/log/report focused for authorised work: hosts, services, CVEs, vulnerability hints, PoC verification signals, severity, artifacts, and report/evidence paths, with no remediation/client-fix loop. `HTB / CTF` is the explicit profile for recon/foothold/user/privesc/root/flag/writeup flows. Do not re-center default Ops around HTB user/root flags.
 - **Settings round-trip data integrity fixed**: `go.ts` Settings interface now includes all fields including `think_indicator`, `diff_colours`, and the full `image` block — missing fields no longer silently zero out on save
 - Regression tests cover profile generation settings, one-model-load-per-key behavior, compaction lock boundaries, workspace switching/context reset, missing-path workspace hints, Monaco save rollback snapshots, web/browser budgets, source ranking, settings default migration, toolset filtering, PDF text extraction, safety presets, shell/bash alias filtering, path normalization, and task-run logging/timeline behavior.
 - `npm run build` passes clean (301 modules, no TypeScript errors)
@@ -294,9 +298,23 @@ Production output: `C:\Users\richa\Desktop\TheMauler\build\bin\TheMauler.exe`.
 
 ## What to Build Next
 
+### NEXT: Agent-loop upgrade tier (Hermes / Claude-Code-class patterns)
+
+Implementable specs (files, signatures, algorithm, wiring anchors, tests, acceptance) live in
+`docs/agent-loop-upgrade-roadmap.md` (U1–U7), with the cross-project analysis in
+`docs/agent-loop-upgrade-plan-2026-06.md`. Order: U1 dynamic reasoning-effort tool → U2 tool-result
+disk offload + `read_tool_result` → U3 Doctor launch-flag/quant assertions → U4 programmatic tool
+calling (`run_script`) → U5 graduated compaction ladder → U6 externalized `PROGRESS.md` resume → U7
+grammar-constrained tool args (held on a live probe). This builds on the now-complete reliability
+roadmap (R1–R10). The HelixClaw mirror is `C:\Users\richa\Documents\HelixClaw\HELIXCLAW_AGENT_LOOP_UPGRADE.md`.
+
 ### NEXT: Hermes-inspired "next level" agent foundation
 
 The first Hermes-agent foundation pass is now mostly landed: session recall, structured run state, todo/planner tools, local skills, toolsets, and post-run skill suggestions are implemented. Keep the remaining UI polish sections below; do not remove them.
+
+### NEXT: Brain / RunLedger memory architecture
+
+Track the "smarter over time without context bloat" redesign in `docs/brain-memory-ledger-tracker.md`. Direction: centralize all run/tool/model/UI logging through one RunLedger event spine, then derive task logs, Ops views, memory extraction, reflection lessons, skill promotion, evidence pointers, and retrieval-planned prompt packets from that ledger. Core RunLedger producer slices, Brain inspection UI, and reviewable learning candidates are in place; continue with retrieval-planned prompt packets and ledger-backed Ops polish. Do not grow prompts by dumping raw logs, full shell output, web pages, or whole skills; keep bulky data external and retrieve summaries/chunks on demand.
 
 ### NEXT: Workspace/folder model redesign
 

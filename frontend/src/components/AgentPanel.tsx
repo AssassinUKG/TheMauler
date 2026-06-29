@@ -25,6 +25,10 @@ import {
   SelectProjectInstructionDirectory,
   SelectProjectInstructionFile,
   SetAgentModeOverride,
+  GetSpecPlan,
+  SetSpecMode,
+  CalibrateSpec,
+  type SpecPlan,
   StopAgent,
   UpdateSettings,
   UseProjectInstructionFile,
@@ -37,6 +41,7 @@ import {
   type TaskRun,
   type TodoItem,
 } from '../wailsjs/go'
+import { EventsOn } from '../wailsjs/runtime'
 import type { AgentActivity } from '../App'
 import './AgentPanel.css'
 
@@ -70,6 +75,7 @@ const toolLabels: Record<string, string> = {
   glob: 'Glob',
   grep: 'Grep',
   session_search: 'Session search',
+  file_changes: 'File changes',
   sqlite_schema: 'SQLite schema',
   sqlite_query: 'SQLite query',
   web_search: 'Web search',
@@ -90,6 +96,9 @@ const toolLabels: Record<string, string> = {
   todo_clear: 'Clear plan',
   skills_list: 'List skills',
   skill_view: 'View skill',
+  http_probe: 'HTTP probe',
+  evidence_bundle: 'Evidence bundle',
+  subagent_explore: 'Subagent explore',
   subagent_research: 'Subagent research',
   subagent_review: 'Subagent review',
   subagent_testfix: 'Subagent test/fix',
@@ -130,9 +139,12 @@ const toolRisk: Record<string, ToolRisk> = {
   glob: 'low',
   grep: 'low',
   session_search: 'low',
+  file_changes: 'low',
   sqlite_schema: 'low',
   sqlite_query: 'low',
   fetch_url: 'medium',
+  http_probe: 'medium',
+  evidence_bundle: 'medium',
   web_search: 'medium',
   browser_open: 'medium',
   browser_snapshot: 'medium',
@@ -154,6 +166,7 @@ const toolRisk: Record<string, ToolRisk> = {
   skills_list: 'low',
   skill_view: 'low',
   subagent_research: 'medium',
+  subagent_explore: 'low',
   subagent_review: 'low',
   subagent_testfix: 'high',
   subagent_summarize: 'low',
@@ -206,6 +219,8 @@ export function AgentPanel({
   const [doctorRunning, setDoctorRunning] = useState(false)
   const [maintenanceRunning, setMaintenanceRunning] = useState('')
   const [panelStatus, setPanelStatus] = useState('')
+  const [specPlan, setSpecPlan] = useState<SpecPlan | null>(null)
+  const [calibrating, setCalibrating] = useState(false)
 
   const load = async () => {
     const [s, mem, taskRuns, todoItems, skillItems, profileText, instructionSummary] = await Promise.all([
@@ -225,6 +240,7 @@ export function AgentPanel({
     setTodos(todoItems)
     setSkills(skillItems)
     setUserProfile(profileText)
+    void GetSpecPlan().then(setSpecPlan).catch(() => {})
   }
 
   useEffect(() => {
@@ -235,6 +251,35 @@ export function AgentPanel({
     if (doctorRunRequest <= 0) return
     void runDoctor()
   }, [doctorRunRequest])
+
+  // The backend re-resolves the MTP/speculative plan whenever a profile activates.
+  useEffect(() => EventsOn('mauler:spec_plan', (...args: unknown[]) => {
+    setSpecPlan(args[0] as SpecPlan)
+  }), [])
+
+  const cycleSpecMode = async () => {
+    const current = specPlan?.locked ? (specPlan.enabled ? 'on' : 'off') : 'auto'
+    const next = current === 'auto' ? 'on' : current === 'on' ? 'off' : 'auto'
+    try {
+      setSpecPlan(await SetSpecMode(next))
+    } catch (e) {
+      showPanelStatus(`Spec mode failed: ${String(e)}`)
+    }
+  }
+
+  const calibrateSpec = async () => {
+    setCalibrating(true)
+    showPanelStatus('Calibrating MTP draft window… (reloads the model per step)')
+    try {
+      const cal = await CalibrateSpec(activeProfile)
+      showPanelStatus(`MTP tuned: best n=${cal.best_n} · ${cal.speedup.toFixed(2)}× vs off`)
+      setSpecPlan(await GetSpecPlan())
+    } catch (e) {
+      showPanelStatus(`Calibration failed: ${String(e)}`)
+    } finally {
+      setCalibrating(false)
+    }
+  }
 
   const updateSettings = async (next: Settings) => {
     setSettings(next)
@@ -388,6 +433,24 @@ export function AgentPanel({
     onSettingsChanged()
   }
 
+  const updateShellContext = async (patch: Partial<Settings['tools']>) => {
+    if (!settings) return
+    await updateTools({ ...settings.tools, ...patch })
+  }
+
+  const useWSLKaliTargetMode = async () => {
+    if (!settings) return
+    await updateTools({
+      ...settings.tools,
+      shell_backend: 'wsl',
+      shell_mode: 'shared_terminal',
+      shell_distro: settings.tools.shell_distro || 'kali-linux',
+      shell_user: settings.tools.shell_user || 'root',
+      active_toolset: settings.tools.toolsets?.['local-code'] ? 'local-code' : settings.tools.active_toolset,
+    })
+    showPanelStatus('WSL/Kali target mode enabled')
+  }
+
   const saveMemoryDraft = async () => {
     if (!memoryDraft.title.trim() && !memoryDraft.content.trim()) return
     const saved = await SaveMemoryEntry({
@@ -397,6 +460,8 @@ export function AgentPanel({
       content: memoryDraft.content.trim(),
       tags: memoryDraft.tags.split(',').map(t => t.trim()).filter(Boolean),
       kind: 'note',
+      confidence: 'confirmed',
+      source: 'user',
       importance: 3,
       pinned: false,
       created_at: '',
@@ -459,6 +524,9 @@ export function AgentPanel({
     : autonomous && !settings?.tools.confirm_exec && !settings?.tools.confirm_writes
       ? 'Unrestricted'
       : 'Balanced'
+  const shellBackend = settings?.tools.shell_backend || 'auto'
+  const activeToolset = settings?.tools.active_toolset || 'balanced'
+  const showWSLBoundaryNote = shellBackend === 'wsl' && activeToolset !== 'local-code'
 
   const applyAutonomyPreset = async (preset: 'unrestricted' | 'balanced' | 'offline') => {
     await ApplySafetyPreset(preset)
@@ -493,10 +561,91 @@ export function AgentPanel({
               <span className="agent-label">Mode</span>
               <span className="agent-mode-pill">{effectiveMode}</span>
             </div>
+            <div className="agent-row">
+              <span className="agent-label">MTP</span>
+              <span className="agent-spec-controls">
+                <button
+                  type="button"
+                  className={`agent-spec-chip ${specTone(specPlan)}`}
+                  title={specPlan
+                    ? `${specPlan.reason} · source: ${specPlan.source}${specPlan.locked ? ' (pinned)' : ' (auto)'} — click to cycle auto → on → off`
+                    : 'Speculative decoding plan not resolved yet'}
+                  onClick={() => void cycleSpecMode()}
+                >
+                  {specLabel(specPlan)}
+                </button>
+                {specPlan?.enabled && (
+                  <button
+                    type="button"
+                    className="agent-spec-tune"
+                    disabled={calibrating || streaming}
+                    title="Sweep the draft window (n=1–5) and pin the fastest. Reloads the model per step; don't run during a task."
+                    onClick={() => void calibrateSpec()}
+                  >
+                    {calibrating ? '…' : 'Tune'}
+                  </button>
+                )}
+              </span>
+            </div>
+
+            <div className="agent-section-head">Shell context</div>
+            <div className="agent-shell-grid">
+              <label>
+                <span>Backend</span>
+                <select
+                  value={settings?.tools.shell_backend || 'auto'}
+                  onChange={e => void updateShellContext({ shell_backend: e.target.value })}
+                  disabled={!settings}
+                >
+                  <option value="auto">auto</option>
+                  <option value="wsl">wsl</option>
+                  <option value="powershell">powershell</option>
+                  <option value="cmd">cmd</option>
+                  <option value="bash">bash</option>
+                </select>
+              </label>
+              <label>
+                <span>Distro</span>
+                <input
+                  value={settings?.tools.shell_distro || ''}
+                  onChange={e => void updateShellContext({ shell_distro: e.target.value })}
+                  disabled={!settings || (settings.tools.shell_backend || 'auto') !== 'wsl'}
+                  placeholder="kali-linux"
+                />
+              </label>
+              <label>
+                <span>User</span>
+                <input
+                  value={settings?.tools.shell_user || ''}
+                  onChange={e => void updateShellContext({ shell_user: e.target.value })}
+                  disabled={!settings || (settings.tools.shell_backend || 'auto') !== 'wsl'}
+                  placeholder="root"
+                />
+              </label>
+              <label>
+                <span>Mode</span>
+                <select
+                  value={settings?.tools.shell_mode || 'shared_terminal'}
+                  onChange={e => void updateShellContext({ shell_mode: e.target.value })}
+                  disabled={!settings}
+                >
+                  <option value="shared_terminal">shared terminal</option>
+                  <option value="isolated">isolated</option>
+                </select>
+              </label>
+            </div>
+            <button className="agent-inline-button" onClick={() => void useWSLKaliTargetMode()} disabled={!settings}>
+              WSL/Kali target mode
+            </button>
+            {showWSLBoundaryNote && (
+              <div className="agent-wsl-note">
+                Target shell runs in WSL/Kali. Browser and fetch run from Windows, so use shell for .htb hosts unless you deliberately need Windows-side browsing.
+              </div>
+            )}
 
             <div className="agent-section-head">Mode override</div>
             <div className="mode-pills" title={!autoAgents ? 'Enable Auto Agents to use mode override' : undefined}>
-              {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+              {['Auto', 'Manual', 'Ops', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
                 <button
                   key={mode}
                   className={`mode-pill${modeOverride === mode ? ' active' : ''}`}
@@ -1151,6 +1300,10 @@ export function AgentPanel({
                         version: '1.0.0',
                         tags: [],
                         source_path: '',
+                        required_tools: [],
+                        shell_backend: '',
+                        needs_network: false,
+                        needs_write: false,
                         body: '',
                         raw: skillSuggestion.template,
                         created_at: '',
@@ -1264,7 +1417,7 @@ export function AgentPanel({
                     onChange={e => setSkillFilter(e.target.value)}
                   />
                   <button onClick={() => {
-                    setSkillDraft({ name: '', description: '', version: '1.0.0', tags: [], source_path: '', body: '', raw: '', created_at: '', updated_at: '' })
+                    setSkillDraft({ name: '', description: '', version: '1.0.0', tags: [], source_path: '', required_tools: [], shell_backend: '', needs_network: false, needs_write: false, body: '', raw: '', created_at: '', updated_at: '' })
                     setEditingSkill(null)
                   }}>+ New</button>
                   <button onClick={() => void load()}>↺</button>
@@ -1382,11 +1535,13 @@ export function AgentPanel({
           title="Run health checks"
         >{doctorRunning ? '...' : 'Doctor'}</button>
         <button
+          className="agent-action-danger"
           onClick={() => void killInferenceServers()}
           disabled={maintenanceRunning !== ''}
           title="Stop stale InferenceBridge and llama-server processes"
         >{maintenanceRunning === 'inference' ? '...' : 'Kill Inference'}</button>
         <button
+          className="agent-action-danger"
           onClick={() => void restartWSL()}
           disabled={maintenanceRunning !== ''}
           title="Run wsl.exe --shutdown"
@@ -1403,6 +1558,26 @@ function fmtDuration(ms: number): string {
   const m = Math.floor(ms / 60_000)
   const s = Math.round((ms % 60_000) / 1000)
   return `${m}m${s}s`
+}
+
+function specLabel(plan: SpecPlan | null): string {
+  if (!plan) return 'unknown'
+  if (!plan.enabled) {
+    if (plan.source === 'guard') return 'off (auto-disabled)'
+    return plan.locked ? 'off (pinned)' : 'off'
+  }
+  const n = plan.n_max > 0 ? ` · n${plan.n_max}` : ''
+  return `on${n}${plan.locked ? ' (pinned)' : ''}`
+}
+
+// green = verified active; amber = enabled on a name guess (unverified) OR the
+// stability guard auto-disabled it (worth noticing); dim = ordinary off.
+function specTone(plan: SpecPlan | null): string {
+  if (!plan) return 'agent-spec-off'
+  if (plan.source === 'guard') return 'agent-spec-warn'
+  if (!plan.enabled) return 'agent-spec-off'
+  if (plan.source === 'name') return 'agent-spec-warn'
+  return 'agent-spec-on'
 }
 
 function trimActivity(text: string) {

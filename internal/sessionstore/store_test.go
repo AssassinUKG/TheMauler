@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mauler/internal/store"
 )
 
 func TestStoreAndSearchSession(t *testing.T) {
@@ -88,5 +90,52 @@ func TestClearRemovesAllIndexedSessions(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("cleared sessions should not be searchable: %#v", results)
+	}
+}
+
+func TestCheckpointRoundTrip(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := NewStore(db)
+	record := CheckpointRecord{
+		RunID:   "run-1",
+		Prompt:  "prompt",
+		Mode:    "Builder",
+		Profile: "mock",
+		Payload: `{"run_id":"run-1"}`,
+		SavedAt: "2026-06-22T10:00:00Z",
+	}
+
+	if err := s.SaveCheckpoint(record); err != nil {
+		t.Fatalf("save checkpoint: %v", err)
+	}
+	got, ok, err := s.LoadCheckpoint("run-1")
+	if err != nil || !ok {
+		t.Fatalf("load checkpoint: ok=%v err=%v", ok, err)
+	}
+	if got != record {
+		t.Fatalf("checkpoint = %#v, want %#v", got, record)
+	}
+
+	record.Payload = `{"run_id":"run-1","updated":true}`
+	record.SavedAt = "2026-06-22T10:01:00Z"
+	if err := s.SaveCheckpoint(record); err != nil {
+		t.Fatalf("upsert checkpoint: %v", err)
+	}
+	list, err := s.ListCheckpoints()
+	if err != nil {
+		t.Fatalf("list checkpoints: %v", err)
+	}
+	if len(list) != 1 || list[0].Payload != record.Payload {
+		t.Fatalf("checkpoint list = %#v", list)
+	}
+	if err := s.DeleteCheckpoint("run-1"); err != nil {
+		t.Fatalf("delete checkpoint: %v", err)
+	}
+	if _, ok, err := s.LoadCheckpoint("run-1"); err != nil || ok {
+		t.Fatalf("deleted checkpoint load: ok=%v err=%v", ok, err)
 	}
 }

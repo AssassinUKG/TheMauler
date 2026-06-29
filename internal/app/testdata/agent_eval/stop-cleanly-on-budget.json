@@ -1,0 +1,14 @@
+{
+  "name": "stop-cleanly-on-budget",
+  "prompt": "Inspect every file and produce a short summary. Stop cleanly if the tool budget runs out.",
+  "workspace": {
+    "a.txt": "A\n",
+    "b.txt": "B\n",
+    "c.txt": "C\n",
+    "d.txt": "D\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 3,
+  "expect_status": "stopped",
+  "max_auto_continues": 3
+}

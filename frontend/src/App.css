@@ -14,7 +14,7 @@
   justify-content: space-between;
   height: 44px;
   padding: 0 14px;
-  background: #171717;
+  background: var(--c-panel);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   user-select: none;
@@ -86,6 +86,39 @@
 .titlebar-actions button:disabled {
   opacity: 0.35;
   cursor: default;
+}
+
+.titlebar-actions button.titlebar-clear-session {
+  color: #fca5a5;
+  background: rgba(244, 71, 71, 0.08);
+  border-color: rgba(244, 71, 71, 0.28);
+}
+
+.titlebar-actions button.titlebar-clear-session:hover {
+  color: #fee2e2;
+  border-color: rgba(244, 71, 71, 0.55);
+}
+
+/* Panel toggles read as on/off switches, distinct from the view tabs below */
+.titlebar-actions button.panel-toggle.on {
+  color: var(--text-bright);
+  background: var(--bg3);
+  border-color: var(--border);
+}
+
+.titlebar-actions button.panel-toggle.on::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+.titlebar-actions button.panel-toggle {
+  display: inline-flex;
+  align-items: center;
 }
 
 .session-select {
@@ -176,12 +209,78 @@
 
 /* ── Terminal panel (bottom, above status bar) ──────── */
 .terminal-panel {
+  display: flex;
+  flex-direction: column;
   flex-shrink: 0;
   min-height: 100px;
   max-height: 600px;
   overflow: hidden;
   background: var(--c-terminal);
   border-top: 1px solid var(--border);
+}
+
+.bottom-panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--c-panel);
+}
+
+.bottom-panel-tabs button {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.bottom-panel-tabs button:hover {
+  color: var(--text);
+  background: var(--bg3);
+}
+
+.bottom-panel-tabs button.active {
+  color: var(--text-bright);
+  background: var(--bg3);
+  border-color: var(--border);
+}
+
+.bottom-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.bottom-panel-state {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.bottom-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .terminal-resize-handle {

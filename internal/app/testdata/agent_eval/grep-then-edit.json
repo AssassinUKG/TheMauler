@@ -1,0 +1,14 @@
+{
+  "name": "grep-then-edit",
+  "prompt": "Find the TODO marker and replace it with DONE. Use grep first, then edit the definition.",
+  "workspace": {
+    "src/task.txt": "status = TODO\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 10,
+  "expect_files": {
+    "src/task.txt": "status = DONE"
+  },
+  "expect_status": "done",
+  "max_auto_continues": 2
+}

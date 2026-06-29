@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"mauler/internal/ledger"
 	"mauler/internal/settings"
 )
 
@@ -31,7 +32,8 @@ type TaskRun struct {
 	Tools            []TaskToolEvent `json:"tools,omitempty"`
 	Events           []TaskRunEvent  `json:"events,omitempty"`
 
-	startMs int64 // not serialised — used to compute DurationMs
+	startMs int64 // not serialised; used to compute DurationMs
+	ledger  *ledger.Ledger
 }
 
 type TaskRunEvent struct {
@@ -51,11 +53,34 @@ type TaskToolEvent struct {
 }
 
 func (a *App) ListTaskRuns() ([]TaskRun, error) {
-	return loadTaskRuns()
+	return a.listTaskRuns()
 }
 
 func (a *App) ClearTaskRuns() error {
-	return saveTaskRuns([]TaskRun{})
+	return a.clearTaskRuns()
+}
+
+func (a *App) ExportTaskRunsJSON() (string, error) {
+	runs, err := a.listTaskRuns()
+	if err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(runs, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (a *App) ImportTaskRunsJSON(raw string) (int, error) {
+	var runs []TaskRun
+	if err := json.Unmarshal([]byte(raw), &runs); err != nil {
+		return 0, err
+	}
+	if a != nil && a.db != nil {
+		return len(runs), replaceTaskRunsDB(a.db, runs)
+	}
+	return len(runs), saveTaskRuns(runs)
 }
 
 func startTaskRun(prompt, mode, profile, model string) TaskRun {
@@ -73,24 +98,66 @@ func startTaskRun(prompt, mode, profile, model string) TaskRun {
 	}
 }
 
+func (r *TaskRun) attachLedger(l *ledger.Ledger) {
+	r.ledger = l
+}
+
 func (r *TaskRun) addTool(name, input, result, status string, durationMs int64) {
-	r.Tools = append(r.Tools, TaskToolEvent{
+	event := TaskToolEvent{
 		Name:       name,
 		Input:      input,
 		Result:     trimRunText(result),
 		Status:     status,
 		Timestamp:  time.Now().Format(time.RFC3339),
 		DurationMs: durationMs,
+	}
+	r.Tools = append(r.Tools, event)
+	r.recordLedger(ledger.Event{
+		Kind:       "tool_result",
+		Source:     "tool",
+		Tool:       event.Name,
+		Status:     event.Status,
+		Input:      event.Input,
+		Output:     event.Result,
+		DurationMs: event.DurationMs,
+		Timestamp:  event.Timestamp,
 	})
 }
 
 func (r *TaskRun) addEvent(kind, message, detail string) {
-	r.Events = append(r.Events, TaskRunEvent{
+	event := TaskRunEvent{
 		Kind:      strings.TrimSpace(kind),
 		Message:   strings.TrimSpace(message),
 		Timestamp: time.Now().Format(time.RFC3339),
 		Detail:    trimRunText(detail),
-	})
+	}
+	r.Events = append(r.Events, event)
+	ledgerEvent := ledger.Event{
+		Kind:      event.Kind,
+		Source:    "task_run",
+		Message:   event.Message,
+		Detail:    event.Detail,
+		Timestamp: event.Timestamp,
+	}
+	if event.Kind == "state" {
+		ledgerEvent.State = event.Message
+	}
+	r.recordLedger(ledgerEvent)
+}
+
+func (r *TaskRun) hasEvent(kind, detailContains string) bool {
+	if r == nil {
+		return false
+	}
+	for _, event := range r.Events {
+		if event.Kind != kind {
+			continue
+		}
+		if detailContains == "" || strings.Contains(event.Detail, detailContains) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *TaskRun) setState(state, detail string) {
@@ -116,18 +183,56 @@ func (r *TaskRun) finish(status, summary string) {
 	if r.startMs > 0 {
 		r.DurationMs = now.UnixMilli() - r.startMs
 	}
+	r.recordLedger(ledger.Event{
+		Kind:       "run_finish",
+		Source:     "task_run",
+		Status:     r.Status,
+		State:      r.State,
+		Message:    r.Summary,
+		DurationMs: r.DurationMs,
+		Timestamp:  r.EndedAt,
+	})
 }
 
 func (r *TaskRun) stop(reason, detail string) {
 	if r.StopReason == "" {
 		r.StopReason = strings.TrimSpace(reason)
 		r.StopDetail = trimRunText(detail)
+		r.recordLedger(ledger.Event{
+			Kind:      "run_stop",
+			Source:    "task_run",
+			Status:    r.StopReason,
+			State:     r.State,
+			Message:   r.StopReason,
+			Detail:    r.StopDetail,
+			Timestamp: time.Now().Format(time.RFC3339),
+		})
 	}
 }
 
 func (r *TaskRun) stopTerminal(reason, detail string) {
 	r.StopReason = strings.TrimSpace(reason)
 	r.StopDetail = trimRunText(detail)
+	r.recordLedger(ledger.Event{
+		Kind:      "run_stop",
+		Source:    "task_run",
+		Status:    r.StopReason,
+		State:     r.State,
+		Message:   r.StopReason,
+		Detail:    r.StopDetail,
+		Timestamp: time.Now().Format(time.RFC3339),
+	})
+}
+
+func (r *TaskRun) recordLedger(event ledger.Event) {
+	if r == nil || r.ledger == nil {
+		return
+	}
+	event.RunID = r.ID
+	if event.Timestamp == "" {
+		event.Timestamp = time.Now().Format(time.RFC3339)
+	}
+	_, _ = r.ledger.Record(event)
 }
 
 func saveTaskRun(run TaskRun, cfg *settings.LoggingConfig) error {

@@ -1,41 +1,67 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg0: #1e1e1e;
-  --bg1: #252526;
-  --bg2: #2d2d30;
-  --bg3: #3c3c3c;
+  --bg0: #0b0f0e;
+  --bg1: #101514;
+  --bg2: #151b19;
+  --bg3: #203029;
   /* Semantic surface tokens (dark). Components used to hardcode these darks, which
      broke light mode — route them through tokens so both themes flip cleanly. */
-  --c-app: #111111;          /* app shell / deepest bg */
-  --c-pane: #151515;         /* center pane / page background */
-  --c-panel: #181818;        /* titlebar, tab strips, section headers */
-  --c-card: #202020;         /* raised cards (log events, agent cards) */
-  --c-card-hover: #242424;   /* card hover / active */
-  --c-list: #141414;         /* scrolling list backgrounds */
-  --c-terminal: #111820;     /* terminal panel */
-  --border: #3e3e42;
-  --text: #d4d4d4;
-  --text-dim: #858585;
+  --c-app: #080c0b;          /* app shell / deepest bg */
+  --c-pane: #0e1312;         /* center pane / page background */
+  --c-panel: #121716;        /* titlebar, tab strips, section headers */
+  --c-card: #17201d;         /* raised cards (log events, agent cards) */
+  --c-card-hover: #1d2a25;   /* card hover / active */
+  --c-list: #0d1211;         /* scrolling list backgrounds */
+  --c-terminal: #080d10;     /* terminal panel */
+  --border: #2b3a35;
+  --text: #c9d7d0;
+  --text-dim: #7f9289;
   --text-bright: #ffffff;
-  --accent: #007acc;
-  --accent-hover: #1a8ad4;
-  --accent-glow: rgba(0, 122, 204, 0.18);
-  --accent-text: #ffffff;
-  --btn-primary: #007acc;
+  --accent: #4ade80;
+  --accent-hover: #5ee893;
+  --accent-glow: rgba(74, 222, 128, 0.18);
+  --accent-text: #04120b;
+  --btn-primary: #16a34a;
   --btn-primary-text: #ffffff;
-  --green: #4ec9b0;
-  --yellow: #dcdcaa;
+  --green: #4ade80;
+  --yellow: #facc15;
   --red: #f44747;
-  --orange: #ce9178;
-  --purple: #c586c0;
-  --blue: #9cdcfe;
+  --orange: #fb923c;
+  --purple: #c084fc;
+  --blue: #7dd3fc;
   --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --radius: 6px;
   --radius-lg: 12px;
   --scrollbar-w: 6px;
   --transition: 0.15s ease;
+  --shadow-sm: 0 2px 8px rgba(0,0,0,0.35);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.5);
+}
+
+[data-theme="slate"] {
+  --bg0: #1e1e1e;
+  --bg1: #252526;
+  --bg2: #2d2d30;
+  --bg3: #3c3c3c;
+  --c-app: #111111;
+  --c-pane: #151515;
+  --c-panel: #181818;
+  --c-card: #202020;
+  --c-card-hover: #242424;
+  --c-list: #141414;
+  --c-terminal: #111820;
+  --border: #3e3e42;
+  --text: #d4d4d4;
+  --text-dim: #858585;
+  --text-bright: #ffffff;
+  --green: #4ec9b0;
+  --yellow: #dcdcaa;
+  --red: #f44747;
+  --orange: #ce9178;
+  --purple: #c586c0;
+  --blue: #9cdcfe;
   --shadow-sm: 0 2px 8px rgba(0,0,0,0.35);
   --shadow-md: 0 4px 20px rgba(0,0,0,0.5);
 }
@@ -134,3 +160,182 @@ code, pre {
 
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
+
+/* Mauler Ops global surface language.
+   These overrides make non-Ops pages use the same dense operator-console feel:
+   flatter panels, tighter spacing, darker green-black surfaces, and sharp rows. */
+[data-theme="mauler-ops"] .center-pane,
+[data-theme="mauler-ops"] .center-content,
+[data-theme="mauler-ops"] .memory-page,
+[data-theme="mauler-ops"] .brain-page,
+[data-theme="mauler-ops"] .benchmark-page,
+[data-theme="mauler-ops"] .chat-pane,
+[data-theme="mauler-ops"] .file-viewer,
+[data-theme="mauler-ops"] .agent-panel,
+[data-theme="mauler-ops"] .file-tree,
+[data-theme="mauler-ops"] .settings-panel {
+  background:
+    linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.008) 1px, transparent 1px),
+    var(--c-pane);
+  background-size: 26px 26px;
+}
+
+[data-theme="mauler-ops"] .titlebar,
+[data-theme="mauler-ops"] .center-tabs,
+[data-theme="mauler-ops"] .agent-panel-header,
+[data-theme="mauler-ops"] .agent-tabs,
+[data-theme="mauler-ops"] .memory-header,
+[data-theme="mauler-ops"] .brain-header,
+[data-theme="mauler-ops"] .benchmark-header,
+[data-theme="mauler-ops"] .settings-header,
+[data-theme="mauler-ops"] .settings-tabs,
+[data-theme="mauler-ops"] .terminal-header,
+[data-theme="mauler-ops"] .bottom-panel-tabs {
+  background: rgba(18, 23, 22, .96);
+  border-color: var(--border);
+}
+
+[data-theme="mauler-ops"] .center-tabs,
+[data-theme="mauler-ops"] .agent-tabs {
+  height: 34px;
+  padding-block: 4px;
+}
+
+[data-theme="mauler-ops"] .center-tabs button,
+[data-theme="mauler-ops"] .agent-tabs button,
+[data-theme="mauler-ops"] .tab-btn,
+[data-theme="mauler-ops"] .bottom-panel-tabs button {
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+[data-theme="mauler-ops"] .center-tabs button.active,
+[data-theme="mauler-ops"] .agent-tabs button.active,
+[data-theme="mauler-ops"] .tab-btn.active,
+[data-theme="mauler-ops"] .bottom-panel-tabs button.active,
+[data-theme="mauler-ops"] .session-select {
+  background: #202924;
+  border-color: var(--border);
+  color: var(--text-bright);
+}
+
+[data-theme="mauler-ops"] .memory-header,
+[data-theme="mauler-ops"] .brain-header,
+[data-theme="mauler-ops"] .benchmark-header {
+  gap: 12px;
+  padding: 10px 14px;
+}
+
+[data-theme="mauler-ops"] .memory-header h1,
+[data-theme="mauler-ops"] .brain-header h1,
+[data-theme="mauler-ops"] .benchmark-header h1 {
+  font-size: 16px;
+}
+
+[data-theme="mauler-ops"] .memory-header p,
+[data-theme="mauler-ops"] .brain-header p,
+[data-theme="mauler-ops"] .benchmark-header p {
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+[data-theme="mauler-ops"] .memory-detail,
+[data-theme="mauler-ops"] .brain-detail,
+[data-theme="mauler-ops"] .benchmark-page,
+[data-theme="mauler-ops"] .settings-panel,
+[data-theme="mauler-ops"] .agent-tab-body {
+  padding: 8px;
+}
+
+[data-theme="mauler-ops"] .memory-list,
+[data-theme="mauler-ops"] .brain-list,
+[data-theme="mauler-ops"] .file-tree,
+[data-theme="mauler-ops"] .agent-panel {
+  background: #0f1413;
+}
+
+[data-theme="mauler-ops"] .memory-section,
+[data-theme="mauler-ops"] .memory-card,
+[data-theme="mauler-ops"] .recall-result,
+[data-theme="mauler-ops"] .brain-panel,
+[data-theme="mauler-ops"] .brain-card,
+[data-theme="mauler-ops"] .benchmark-card,
+[data-theme="mauler-ops"] .benchmark-summary,
+[data-theme="mauler-ops"] .benchmark-scenario,
+[data-theme="mauler-ops"] .agent-card,
+[data-theme="mauler-ops"] .settings-modal,
+[data-theme="mauler-ops"] .settings-preset-help,
+[data-theme="mauler-ops"] .preset-editor,
+[data-theme="mauler-ops"] .provider-card,
+[data-theme="mauler-ops"] .profile-editor,
+[data-theme="mauler-ops"] .file-tree-cwd,
+[data-theme="mauler-ops"] .lab-status-card,
+[data-theme="mauler-ops"] .ctx-menu,
+[data-theme="mauler-ops"] .chat-composer,
+[data-theme="mauler-ops"] .message-bubble,
+[data-theme="mauler-ops"] .code-block,
+[data-theme="mauler-ops"] .artifact-panel {
+  border-color: var(--border);
+  border-radius: 5px;
+  background: rgba(19, 25, 23, .97);
+}
+
+[data-theme="mauler-ops"] .memory-section,
+[data-theme="mauler-ops"] .agent-card,
+[data-theme="mauler-ops"] .benchmark-card,
+[data-theme="mauler-ops"] .settings-preset-help {
+  padding: 8px;
+}
+
+[data-theme="mauler-ops"] .memory-card,
+[data-theme="mauler-ops"] .brain-card {
+  margin-top: 5px;
+  padding: 7px 8px;
+}
+
+[data-theme="mauler-ops"] .memory-card:hover,
+[data-theme="mauler-ops"] .memory-card.active,
+[data-theme="mauler-ops"] .brain-card:hover,
+[data-theme="mauler-ops"] .brain-card.active,
+[data-theme="mauler-ops"] .file-entry:hover,
+[data-theme="mauler-ops"] .ctx-menu button:hover {
+  background: #202924;
+  border-color: var(--accent);
+}
+
+[data-theme="mauler-ops"] input,
+[data-theme="mauler-ops"] select,
+[data-theme="mauler-ops"] textarea,
+[data-theme="mauler-ops"] .memory-search,
+[data-theme="mauler-ops"] .agent-card input,
+[data-theme="mauler-ops"] .agent-card select,
+[data-theme="mauler-ops"] .agent-card textarea,
+[data-theme="mauler-ops"] .memory-editor input,
+[data-theme="mauler-ops"] .memory-editor select,
+[data-theme="mauler-ops"] .memory-editor textarea {
+  border-radius: 5px;
+  background: #0c1110;
+  border-color: #293a34;
+}
+
+[data-theme="mauler-ops"] button {
+  border-radius: 5px;
+}
+
+[data-theme="mauler-ops"] .memory-pill,
+[data-theme="mauler-ops"] .memory-importance,
+[data-theme="mauler-ops"] .logs-status,
+[data-theme="mauler-ops"] .logs-state,
+[data-theme="mauler-ops"] .ops-badge,
+[data-theme="mauler-ops"] .agent-mode-pill,
+[data-theme="mauler-ops"] .tool-risk,
+[data-theme="mauler-ops"] .tag {
+  background: #101715;
+  border: 1px solid var(--border);
+}
+
+[data-theme="mauler-ops"] pre,
+[data-theme="mauler-ops"] code {
+  color: #d6e5dd;
+}

@@ -1,0 +1,12 @@
+{
+  "name": "read-and-summarize",
+  "prompt": "Summarize what alpha.txt and beta.txt do. Use tools to inspect the files, then answer concisely.",
+  "workspace": {
+    "alpha.txt": "alpha: loads project configuration and validates required fields\n",
+    "beta.txt": "beta: writes a short status report after validation succeeds\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 8,
+  "expect_status": "done",
+  "max_auto_continues": 2
+}

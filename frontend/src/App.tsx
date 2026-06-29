@@ -8,11 +8,14 @@ import { LogsPage } from './components/LogsPage'
 import { MemoryPage } from './components/MemoryPage'
 import { BenchmarkPage } from './components/BenchmarkPage'
 import { LiveOpsPage } from './components/LiveOpsPage'
+import { BrainPage } from './components/BrainPage'
 import { StatusBar } from './components/StatusBar'
 import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { ToastContainer, type ToastItem } from './components/Toast'
 import { TerminalPane } from './components/TerminalPane'
+import { StreamPane } from './components/StreamPane'
+import { JobsPane } from './components/JobsPane'
 import {
   ClearHistory,
   AddToolSafeRule,
@@ -33,6 +36,7 @@ import {
   SendMessage,
   UpdateSettings,
   type ChatAttachment,
+  InterruptShellTool,
   StopAgent,
   type ChatRole,
   type SessionChatMessage,
@@ -52,7 +56,8 @@ function contrastText(hex: string): string {
 }
 
 function applyTheme(theme: string) {
-  document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark')
+  const next = ['light', 'slate', 'mauler-ops', 'dark'].includes(theme) ? theme : 'mauler-ops'
+  document.documentElement.setAttribute('data-theme', next === 'dark' ? 'mauler-ops' : next)
 }
 
 function applyAccentColor(hex: string) {
@@ -129,6 +134,39 @@ export interface ToolCountdown {
   deadline: number
 }
 
+export interface BackgroundJob {
+  id: string
+  command: string
+  state: string
+  log?: string
+  pidfile?: string
+  output?: string
+  elapsed_sec?: number
+  next_poll_sec?: number
+  verbose?: boolean
+  exit_code?: number
+  updated_at_unix?: number
+}
+
+function parseToolInput(input: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(input)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
+  } catch {
+    return null
+  }
+}
+
+function isBackgroundJobToolInput(input: string): boolean {
+  const parsed = parseToolInput(input)
+  return Boolean(parsed && (typeof parsed.job === 'string' || parsed.background === true))
+}
+
+function isBackgroundJobToolResult(result: string): boolean {
+  const text = result.trim()
+  return /^Started background job\s+j\d+:/i.test(text) || /\[background job\s+j\d+:/i.test(text)
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
@@ -145,7 +183,7 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'file' | 'logs' | 'memory' | 'benchmarks'>('chat')
+  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'file' | 'logs' | 'memory' | 'brain' | 'benchmarks'>('chat')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
   const [artifactOutput, setArtifactOutput] = useState('')
@@ -187,14 +225,18 @@ export default function App() {
   const pendingThinkingRef = useRef('')
   const [showTerminal, setShowTerminal] = useState(false)
   const [terminalHeight, setTerminalHeight] = useState(220)
+  const [bottomTab, setBottomTab] = useState<'terminal' | 'stream' | 'jobs'>('terminal')
   const [skillSuggestion, setSkillSuggestion] = useState<SkillSuggestion | null>(null)
   const [toolCountdown, setToolCountdown] = useState<ToolCountdown | null>(null)
   const [showToolCountdown, setShowToolCountdown] = useState(false)
+  const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([])
 
   useEffect(() => {
     const offs = [
       EventsOn('mauler:stream_start', () => {
         setStreaming(true)
+        setShowTerminal(true)
+        setBottomTab('stream')
         setRunStartedAt(Date.now())
         setRunState({ state: 'starting', detail: 'Preparing request' })
         setStreamBuffer('')
@@ -284,7 +326,7 @@ export default function App() {
         }
       }),
       EventsOn('mauler:tool_call', (...args: unknown[]) => {
-        const tc = args[0] as { id: string; name: string; input: string }
+        const tc = args[0] as { id: string; name: string; input: string; timeout?: string }
         const nextItem: AgentActivity = {
           id: tc.id,
           name: tc.name,
@@ -293,13 +335,19 @@ export default function App() {
           startTime: Date.now(),
         }
         setActivity(items => [nextItem, ...items].slice(0, 12))
-        setMessages(m => [...m, {
-          id: crypto.randomUUID(),
-          role: 'tool_call',
-          content: tc.input,
-          timestamp: Date.now(),
-        }])
-        const timeoutSec = toolTimeoutFromInput(tc.input)
+        const isJobTool = (tc.name === 'shell' || tc.name === 'bash') && isBackgroundJobToolInput(tc.input)
+        if (!isJobTool) {
+          setMessages(m => [...m, {
+            id: crypto.randomUUID(),
+            role: 'tool_call',
+            content: tc.input,
+            timestamp: Date.now(),
+          }])
+        }
+        const emittedTimeout = Number(tc.timeout)
+        const timeoutSec = Number.isFinite(emittedTimeout) && emittedTimeout > 0
+          ? Math.floor(emittedTimeout)
+          : toolTimeoutFromInput(tc.input)
         if (timeoutSec > 0) {
           const now = Date.now()
           setToolCountdown({
@@ -329,15 +377,36 @@ export default function App() {
           }
           return [nextItem, ...items].slice(0, 12)
         })
-        setMessages(m => [...m, {
-          id: crypto.randomUUID(),
-          role: 'tool_result',
-          content: tr.result,
-          timestamp: Date.now(),
-        }])
+        const isJobResult = (tr.name === 'shell' || tr.name === 'bash') && isBackgroundJobToolResult(tr.result)
+        if (!isJobResult) {
+          setMessages(m => [...m, {
+            id: crypto.randomUUID(),
+            role: 'tool_result',
+            content: tr.result,
+            timestamp: Date.now(),
+          }])
+        }
         setStatsVersion(v => v + 1)
         if (tr.name.startsWith('todo_')) {
           setTaskRunVersion(v => v + 1)
+        }
+      }),
+      EventsOn('mauler:job_update', (...args: unknown[]) => {
+        const job = args[0] as BackgroundJob
+        if (!job?.id) return
+        let isNew = false
+        setBackgroundJobs(prev => {
+          isNew = !prev.some(item => item.id === job.id)
+          const next = prev.filter(item => item.id !== job.id)
+          return [{ ...prev.find(item => item.id === job.id), ...job }, ...next]
+            .sort((a, b) => (b.updated_at_unix ?? 0) - (a.updated_at_unix ?? 0))
+            .slice(0, 20)
+        })
+        // Only surface the Jobs tab when a job first appears, so live polls don't
+        // repeatedly yank the user away from the terminal/stream they're watching.
+        if (isNew) {
+          setShowTerminal(true)
+          setBottomTab('jobs')
         }
       }),
       EventsOn('mauler:confirm', (...args: unknown[]) => {
@@ -406,8 +475,8 @@ export default function App() {
         setTerminalHeight(Math.min(600, Math.max(100, settings.ui.terminal_height || 260)))
       }
       applyTheme(settings.ui.theme || 'dark')
-      applyAccentColor(settings.ui.accent_color || '#007acc')
-      applyPrimaryColor(settings.ui.primary_color || settings.ui.accent_color || '#007acc')
+      applyAccentColor(settings.ui.accent_color || '#4ade80')
+      applyPrimaryColor(settings.ui.primary_color || settings.ui.accent_color || '#16a34a')
     }
     setAutonomousState(auto)
     setAutoAgentsState(autoAgentEnabled)
@@ -448,6 +517,7 @@ export default function App() {
         e.preventDefault()
         setShowTerminal(v => {
           const next = !v
+          if (next) setBottomTab('terminal')
           void persistTerminalPrefs(next, terminalHeight)
           return next
         })
@@ -516,6 +586,14 @@ export default function App() {
   const handleCancelPending = useCallback(() => {
     pendingInterruptRef.current = null
     setPendingInterrupt(null)
+  }, [])
+
+  const handleCancelTool = useCallback((name: string) => {
+    if (name === 'shell' || name === 'bash') {
+      void InterruptShellTool()
+      return
+    }
+    void StopAgent()
   }, [])
 
   const handleConfirmRespond = useCallback(async (allow: boolean, remember = false) => {
@@ -687,16 +765,12 @@ export default function App() {
             <button onClick={() => void handleSaveSession()} title="Save session">Save</button>
             <button onClick={() => void handleLoadSession()} disabled={!selectedSession} title="Load session">Load</button>
             <button onClick={() => void handleDeleteSession()} disabled={!selectedSession} title="Delete session">Del</button>
+            <button className="titlebar-clear-session" onClick={handleClearChat} disabled={streaming} title="Clear current chat/session history">Clear</button>
           </div>
           <div className="titlebar-sep" />
           <div className="titlebar-group">
-            <button onClick={() => setCenterTab('chat')} title="Open chat" style={centerTab === 'chat' ? { color: 'var(--text)' } : {}}>Chat</button>
-            <button onClick={() => setCenterTab('ops')} title="Open live ops" style={centerTab === 'ops' ? { color: 'var(--text)' } : {}}>Ops</button>
-            <button onClick={() => setCenterTab('logs')} title="Open full-page logs" style={centerTab === 'logs' ? { color: 'var(--text)' } : {}}>Logs</button>
-            <button onClick={() => setCenterTab('memory')} title="Open full-page memory" style={centerTab === 'memory' ? { color: 'var(--text)' } : {}}>Memory</button>
-            <button onClick={() => setCenterTab('benchmarks')} title="Open model benchmarks" style={centerTab === 'benchmarks' ? { color: 'var(--text)' } : {}}>Benchmarks</button>
-            <button onClick={() => setLeftOpen(v => !v)} title="Toggle explorer" style={leftOpen ? { color: 'var(--text)' } : {}}>Explorer</button>
-            <button onClick={() => setRightOpen(v => !v)} title="Toggle agent panel" style={rightOpen ? { color: 'var(--text)' } : {}}>Agent</button>
+            <button onClick={() => setLeftOpen(v => !v)} title="Toggle Explorer panel" className={leftOpen ? 'panel-toggle on' : 'panel-toggle'}>Explorer</button>
+            <button onClick={() => setRightOpen(v => !v)} title="Toggle Agent panel" className={rightOpen ? 'panel-toggle on' : 'panel-toggle'}>Agent</button>
           </div>
           <div className="titlebar-sep" />
           <button
@@ -711,13 +785,14 @@ export default function App() {
             onClick={() => {
               setShowTerminal(v => {
                 const next = !v
+                if (next) setBottomTab('terminal')
                 void persistTerminalPrefs(next, terminalHeight)
                 return next
               })
             }}
-            title="Toggle terminal (Ctrl+`)"
-            style={showTerminal ? { color: 'var(--text)' } : {}}
-          >Terminal</button>
+            title="Toggle bottom panel (Ctrl+`)"
+            className={showTerminal ? 'panel-toggle on' : 'panel-toggle'}
+          >Bottom</button>
           <div className="titlebar-sep" />
           <button onClick={() => setShowSettings(true)} title="Settings (Ctrl+,)">Settings</button>
         </div>
@@ -746,6 +821,7 @@ export default function App() {
             <button className={centerTab === 'ops' ? 'active' : ''} onClick={() => setCenterTab('ops')}>Ops</button>
             <button className={centerTab === 'logs' ? 'active' : ''} onClick={() => setCenterTab('logs')}>Logs</button>
             <button className={centerTab === 'memory' ? 'active' : ''} onClick={() => setCenterTab('memory')}>Memory</button>
+            <button className={centerTab === 'brain' ? 'active' : ''} onClick={() => setCenterTab('brain')}>Brain</button>
             <button className={centerTab === 'benchmarks' ? 'active' : ''} onClick={() => setCenterTab('benchmarks')}>Benchmarks</button>
             {openFiles.map((f, i) => (
               <span key={`${f.path || f.name}-${i}`} className={`center-file-tab ${centerTab === 'file' && activeFileIdx === i ? 'active' : ''}`}>
@@ -766,8 +842,10 @@ export default function App() {
                 autonomous={autonomous}
                 pendingInterrupt={pendingInterrupt !== null}
                 toolCountdown={showToolCountdown ? toolCountdown : null}
+                runState={runState}
                 onSubmitMessage={handleSubmitMessage}
                 onCancelPending={handleCancelPending}
+                onCancelTool={handleCancelTool}
                 onStopAgent={() => void StopAgent()}
                 onClearChat={handleClearChat}
                 onArtifact={handleArtifact}
@@ -789,6 +867,8 @@ export default function App() {
               <LogsPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'memory' ? (
               <MemoryPage version={taskRunVersion + statsVersion} />
+            ) : centerTab === 'brain' ? (
+              <BrainPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'benchmarks' ? (
               <BenchmarkPage version={statsVersion} onProfilesChanged={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
             ) : (
@@ -839,7 +919,7 @@ export default function App() {
       {showTerminal && (
         <div
           className="terminal-resize-handle"
-          title="Drag to resize, double-click to collapse Terminal"
+          title="Drag to resize, double-click to collapse bottom panel"
           onMouseDown={e => {
             const startY = e.clientY
             const startH = terminalHeight
@@ -867,9 +947,53 @@ export default function App() {
       {/* Terminal panel — always mounted so session/output survive toggle */}
       <div
         className="terminal-panel"
-        style={{ height: showTerminal ? terminalHeight : 0, display: showTerminal ? 'block' : 'none' }}
+        style={{ height: showTerminal ? terminalHeight : 0, display: showTerminal ? 'flex' : 'none' }}
       >
-        <TerminalPane visible={showTerminal} />
+        <div className="bottom-panel-tabs">
+          <button
+            type="button"
+            className={bottomTab === 'terminal' ? 'active' : ''}
+            onClick={() => setBottomTab('terminal')}
+          >
+            Terminal
+          </button>
+          <button
+            type="button"
+            className={bottomTab === 'stream' ? 'active' : ''}
+            onClick={() => setBottomTab('stream')}
+          >
+            Stream
+          </button>
+          <button
+            type="button"
+            className={bottomTab === 'jobs' ? 'active' : ''}
+            onClick={() => setBottomTab('jobs')}
+          >
+            Jobs {backgroundJobs.length > 0 ? <span className="bottom-tab-count">{backgroundJobs.length}</span> : null}
+          </button>
+          <span className="bottom-panel-state">
+            {runState?.state ? runState.state.replaceAll('_', ' ') : streaming ? 'running' : 'idle'}
+          </span>
+        </div>
+        <div className="bottom-panel-body">
+          <TerminalPane visible={showTerminal && bottomTab === 'terminal'} />
+          <StreamPane
+            visible={showTerminal && bottomTab === 'stream'}
+            streaming={streaming}
+            streamBuffer={streamBuffer}
+            thinkingBuffer={thinkingBuffer}
+            runState={runState}
+            activity={activity}
+            toolCountdown={showToolCountdown ? toolCountdown : null}
+            onStopAgent={() => void StopAgent()}
+          />
+          <JobsPane
+            visible={showTerminal && bottomTab === 'jobs'}
+            jobs={backgroundJobs}
+            onClearCompleted={() => setBackgroundJobs(prev => prev.filter(job => job.state !== 'done'))}
+            onClearAll={() => setBackgroundJobs([])}
+          />
+        </div>
       </div>
 
       <StatusBar statsVersion={statsVersion} runState={runState} />

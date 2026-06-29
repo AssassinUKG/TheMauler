@@ -20,7 +20,7 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	if cfg.Tools.MaxSearches == 0 || cfg.Tools.MaxFetches == 0 || cfg.Tools.MaxBrowserActions == 0 {
 		t.Fatalf("tool budgets were not backfilled: %#v", cfg.Tools)
 	}
-	if cfg.Agents.ModeOverride != "Auto" || cfg.Agents.MaxToolCalls == 0 || len(cfg.Agents.Presets) == 0 {
+	if cfg.Agents.ModeOverride != "Auto" || cfg.Agents.MaxToolCalls == 0 || cfg.Agents.MaxRunSeconds == 0 || len(cfg.Agents.Presets) == 0 {
 		t.Fatalf("agent defaults were not backfilled: %#v", cfg.Agents)
 	}
 	if cfg.Memory.MaxInject == 0 || cfg.Memory.MaxEntryChars == 0 {
@@ -38,8 +38,42 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	if _, ok := cfg.Tools.EnabledTools["subagent_review"]; !ok {
 		t.Fatalf("subagent tool defaults were not merged: %#v", cfg.Tools.EnabledTools)
 	}
-	if cfg.Tools.ActiveToolset != "balanced" || len(cfg.Tools.Toolsets["unrestricted"]) == 0 {
+	if _, ok := cfg.Tools.EnabledTools["subagent_explore"]; !ok {
+		t.Fatalf("subagent explore default was not merged: %#v", cfg.Tools.EnabledTools)
+	}
+	if cfg.Tools.ActiveToolset != "balanced" || len(cfg.Tools.Toolsets["unrestricted"]) == 0 || len(cfg.Tools.Toolsets["explore"]) == 0 {
 		t.Fatalf("toolset defaults were not backfilled: active=%q toolsets=%#v", cfg.Tools.ActiveToolset, cfg.Tools.Toolsets)
+	}
+}
+
+func TestNormaliseSettingsMigratesOldBudgetAndOpsDefaults(t *testing.T) {
+	cfg := DefaultSettings()
+	cfg.Tools.MaxSearches = 8
+	cfg.Tools.MaxFetches = 12
+	cfg.Tools.MaxFailedFetches = 5
+	cfg.Tools.MaxBrowserActions = 35
+	cfg.Tools.MaxToolResultChars = 8000
+	cfg.Agents.MaxToolCalls = 100
+	cfg.Agents.Presets["Ops"] = AgentModePreset{
+		Enabled:  true,
+		Autonomy: "balanced",
+		Toolset:  "local-code",
+		ToolPermissions: map[string]bool{
+			"shell": true, "bash": true, "web_search": false, "fetch_url": false,
+		},
+	}
+
+	normaliseSettings(&cfg)
+
+	if cfg.Tools.MaxSearches != 16 || cfg.Tools.MaxFetches != 32 || cfg.Tools.MaxFailedFetches != 10 || cfg.Tools.MaxBrowserActions != 80 || cfg.Tools.MaxToolResultChars != 12000 {
+		t.Fatalf("old tool budgets were not migrated: %#v", cfg.Tools)
+	}
+	if cfg.Agents.MaxToolCalls != 200 {
+		t.Fatalf("old max tool calls was not migrated: %d", cfg.Agents.MaxToolCalls)
+	}
+	ops := cfg.Agents.Presets["Ops"]
+	if ops.Toolset != "unrestricted" || !ops.ToolPermissions["web_search"] || !ops.ToolPermissions["fetch_url"] || !ops.ToolPermissions["browser_agent"] {
+		t.Fatalf("old Ops preset was not migrated: %#v", ops)
 	}
 }
 

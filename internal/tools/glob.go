@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -88,6 +89,9 @@ func (t *Glob) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	}
 
 	if len(matches) == 0 {
+		if hint := registeredMasterSkillSearchHint(p.Pattern); hint != "" {
+			return "no files matched\n\n" + hint, nil
+		}
 		return "no files matched", nil
 	}
 
@@ -100,6 +104,22 @@ func (t *Glob) Run(_ context.Context, raw json.RawMessage) (string, error) {
 		sb.WriteString(fmt.Sprintf("... (limited to %d results)", maxResults))
 	}
 	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+func registeredMasterSkillSearchHint(pattern string) string {
+	lower := strings.ToLower(pattern)
+	if !strings.Contains(lower, "master") || !strings.Contains(lower, "skill") {
+		return ""
+	}
+	dir, err := toolsSkillsDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "master.md"))
+	if err != nil || !strings.Contains(strings.ToLower(string(data)), "source_path:") {
+		return ""
+	}
+	return "Hint: master skill is registered in TheMauler's skill registry as skill `master`. Do not keep searching workspace directories for master_skill.md; call skill_view with {\"name\":\"master\"} or use skills_list with filter \"master\"."
 }
 
 // globDoublestar does a simple ** expansion: split on ** and check prefix/suffix.

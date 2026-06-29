@@ -21,11 +21,17 @@ func selectAgentMode(text string, cfg settings.Settings) AgentMode {
 	} else {
 		mode = classifyAgentMode(text)
 	}
-	return applyPresetToMode(mode, cfg.Agents.Presets)
+	mode = applyPresetToMode(mode, cfg.Agents.Presets)
+	if strings.TrimSpace(mode.DefaultEffort) == "" {
+		mode.DefaultEffort = defaultReasoningEffortForMode(mode)
+	}
+	return mode
 }
 
 func baseMode(name string) AgentMode {
 	switch strings.ToLower(name) {
+	case "ops":
+		return AgentMode{Name: "Ops", Description: "Operate inside a lab target with shell-first evidence gathering."}
 	case "builder":
 		return AgentMode{Name: "Builder", Description: "Implement features and verify them."}
 	case "fixer":
@@ -71,7 +77,8 @@ func applyAgentPreset(cfg *settings.Settings, pf *settings.ProfilesFile, mode Ag
 	if strings.EqualFold(preset.Autonomy, "ask") {
 		*autonomous = false
 	}
-	if strings.TrimSpace(preset.Toolset) != "" {
+	preserveToolAccess := preserveExplicitToolset(cfg.Tools.ActiveToolset, preset.Toolset)
+	if strings.TrimSpace(preset.Toolset) != "" && !preserveToolAccess {
 		cfg.Tools.ActiveToolset = strings.TrimSpace(preset.Toolset)
 	}
 	if len(preset.ToolPermissions) > 0 {
@@ -79,6 +86,9 @@ func applyAgentPreset(cfg *settings.Settings, pf *settings.ProfilesFile, mode Ag
 			cfg.Tools.EnabledTools = map[string]bool{}
 		}
 		for name, enabled := range preset.ToolPermissions {
+			if preserveToolAccess && !enabled {
+				continue
+			}
 			cfg.Tools.EnabledTools[name] = enabled
 		}
 	}
@@ -95,14 +105,28 @@ func applyAgentPreset(cfg *settings.Settings, pf *settings.ProfilesFile, mode Ag
 	}
 }
 
-func applyWorkingContextBudget(a *App, presetBudget, profileContext int) bool {
-	if a == nil || presetBudget <= 0 {
+func preserveExplicitToolset(current, preset string) bool {
+	current = strings.ToLower(strings.TrimSpace(current))
+	preset = strings.ToLower(strings.TrimSpace(preset))
+	if current == "" || preset == "" || current == preset {
 		return false
 	}
-	effective := presetBudget
-	if profileContext > 0 && profileContext < effective {
-		effective = profileContext
+	// Access presets are user intent. If the user has explicitly opened the run up
+	// to unrestricted, auto-agent routing may change style, but must not silently
+	// narrow tool access to a mode preset such as Researcher/web-research.
+	return current == "unrestricted"
+}
+
+// workingContextOutputReserve is held back from the model's loaded context so a full
+// history plus the model's response don't overflow the KV cache. Combined with the 0.85
+// compaction trigger this leaves ample room for generation.
+const workingContextOutputReserve = 8192
+
+func applyWorkingContextBudget(a *App, presetBudget, profileContext int) bool {
+	if a == nil {
+		return false
 	}
+	effective := effectiveWorkingContextBudget(presetBudget, profileContext)
 	if effective <= 0 {
 		return false
 	}
@@ -111,9 +135,27 @@ func applyWorkingContextBudget(a *App, presetBudget, profileContext int) bool {
 	if changed {
 		a.history.SetBudget(effective)
 	}
+	if profileContext > 0 {
+		a.contextWindow = profileContext
+	}
 	a.mu.Unlock()
 	if changed && a.ctx != nil {
 		wailsruntime.EventsEmit(a.ctx, "mauler:budget_updated", effective)
 	}
 	return changed
+}
+
+func effectiveWorkingContextBudget(presetBudget, profileContext int) int {
+	// Track the model's actual loaded context (minus a response reserve) rather than a
+	// fixed per-mode cap. The old behavior min(presetBudget, profileContext) pinned a 64k
+	// model to a stale 32k preset, so the token bar and compaction used half the window.
+	effective := presetBudget
+	if profileContext > 0 {
+		usable := profileContext - workingContextOutputReserve
+		if usable < 4096 {
+			usable = profileContext
+		}
+		effective = usable
+	}
+	return effective
 }

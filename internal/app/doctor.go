@@ -86,6 +86,7 @@ func (a *App) RunDoctor() DoctorResult {
 				Detail:  "If InferenceBridge is running on this same Windows machine, localhost/127.0.0.1 is usually less fragile than a LAN IP.",
 			})
 		}
+		addInferenceBridgePortConfigCheck(add, provider)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		client, err := buildClient(activeProfile)
@@ -302,6 +303,10 @@ func (a *App) RunDoctor() DoctorResult {
 	addAgentPresetBudgetChecks(add, cfg, activeProfile)
 	addSharedBackendSubagentCheck(add, cfg, activeProfile)
 	addProfileSanityChecks(add, activeProfile)
+	addModelTierCheck(add, activeProfile)
+	if hasProvider && provider.Backend == "llamacpp" {
+		addLlamacppAgentFlagAdvisory(add)
+	}
 
 	if activeProfile.Thinking {
 		threshold := cfg.Agents.NoThinkAfterToolCalls
@@ -373,6 +378,7 @@ func (a *App) RunDoctor() DoctorResult {
 			Message: fmt.Sprintf("Shell backend: %s (%s)", shellBackend, runtime.GOOS),
 		})
 	}
+	addShellNetworkBoundaryCheck(add, cfg, shellBackend)
 
 	if cfg.Agents.OfflineOnly {
 		add(DoctorCheck{
@@ -391,18 +397,14 @@ func (a *App) RunDoctor() DoctorResult {
 	addToolAccessChecks(add, cfg)
 
 	// ── 7. Memory DB ─────────────────────────────────────────────────────────
-	if path, err := memoryPath(); err != nil {
-		add(DoctorCheck{Name: "Memory DB", Status: "fail", Message: err.Error()})
-	} else if _, err := os.Stat(path); os.IsNotExist(err) {
-		add(DoctorCheck{Name: "Memory DB", Status: "info", Message: "memory.json does not exist yet — will be created on first save"})
-	} else if err != nil {
-		add(DoctorCheck{Name: "Memory DB", Status: "fail", Message: err.Error()})
+	if entries, err := loadMemory(); err != nil {
+		add(DoctorCheck{Name: "Memory DB", Status: "warn", Message: "SQLite memory store could not be read", Detail: err.Error()})
 	} else {
-		entries, err := loadMemory()
+		cfgDir, err := settings.ConfigDir()
 		if err != nil {
-			add(DoctorCheck{Name: "Memory DB", Status: "warn", Message: "memory.json exists but could not be parsed", Detail: err.Error()})
+			add(DoctorCheck{Name: "Memory DB", Status: "fail", Message: err.Error()})
 		} else {
-			add(DoctorCheck{Name: "Memory DB", Status: "ok", Message: fmt.Sprintf("%d memory entries", len(entries))})
+			add(DoctorCheck{Name: "Memory DB", Status: "ok", Message: fmt.Sprintf("%d memory entries in SQLite state DB", len(entries)), Detail: filepath.Join(cfgDir, "state.db")})
 		}
 	}
 
@@ -559,8 +561,11 @@ func fetchLlamacppChatFormat(baseURL string) (string, chatTemplateCaps, error) {
 }
 
 func fetchLlamacppBuiltinTools(baseURL string) ([]string, error) {
+	return fetchLlamacppBuiltinToolsWithClient(baseURL, &http.Client{Timeout: 3 * time.Second})
+}
+
+func fetchLlamacppBuiltinToolsWithClient(baseURL string, client *http.Client) ([]string, error) {
 	base := strings.TrimSuffix(baseURL, "/v1")
-	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(base + "/props")
 	if err != nil {
 		return nil, err
@@ -653,8 +658,11 @@ func (m lmStudioDoctorModel) MaxLoadedContext() int {
 }
 
 func fetchLMStudioModelInfo(baseURL, modelID string) (lmStudioDoctorModel, bool, error) {
+	return fetchLMStudioModelInfoWithClient(baseURL, modelID, &http.Client{Timeout: 5 * time.Second})
+}
+
+func fetchLMStudioModelInfoWithClient(baseURL, modelID string, client *http.Client) (lmStudioDoctorModel, bool, error) {
 	nativeBase := strings.TrimSuffix(baseURL, "/v1")
-	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(nativeBase + "/api/v1/models")
 	if err != nil {
 		return lmStudioDoctorModel{}, false, err
@@ -859,6 +867,14 @@ func addRuntimeProfileChecks(add func(DoctorCheck), profile settings.Profile) {
 			Detail:  "For recent llama.cpp builds, try spec_type=draft-mtp and spec_draft_n_max=2 or 3, then benchmark.",
 		})
 	}
+	if profile.SpecType != "" && !hasDraftModel {
+		add(DoctorCheck{
+			Name:    "MTP bridge build",
+			Status:  "info",
+			Message: "Self-MTP is enabled (no separate draft model) — this needs an InferenceBridge build that emits --spec-type without -md",
+			Detail:  "Confirm in the bridge log a \"Speculative decoding enabled\" (target=speculative) line and --spec-type in the llama-server args. An older bridge silently ignores self-MTP, so generation runs at normal speed with no error.",
+		})
+	}
 	if rp.RecommendedCtx > 0 && profile.CtxTokens > rp.RecommendedCtx*2 {
 		add(DoctorCheck{
 			Name:    "Runtime context profile",
@@ -1029,6 +1045,63 @@ func addProfileSanityChecks(add func(DoctorCheck), profile settings.Profile) {
 	}
 }
 
+// addModelTierCheck warns when the active model is below the parameter tier at
+// which local tool calling stays reliable. BFCL V4 shows a sharp cliff: a ~9B
+// general model scores ~66%, a 4B ~50%, a 2B ~44% — so multi-step agent runs
+// spin out well before chat quality visibly drops. Docker's 21-model agent eval
+// makes the same point (a tool-tuned 14B beats a 70B that calls tools poorly):
+// size is a floor, not the goal.
+func addModelTierCheck(add func(DoctorCheck), profile settings.Profile) {
+	b := modelParamBillions(profile.ModelID)
+	if b <= 0 {
+		return
+	}
+	switch {
+	case b < 4:
+		add(DoctorCheck{
+			Name:    "Model tool-calling tier",
+			Status:  "warn",
+			Message: fmt.Sprintf("Active model looks ~%gB — below the reliable tool-calling tier", b),
+			Detail:  "Agent tool calling degrades sharply under ~7-9B (BFCL V4: ~9B≈66%, 4B≈50%, 2B≈44%). Small models are fine for chat but spin out on multi-step tool use — prefer a 7B+ tool-tuned model for agent runs.",
+		})
+	case b < 7:
+		add(DoctorCheck{
+			Name:    "Model tool-calling tier",
+			Status:  "info",
+			Message: fmt.Sprintf("Active model is ~%gB — near the lower edge of reliable tool calling", b),
+			Detail:  "Below ~7-9B, tool-call reliability starts to drop (BFCL V4). Watch for malformed or looping tool calls; move to a larger tool-tuned model if you see them.",
+		})
+	default:
+		add(DoctorCheck{
+			Name:    "Model tool-calling tier",
+			Status:  "ok",
+			Message: fmt.Sprintf("Active model ~%gB is in the reliable tool-calling tier", b),
+		})
+	}
+}
+
+// addLlamacppAgentFlagAdvisory surfaces the research-backed llama.cpp launch
+// flags that make Qwen3-class local models stable as agents. These cannot all
+// be read back from /props, so it is an advisory (info) check rather than a
+// pass/fail — the chat_format, template, and MTP checks above cover the parts
+// that are machine-detectable.
+func addLlamacppAgentFlagAdvisory(add func(DoctorCheck)) {
+	detail := strings.Join([]string{
+		"--jinja — convert native <tool_call> output into OpenAI tool_calls. Without it, tool calls and </think> leak as plain text (TheMauler repairs this, but it is a safety net, not a fix).",
+		"--reasoning-format deepseek — Qwen3 uses the same <think>/</think> delimiters as DeepSeek-R1.",
+		"Disable speculative/draft decoding if you see truncation or repetition loops — draft rejections at </think> spike the EOS probability and cause early termination.",
+		"--presence-penalty up to 2.0 if the model loops inside <think> until it runs out of tokens.",
+		"Use the highest quant that fits 24 GB VRAM — UD-Q4_K_XL is the project default for Qwen3.6-27B on the RTX 3090; avoid sub-Q4 quants, which hurt tool-call accuracy.",
+		"--reasoning-budget N — cap thinking tokens at generation time (llama.cpp PR #20297) so a runaway <think> can't eat the whole turn.",
+	}, "\n")
+	add(DoctorCheck{
+		Name:    "llama.cpp agent flags",
+		Status:  "info",
+		Message: "Review backend launch flags for Qwen3 tool-call stability",
+		Detail:  detail,
+	})
+}
+
 func maxGenerationTokens(params ...settings.GenerationParams) int {
 	maxTokens := 0
 	for _, p := range params {
@@ -1094,6 +1167,129 @@ func addToolAccessChecks(add func(DoctorCheck), cfg settings.Settings) {
 		}
 		add(DoctorCheck{Name: group.name, Status: status, Message: message, Detail: strings.Join(detailParts, "\n")})
 	}
+}
+
+func addInferenceBridgePortConfigCheck(add func(DoctorCheck), provider settings.Provider) {
+	if provider.Backend != "llamacpp" {
+		return
+	}
+	base, err := url.Parse(provider.BaseURL)
+	if err != nil || base.Hostname() == "" {
+		return
+	}
+	host := strings.ToLower(base.Hostname())
+	if host != "127.0.0.1" && host != "localhost" {
+		return
+	}
+	wantPort := base.Port()
+	if wantPort == "" {
+		return
+	}
+	var mismatches []string
+	for _, path := range inferenceBridgeConfigCandidates() {
+		port, ok := readInferenceBridgeConfigPort(path)
+		if !ok || port == "" || port == wantPort {
+			continue
+		}
+		mismatches = append(mismatches, fmt.Sprintf("%s has server.port=%s", path, port))
+	}
+	if len(mismatches) == 0 {
+		return
+	}
+	add(DoctorCheck{
+		Name:    "InferenceBridge port config",
+		Status:  "warn",
+		Message: fmt.Sprintf("Mauler provider points at %s but an InferenceBridge config uses a different port", provider.BaseURL),
+		Detail:  strings.Join(mismatches, "\n") + "\nKeep Mauler profiles.toml and InferenceBridge's active config on the same port, otherwise runs can fail after bridge restarts.",
+	})
+}
+
+func inferenceBridgeConfigCandidates() []string {
+	seen := map[string]bool{}
+	var paths []string
+	add := func(path string) {
+		if strings.TrimSpace(path) == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		key := strings.ToLower(clean)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		paths = append(paths, clean)
+	}
+	if local := os.Getenv("LOCALAPPDATA"); local != "" {
+		add(filepath.Join(local, "InferenceBridge", "inference-bridge.toml"))
+	}
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		add(filepath.Join(appdata, "InferenceBridge", "inference-bridge.toml"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, "Documents", "InferenceBridge", "inference-bridge.toml"))
+		add(filepath.Join(home, ".config", "InferenceBridge", "inference-bridge.toml"))
+	}
+	return paths
+}
+
+func readInferenceBridgeConfigPort(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	inServer := false
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inServer = strings.EqualFold(strings.Trim(line, "[] "), "server")
+			continue
+		}
+		if !inServer || !strings.HasPrefix(line, "port") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) != "port" {
+			continue
+		}
+		port := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		return port, port != ""
+	}
+	return "", false
+}
+
+func addShellNetworkBoundaryCheck(add func(DoctorCheck), cfg settings.Settings, shellBackend string) {
+	if runtime.GOOS != "windows" || !strings.EqualFold(strings.TrimSpace(shellBackend), "wsl") {
+		return
+	}
+	effective := settings.EffectiveEnabledTools(cfg.Tools)
+	hostSideTools := []string{}
+	for _, name := range []string{"fetch_url", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot", "browser_agent"} {
+		if effective[name] {
+			hostSideTools = append(hostSideTools, name)
+		}
+	}
+	if len(hostSideTools) == 0 {
+		add(DoctorCheck{
+			Name:    "WSL/Kali target routing",
+			Status:  "ok",
+			Message: "Target interaction is shell-only from WSL/Kali",
+			Detail:  "Browser/fetch tools are disabled by the active toolset or per-tool toggles.",
+		})
+		return
+	}
+	distro := strings.TrimSpace(cfg.Tools.ShellDistro)
+	if distro == "" {
+		distro = "default WSL"
+	}
+	add(DoctorCheck{
+		Name:    "WSL/Kali target routing",
+		Status:  "warn",
+		Message: fmt.Sprintf("Shell runs in %s, but browser/fetch tools run from Windows", distro),
+		Detail:  fmt.Sprintf("For HTB/Kali targets, prefer shell tools such as curl, nmap, ffuf, gobuster, and nc inside WSL. Windows-side tools may not share WSL /etc/hosts, VPN routing, or Kali tooling. Enabled host-side tools: %s. Use the local-code/offline toolset for WSL-only target work, or use IP addresses when a visible Windows browser is required.", strings.Join(hostSideTools, ", ")),
+	})
 }
 
 func addWebEngineChecks(add func(DoctorCheck), cfg settings.Settings) {

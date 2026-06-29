@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -41,7 +42,34 @@ func newOpenAICompat(name, baseURL, modelID string, contextTokens int, apiKey st
 		contextTokens:  contextTokens,
 		apiKey:         apiKey,
 		thinkingKwargs: thinkingKwargs,
-		httpClient:     &http.Client{Timeout: 0}, // no timeout — streaming responses can be long
+		httpClient:     newInferenceHTTPClient(),
+	}
+}
+
+// newInferenceHTTPClient builds the client used for chat/streaming. The overall
+// Timeout stays 0 because a streaming response can legitimately run for minutes
+// (a 10k-token prefill on a local single-slot server takes ~60s before the first
+// byte). But we cap the *connect* phase: when the server is busy prefilling it
+// stops accepting connections, and without this the OS would block ~21s on
+// Windows before the dial fails. A short dial timeout lets the agent's retry/
+// backoff loop ride out the busy window instead of stalling.
+func newInferenceHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   8 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			// Local llama.cpp/bridge is HTTP/1.1; a single slot may drop idle
+			// keep-alives, so keep the pool small and expire it quickly to avoid
+			// reusing a half-closed connection.
+			MaxIdleConns:          4,
+			MaxIdleConnsPerHost:   2,
+			IdleConnTimeout:       20 * time.Second,
+			TLSHandshakeTimeout:   8 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
 	}
 }
 
@@ -120,14 +148,14 @@ func (c *OpenAICompat) loadLlamaCppModel(ctx context.Context) error {
 	if c.loadKwargsJSON != "" {
 		body["chat_template_kwargs_json"] = c.loadKwargsJSON
 	}
-	if c.specType != "" {
+	if strings.TrimSpace(c.specType) != "" {
 		body["spec_type"] = c.specType
-	}
-	if c.specDraftNMax > 0 {
-		body["spec_draft_n_max"] = c.specDraftNMax
-	}
-	if strings.TrimSpace(c.specDraftModel) != "" {
-		body["draft_model_path"] = c.specDraftModel
+		if c.specDraftNMax > 0 {
+			body["spec_draft_n_max"] = c.specDraftNMax
+		}
+		if strings.TrimSpace(c.specDraftModel) != "" {
+			body["draft_model_path"] = c.specDraftModel
+		}
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -584,6 +612,7 @@ type chatReqBody struct {
 	MinP            float64       `json:"min_p,omitempty"`
 	PresencePenalty float64       `json:"presence_penalty,omitempty"`
 	Seed            *int64        `json:"seed,omitempty"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 	Tools           []llm.ToolDef `json:"tools,omitempty"`
 	// tool_choice: "auto" | "none" | "required" — omitted when empty
 	ToolChoice        string         `json:"tool_choice,omitempty"`
@@ -647,6 +676,7 @@ func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
 		Temperature:     req.Temperature,
 		TopP:            req.TopP,
 		PresencePenalty: req.PresencePenalty,
+		ReasoningEffort: req.ReasoningEffort,
 	}
 
 	if req.TopK > 0 {

@@ -24,6 +24,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - [x] Readable web fetch extraction for HTML/GitHub pages so fetched pages shed CSS/script noise before entering context.
 - [x] UTF-16-ish Windows shell/terminal output decoding and ASCII lint summaries to avoid mojibake in chat/logs.
 - [ ] Memory/task-run dedicated inspection helpers.
+- [ ] Brain/RunLedger architecture: centralize run events, memory extraction, reflection, skills, evidence, and retrieval planning. See `docs/brain-memory-ledger-tracker.md`.
 - [ ] Structural code intelligence tools (`symbol_search`, `find_references`, Go/TS symbol indexes).
 - [ ] Visual feedback loop for frontend/Wails verification.
 - [ ] Structured Git helpers for commit history, branch diffs, and change provenance.
@@ -37,6 +38,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 - `master_skill.md` is intentionally not authored in this pass. The user has one to drop in later.
 - The existing skill system should remain the home for procedural knowledge. The context layer should load compact indexes and retrieve details on demand.
 - Tool-result clearing should preserve the fact that a tool ran and enough metadata to re-read or reproduce the result.
+- The long-term "smarter over time" plan lives in `docs/brain-memory-ledger-tracker.md`; keep this tracker focused on context pressure, lazy retrieval, and prompt-size hygiene.
 
 ## Implementation Notes
 
@@ -66,7 +68,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 2. Model adapters: Qwen3.6 and Gemma4 compatibility layers for think cleanup, role normalization, stop tokens, JSON repair, and tool-call extraction. Status: started for inline tool repair; adapter package still planned.
 3. Agent core state machine: make Plan -> Act -> Observe -> Reflect -> Continue an explicit loop contract, with loop protection for repeated tool calls/responses, no progress, empty output, and infinite planning. Status: partial via run state and retry brakes.
 4. Tool calling: harden JSON extraction/repair/schema validation, retry invalid calls with bounded prompts, and keep strict tool schemas. Status: partial; JSON repair engine/eval suite still planned.
-5. Memory system: maintain short-term, working, project, long-term, and future embedding memory layers; build prompts from relevant memory/current files/recent actions instead of dumping everything. Status: partial.
+5. Memory system: maintain working, episodic, semantic, procedural, reflective, and evidence memory layers; build prompts from retrieval-planned packets rather than dumping everything. Status: partial; detailed design in `docs/brain-memory-ledger-tracker.md`.
 6. Router: add capability registry and automatic model/profile selection, for example Qwen for tool-heavy coding and Gemma for writing/planning when stable. Status: registry started; router planned.
 7. MTP integration: detect MTP-capable artifacts, benchmark `draft-mtp` launch/profile settings, and avoid enabling MTP on normal GGUFs. Status: Doctor warnings started; benchmark UI landed; MTP-specific probes still planned.
 8. Evaluation harness: add coding/tool-use/json/memory/reasoning/writing eval suites and a `mauler eval` style command/report. Status: planned.
@@ -79,7 +81,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 2. Add first-class Qwen/Gemma adapter package around response normalization and tool-call repair.
 3. Extend the Benchmarks tab with live InferenceBridge/LM Studio telemetry capture, backend raw-output links, VRAM/KV fit snapshots, and MTP-specific probes.
 4. Add MTP launch validation against live backend props and selected model artifact name.
-5. Continue generalizing lazy/capped retrieval to session and document outputs so bulky re-fetchable data does not live in chat history.
+5. Continue generalizing lazy/capped retrieval to session, web, shell, evidence, and document outputs so bulky re-fetchable data does not live in chat history.
 6. Add JSON repair engine with schema validation metrics and failing examples in task logs.
 7. Add explicit Plan/Act/Observe/Reflect loop events and UI phase visualizer.
 8. Add capability router for automatic profile selection per task mode.
@@ -88,6 +90,7 @@ Goal: make TheMauler stable for long-running local-agent work by keeping high-si
 11. Build planner/worker/critic orchestration on top of bounded subagents.
 12. Continue the workspace redesign from `docs/workspace-redesign-plan.md` with recent/saved workspace files, workspace switcher, and richer lab run cards.
 13. Add terminal take-over controls, command artifact pinning, and long-running command progress cards on top of shared terminal mode.
+14. Start the RunLedger spine from `docs/brain-memory-ledger-tracker.md` so future memory/log/Ops/UI work records one canonical event instead of scattering logs across layers.
 
 ## Verification
 

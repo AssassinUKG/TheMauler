@@ -56,8 +56,11 @@ func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) 
 	if err := rejectProtectedMutationPath(p.Path); err != nil {
 		return "", fmt.Errorf("write_file: %w", err)
 	}
+	guarded, note := guardFileContent(rawPath, p.Content)
+	p.Content = guarded
 	if shouldWriteViaWSL(rawPath) {
-		return writeFileViaWSL(rawPath, p.Content, p.Append)
+		out, err := writeFileViaWSL(rawPath, p.Content, p.Append)
+		return withGuardNote(out, note), err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(p.Path), 0o755); err != nil {
@@ -74,7 +77,7 @@ func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) 
 			return "", fmt.Errorf("write_file: append: %w", err)
 		}
 		lines := countLines(p.Content)
-		return fmt.Sprintf("appended %d lines to %s", lines, p.Path), nil
+		return withGuardNote(fmt.Sprintf("appended %d lines to %s", lines, p.Path), note), nil
 	}
 
 	if err := os.WriteFile(p.Path, []byte(p.Content), 0o644); err != nil {
@@ -82,7 +85,46 @@ func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) 
 	}
 
 	lines := countLines(p.Content)
-	return fmt.Sprintf("wrote %s (%d lines)", p.Path, lines), nil
+	return withGuardNote(fmt.Sprintf("wrote %s (%d lines)", p.Path, lines), note), nil
+}
+
+func withGuardNote(result, note string) string {
+	if note == "" {
+		return result
+	}
+	return result + "\n" + note
+}
+
+// ShouldUseWSLForPath reports whether a path should be read or written inside
+// WSL rather than on the Windows host — i.e. a Linux-absolute path on a
+// WSL-backed Windows host. Mutation verification uses this to mirror the routing
+// write_file already does, so it doesn't os.Stat a /tmp/... path that only
+// exists inside the WSL filesystem.
+func ShouldUseWSLForPath(path string) bool { return shouldWriteViaWSL(path) }
+
+// ReadFileViaWSL returns the contents of a WSL-internal file by running `cat`
+// inside the active distro. Used to verify a file written via writeFileViaWSL.
+func ReadFileViaWSL(path string) ([]byte, error) {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("invalid WSL path %q", path)
+	}
+	args := []string{}
+	if distro := activeWSLDistro(); distro != "" {
+		args = append(args, "-d", distro)
+	}
+	args = append(args, "--", "bash", "-lc", fmt.Sprintf("cat -- %s", shellQuote(path)))
+	cmd := exec.Command("wsl.exe", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return nil, fmt.Errorf("%w: %s", err, detail)
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 func shouldWriteViaWSL(path string) bool {

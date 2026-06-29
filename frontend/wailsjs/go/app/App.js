@@ -26,6 +26,10 @@ export function BenchmarkProfileWithCases(arg1, arg2, arg3) {
   return window['go']['app']['App']['BenchmarkProfileWithCases'](arg1, arg2, arg3);
 }
 
+export function CalibrateSpec(arg1) {
+  return window['go']['app']['App']['CalibrateSpec'](arg1);
+}
+
 export function ClearBenchmarkRuns() {
   return window['go']['app']['App']['ClearBenchmarkRuns']();
 }
@@ -34,12 +38,20 @@ export function ClearHistory() {
   return window['go']['app']['App']['ClearHistory']();
 }
 
+export function ClearLedgerEvents() {
+  return window['go']['app']['App']['ClearLedgerEvents']();
+}
+
 export function ClearMemoryEntries() {
   return window['go']['app']['App']['ClearMemoryEntries']();
 }
 
 export function ClearSessionRecall() {
   return window['go']['app']['App']['ClearSessionRecall']();
+}
+
+export function ClearStorageItem(arg1) {
+  return window['go']['app']['App']['ClearStorageItem'](arg1);
 }
 
 export function ClearTaskRuns() {
@@ -76,6 +88,14 @@ export function DeleteSkill(arg1) {
 
 export function EncodeFileBase64(arg1) {
   return window['go']['app']['App']['EncodeFileBase64'](arg1);
+}
+
+export function ExportMemoryJSON() {
+  return window['go']['app']['App']['ExportMemoryJSON']();
+}
+
+export function ExportTaskRunsJSON() {
+  return window['go']['app']['App']['ExportTaskRunsJSON']();
 }
 
 export function GetAgentMode() {
@@ -126,6 +146,14 @@ export function GetSkill(arg1) {
   return window['go']['app']['App']['GetSkill'](arg1);
 }
 
+export function GetSpecCalibration() {
+  return window['go']['app']['App']['GetSpecCalibration']();
+}
+
+export function GetSpecPlan() {
+  return window['go']['app']['App']['GetSpecPlan']();
+}
+
 export function GetUserProfile() {
   return window['go']['app']['App']['GetUserProfile']();
 }
@@ -134,12 +162,32 @@ export function GetWorkingDir() {
   return window['go']['app']['App']['GetWorkingDir']();
 }
 
+export function ImportMemoryJSON(arg1) {
+  return window['go']['app']['App']['ImportMemoryJSON'](arg1);
+}
+
+export function ImportTaskRunsJSON(arg1) {
+  return window['go']['app']['App']['ImportTaskRunsJSON'](arg1);
+}
+
+export function InterruptShellTool() {
+  return window['go']['app']['App']['InterruptShellTool']();
+}
+
 export function KillLocalInferenceServers() {
   return window['go']['app']['App']['KillLocalInferenceServers']();
 }
 
 export function ListBenchmarkRuns() {
   return window['go']['app']['App']['ListBenchmarkRuns']();
+}
+
+export function ListLearningCandidates(arg1) {
+  return window['go']['app']['App']['ListLearningCandidates'](arg1);
+}
+
+export function ListLedgerEvents(arg1) {
+  return window['go']['app']['App']['ListLedgerEvents'](arg1);
 }
 
 export function ListMemory() {
@@ -154,12 +202,20 @@ export function ListModelsForProvider(arg1) {
   return window['go']['app']['App']['ListModelsForProvider'](arg1);
 }
 
+export function ListResumableRuns() {
+  return window['go']['app']['App']['ListResumableRuns']();
+}
+
 export function ListSessions() {
   return window['go']['app']['App']['ListSessions']();
 }
 
 export function ListSkills() {
   return window['go']['app']['App']['ListSkills']();
+}
+
+export function ListStorageItems() {
+  return window['go']['app']['App']['ListStorageItems']();
 }
 
 export function ListTaskRuns() {
@@ -176,6 +232,10 @@ export function ListWSLDistros() {
 
 export function ListWorkspaceFolders() {
   return window['go']['app']['App']['ListWorkspaceFolders']();
+}
+
+export function LoadBenchmarkModel(arg1, arg2) {
+  return window['go']['app']['App']['LoadBenchmarkModel'](arg1, arg2);
 }
 
 export function LoadSession(arg1) {
@@ -198,8 +258,16 @@ export function PingProvider(arg1) {
   return window['go']['app']['App']['PingProvider'](arg1);
 }
 
+export function PruneLedgerEvents(arg1, arg2) {
+  return window['go']['app']['App']['PruneLedgerEvents'](arg1, arg2);
+}
+
 export function ReadFileContent(arg1) {
   return window['go']['app']['App']['ReadFileContent'](arg1);
+}
+
+export function RecordLearningDecision(arg1, arg2, arg3) {
+  return window['go']['app']['App']['RecordLearningDecision'](arg1, arg2, arg3);
 }
 
 export function ReindexSessionRecall() {
@@ -222,8 +290,16 @@ export function RestartWSL() {
   return window['go']['app']['App']['RestartWSL']();
 }
 
+export function ResumeRun(arg1) {
+  return window['go']['app']['App']['ResumeRun'](arg1);
+}
+
 export function RollbackDepth() {
   return window['go']['app']['App']['RollbackDepth']();
+}
+
+export function RunAgentEval(arg1) {
+  return window['go']['app']['App']['RunAgentEval'](arg1);
 }
 
 export function RunArtifact(arg1, arg2) {
@@ -232,6 +308,14 @@ export function RunArtifact(arg1, arg2) {
 
 export function RunDoctor() {
   return window['go']['app']['App']['RunDoctor']();
+}
+
+export function RunGrammarToolArgsProbe(arg1) {
+  return window['go']['app']['App']['RunGrammarToolArgsProbe'](arg1);
+}
+
+export function RunMiniAgentLoopBenchmark(arg1, arg2) {
+  return window['go']['app']['App']['RunMiniAgentLoopBenchmark'](arg1, arg2);
 }
 
 export function SaveFileContent(arg1, arg2) {
@@ -294,6 +378,10 @@ export function SetAutonomous(arg1) {
   return window['go']['app']['App']['SetAutonomous'](arg1);
 }
 
+export function SetSpecMode(arg1) {
+  return window['go']['app']['App']['SetSpecMode'](arg1);
+}
+
 export function SetWorkingDir(arg1) {
   return window['go']['app']['App']['SetWorkingDir'](arg1);
 }
@@ -304,6 +392,10 @@ export function ShellClose(arg1) {
 
 export function ShellInput(arg1, arg2) {
   return window['go']['app']['App']['ShellInput'](arg1, arg2);
+}
+
+export function ShellResize(arg1, arg2, arg3) {
+  return window['go']['app']['App']['ShellResize'](arg1, arg2, arg3);
 }
 
 export function StopAgent() {
@@ -322,8 +414,8 @@ export function Undo() {
   return window['go']['app']['App']['Undo']();
 }
 
-export function UpdateLabContext(arg1, arg2, arg3) {
-  return window['go']['app']['App']['UpdateLabContext'](arg1, arg2, arg3);
+export function UpdateLabContext(arg1, arg2, arg3, arg4) {
+  return window['go']['app']['App']['UpdateLabContext'](arg1, arg2, arg3, arg4);
 }
 
 export function UpdateProfiles(arg1) {

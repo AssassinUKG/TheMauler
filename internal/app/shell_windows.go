@@ -5,6 +5,8 @@ package app
 import (
 	"os/exec"
 	"syscall"
+
+	pty "github.com/aymanbagabas/go-pty"
 )
 
 // hideShellWindow prevents the spawned shell from creating a visible console
@@ -15,4 +17,8 @@ func hideShellWindow(cmd *exec.Cmd) {
 		HideWindow:    true,
 		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
 	}
+}
+
+func hidePtyShellWindow(cmd *pty.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 }

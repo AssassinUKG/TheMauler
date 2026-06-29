@@ -8,6 +8,8 @@ import {
   ListModelsForProvider,
   ListWSLDistros,
   BenchmarkProfile,
+  ClearStorageItem,
+  ListStorageItems,
   UseProfile,
   type Settings,
   type ProfilesFile,
@@ -15,6 +17,7 @@ import {
   type Provider,
   type GenerationParams,
   type ProfileBenchmarkResult,
+  type StorageItem,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
 import './SettingsModal.css'
@@ -24,7 +27,7 @@ interface Props {
   onSaved?: () => void
 }
 
-type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'tools' | 'context' | 'ui' | 'image'
+type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'tools' | 'context' | 'storage' | 'ui' | 'image'
 
 type ToolRisk = 'low' | 'medium' | 'high'
 
@@ -37,6 +40,7 @@ const toolRisk: Record<string, ToolRisk> = {
   glob: 'low',
   grep: 'low',
   session_search: 'low',
+  file_changes: 'low',
   sqlite_schema: 'low',
   sqlite_query: 'low',
   todo_create: 'low',
@@ -47,6 +51,9 @@ const toolRisk: Record<string, ToolRisk> = {
   todo_clear: 'low',
   skills_list: 'low',
   skill_view: 'low',
+  http_probe: 'medium',
+  evidence_bundle: 'medium',
+  subagent_explore: 'low',
   fetch_url: 'medium',
   web_search: 'medium',
   browser_open: 'medium',
@@ -85,6 +92,43 @@ const onlineTools = new Set([
 const preferredOnlineToolset = (name: string) =>
   name.startsWith('browser_') || name === 'browser_agent' ? 'browser' : 'web-research'
 
+const themeOptions = [
+  { value: 'mauler-ops', label: 'Mauler Ops', accent: '#4ade80', primary: '#16a34a', note: 'Green-black operator console.' },
+  { value: 'slate', label: 'Slate', accent: '#007acc', primary: '#007acc', note: 'Neutral VS Code-style dark.' },
+  { value: 'light', label: 'Light', accent: '#0ea5e9', primary: '#0ea5e9', note: 'Bright desktop mode.' },
+]
+
+const accentSwatches = ['#4ade80', '#16a34a', '#22c55e', '#007acc', '#0ea5e9', '#7c3aed', '#f59e0b', '#ef4444', '#ec4899']
+
+function previewTheme(theme: string) {
+  const next = theme === 'dark' ? 'mauler-ops' : theme
+  document.documentElement.setAttribute('data-theme', next)
+}
+
+function themeValue(theme: string | undefined): string {
+  return theme === 'dark' || !theme ? 'mauler-ops' : theme
+}
+
+function previewAccent(hex: string) {
+  document.documentElement.style.setProperty('--accent', hex)
+  document.documentElement.style.setProperty('--accent-hover', hex)
+  document.documentElement.style.setProperty('--accent-glow', `${hex}2e`)
+  document.documentElement.style.setProperty('--accent-text', contrastText(hex))
+}
+
+function previewPrimary(hex: string) {
+  document.documentElement.style.setProperty('--btn-primary', hex)
+  document.documentElement.style.setProperty('--btn-primary-text', contrastText(hex))
+}
+
+function contrastText(hex: string): string {
+  const h = hex.replace('#', '')
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55 ? '#111111' : '#ffffff'
+}
+
 export function SettingsModal({ onClose, onSaved }: Props) {
   const [tab, setTab] = useState<Tab>('providers')
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -101,6 +145,8 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [deleteProfileConfirm, setDeleteProfileConfirm] = useState<string | null>(null)
   const [benchmarking, setBenchmarking] = useState(false)
   const [benchmarkResult, setBenchmarkResult] = useState<ProfileBenchmarkResult | null>(null)
+  const [storageItems, setStorageItems] = useState<StorageItem[]>([])
+  const [storageStatus, setStorageStatus] = useState('')
 
   useEffect(() => {
     void Promise.all([GetSettings(), GetProfiles()]).then(([s, pf]) => {
@@ -117,7 +163,23 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       }
     }).catch(() => {})
     void ListWSLDistros().then(setWslDistros).catch(() => setWslDistros([]))
+    void refreshStorage()
   }, [])
+
+  const refreshStorage = async () => {
+    const items = await ListStorageItems().catch(() => [] as StorageItem[])
+    setStorageItems(items)
+  }
+
+  const clearStorage = async (item: StorageItem) => {
+    if (!item.clearable) return
+    const ok = confirm(`Clear ${item.label}?\n\n${item.path}\n\nThis cannot be undone.`)
+    if (!ok) return
+    await ClearStorageItem(item.id)
+    await refreshStorage()
+    setStorageStatus(`${item.label} cleared`)
+    window.setTimeout(() => setStorageStatus(current => current === `${item.label} cleared` ? '' : current), 2500)
+  }
 
   const markDirty = () => {
     setDirty(true)
@@ -194,11 +256,17 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const updateProfileField = (name: string, field: keyof Profile, val: unknown) => {
     setProfilesFile(prev => {
       if (!prev) return prev
+      const current = prev.profiles[name]
+      const nextProfile = { ...current, [field]: val }
+      if (field === 'spec_type' && !String(val ?? '').trim()) {
+        nextProfile.spec_draft_model = ''
+        nextProfile.spec_draft_n_max = 0
+      }
       return {
         ...prev,
         profiles: {
           ...prev.profiles,
-          [name]: { ...prev.profiles[name], [field]: val },
+          [name]: nextProfile,
         },
       }
     })
@@ -468,7 +536,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
 
         <div className="settings-body">
           <div className="settings-tabs">
-            {(['general', 'providers', 'profiles', 'agents', 'tools', 'context', 'ui', 'image'] as Tab[]).map(t => (
+            {(['general', 'providers', 'profiles', 'agents', 'tools', 'context', 'storage', 'ui', 'image'] as Tab[]).map(t => (
               <button
                 key={t}
                 className={`tab-btn ${tab === t ? 'active' : ''}`}
@@ -760,11 +828,12 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     <Field label="Draft model path">
                       <input
                         value={profile.spec_draft_model ?? ''}
-                        disabled={!profile.spec_type}
                         onChange={e => updateProfileField(selectedProfile, 'spec_draft_model', e.target.value)}
                         placeholder="C:\\path\\to\\draft-model.gguf"
                       />
-                      <span className="field-hint">Passed to llama.cpp as -md / draft_model_path.</span>
+                      <span className="field-hint">
+                        Passed to llama.cpp as -md / draft_model_path only when Spec type is enabled.
+                      </span>
                     </Field>
                     <Field label="Draft tokens per step">
                       <input
@@ -788,7 +857,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     value={settings.agents.mode_override || 'Auto'}
                     onChange={e => updateSettings('agents', { ...settings.agents, mode_override: e.target.value })}
                   >
-                    {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+                    {['Auto', 'Manual', 'Ops', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
                       <option key={mode} value={mode}>{mode}</option>
                     ))}
                   </select>
@@ -832,10 +901,28 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   <input
                     type="number"
                     min={1}
-                    max={200}
+                    max={2000}
                     value={settings.agents.max_tool_calls}
-                    onChange={e => updateSettings('agents', { ...settings.agents, max_tool_calls: parseInt(e.target.value, 10) || 40 })}
+                    onChange={e => updateSettings('agents', { ...settings.agents, max_tool_calls: parseInt(e.target.value, 10) || 200 })}
                   />
+                </Field>
+                <Field label="Max run seconds">
+                  <input
+                    type="number"
+                    min={0}
+                    max={86400}
+                    value={settings.agents.max_run_seconds ?? 1800}
+                    onChange={e => updateSettings('agents', { ...settings.agents, max_run_seconds: parseInt(e.target.value, 10) || 0 })}
+                  />
+                  <span className="field-hint">Wall-clock task budget. Use 0 for unlimited.</span>
+                </Field>
+                <Field label="Escalation profile">
+                  <input
+                    value={settings.agents.escalation_profile ?? ''}
+                    placeholder="empty disables escalation"
+                    onChange={e => updateSettings('agents', { ...settings.agents, escalation_profile: e.target.value })}
+                  />
+                  <span className="field-hint">Optional profile for one hard recovery step after truncation or malformed tool-call dead ends.</span>
                 </Field>
                 <Field label="Disable thinking after N tool calls">
                   <input
@@ -849,7 +936,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                 </Field>
 
                 <div className="preset-editor-list">
-                  {['Auto', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(name => {
+                  {['Auto', 'Ops', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(name => {
                     const preset = settings.agents.presets?.[name]
                     if (!preset) return null
                     return (
@@ -1138,61 +1225,162 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     Inject open file into context
                   </label>
                 </Field>
+
+                <h3>Memory</h3>
+                <Field label="Project memory">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.memory.enabled}
+                      onChange={e => updateSettings('memory', { ...settings.memory, enabled: e.target.checked })} />
+                    Enable durable project memory
+                  </label>
+                </Field>
+                <Field label="Auto-inject memory">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.memory.auto_inject} disabled={!settings.memory.enabled}
+                      onChange={e => updateSettings('memory', { ...settings.memory, auto_inject: e.target.checked })} />
+                    Inject relevant memory at the start of a run (and re-inject as it drifts)
+                  </label>
+                </Field>
+                <Field label="Auto-distill lessons">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={!settings.memory.disable_auto_distill} disabled={!settings.memory.enabled}
+                      onChange={e => updateSettings('memory', { ...settings.memory, disable_auto_distill: !e.target.checked })} />
+                    Save high-importance lessons from failures into memory when a run finishes
+                  </label>
+                  <span className="field-hint">Entries are tagged "auto" so you can review or prune them on the Brain page.</span>
+                </Field>
+              </div>
+            )}
+
+            {tab === 'storage' && (
+              <div className="settings-section">
+                <h3>Storage</h3>
+                <div className="storage-toolbar">
+                  <div>
+                    <strong>App data paths</strong>
+                    <span>Review log, benchmark, memory, session, and cache footprints.</span>
+                  </div>
+                  <button onClick={() => void refreshStorage()}>Refresh</button>
+                  {storageStatus && <span className="save-status">{storageStatus}</span>}
+                </div>
+                <div className="storage-list">
+                  {storageItems.length === 0 ? (
+                    <div className="storage-empty">No storage information available.</div>
+                  ) : storageItems.map(item => (
+                    <div className="storage-item" key={item.id}>
+                      <div className="storage-main">
+                        <div className="storage-title">
+                          <strong>{item.label}</strong>
+                          <span>{item.kind}</span>
+                        </div>
+                        <div className="storage-description">{item.description}</div>
+                        <code>{item.path}</code>
+                      </div>
+                      <div className="storage-side">
+                        <strong>{item.size}</strong>
+                        <button
+                          className={item.clearable ? 'danger' : ''}
+                          disabled={!item.clearable}
+                          onClick={() => void clearStorage(item)}
+                        >
+                          {item.clearable ? 'Clear' : 'Managed elsewhere'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="storage-note">
+                  Memory, skills, profiles, and settings are shown for visibility but are not cleared here. Use Memory/Brain or the relevant editor for those.
+                </div>
               </div>
             )}
 
             {tab === 'ui' && (
               <div className="settings-section">
-                <h3>UI</h3>
+                <h3>Appearance</h3>
+                <div className="theme-preset-grid">
+                  {themeOptions.map(option => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`theme-preset-card ${themeValue(settings.ui.theme) === option.value ? 'active' : ''}`}
+                      onClick={() => {
+                        const nextUI = { ...settings.ui, theme: option.value, accent_color: option.accent, primary_color: option.primary }
+                        updateSettings('ui', nextUI)
+                        previewTheme(option.value)
+                        previewAccent(option.accent)
+                        previewPrimary(option.primary)
+                      }}
+                    >
+                      <span className="theme-preset-swatch" style={{ background: option.accent }} />
+                      <strong>{option.label}</strong>
+                      <small>{option.note}</small>
+                    </button>
+                  ))}
+                </div>
                 <Field label="Theme">
-                  <select value={settings.ui.theme}
+                  <select value={themeValue(settings.ui.theme)}
                     onChange={e => {
-                      updateSettings('ui', { ...settings.ui, theme: e.target.value })
-                      document.documentElement.setAttribute('data-theme', e.target.value === 'light' ? 'light' : 'dark')
+                      const theme = e.target.value
+                      updateSettings('ui', { ...settings.ui, theme })
+                      previewTheme(theme)
                     }}>
-                    {['dark', 'light'].map(t => <option key={t}>{t}</option>)}
+                    {themeOptions.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                 </Field>
                 <Field label="Accent color">
                   <div className="accent-picker">
-                    {['#007acc', '#7c3aed', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#f97316'].map(c => (
+                    {accentSwatches.map(c => (
                       <button
                         key={c}
-                        className={`accent-swatch ${(settings.ui.accent_color ?? '#007acc') === c ? 'active' : ''}`}
+                        className={`accent-swatch ${(settings.ui.accent_color ?? '#4ade80') === c ? 'active' : ''}`}
                         style={{ background: c }}
-                        onClick={() => updateSettings('ui', { ...settings.ui, accent_color: c })}
+                        onClick={() => {
+                          updateSettings('ui', { ...settings.ui, accent_color: c })
+                          previewAccent(c)
+                        }}
                         title={c}
                       />
                     ))}
                     <input
                       type="color"
                       className="accent-custom"
-                      value={settings.ui.accent_color ?? '#007acc'}
-                      onChange={e => updateSettings('ui', { ...settings.ui, accent_color: e.target.value })}
+                      value={settings.ui.accent_color ?? '#4ade80'}
+                      onChange={e => {
+                        updateSettings('ui', { ...settings.ui, accent_color: e.target.value })
+                        previewAccent(e.target.value)
+                      }}
                       title="Custom color"
                     />
                   </div>
                 </Field>
                 <Field label="Button color">
                   <div className="accent-picker">
-                    {['#007acc', '#7c3aed', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#f97316'].map(c => (
+                    {accentSwatches.map(c => (
                       <button
                         key={c}
-                        className={`accent-swatch ${(settings.ui.primary_color ?? '#007acc') === c ? 'active' : ''}`}
+                        className={`accent-swatch ${(settings.ui.primary_color ?? '#16a34a') === c ? 'active' : ''}`}
                         style={{ background: c }}
-                        onClick={() => updateSettings('ui', { ...settings.ui, primary_color: c })}
+                        onClick={() => {
+                          updateSettings('ui', { ...settings.ui, primary_color: c })
+                          previewPrimary(c)
+                        }}
                         title={c}
                       />
                     ))}
                     <input
                       type="color"
                       className="accent-custom"
-                      value={settings.ui.primary_color ?? '#007acc'}
-                      onChange={e => updateSettings('ui', { ...settings.ui, primary_color: e.target.value })}
+                      value={settings.ui.primary_color ?? '#16a34a'}
+                      onChange={e => {
+                        updateSettings('ui', { ...settings.ui, primary_color: e.target.value })
+                        previewPrimary(e.target.value)
+                      }}
                       title="Custom button color"
                     />
                   </div>
                 </Field>
+                <h3>Layout</h3>
                 <Field label="Status bar">
                   <label className="checkbox-label">
                     <input type="checkbox" checked={settings.ui.status_bar}
@@ -1334,6 +1522,7 @@ function knownTools(enabled: Record<string, boolean> | undefined): string[] {
     'browser_close',
     'browser_agent',
     'session_search',
+    'file_changes',
     'sqlite_schema',
     'sqlite_query',
     'todo_create',
@@ -1344,6 +1533,9 @@ function knownTools(enabled: Record<string, boolean> | undefined): string[] {
     'todo_clear',
     'skills_list',
     'skill_view',
+    'http_probe',
+    'evidence_bundle',
+    'subagent_explore',
     ...Object.keys(enabled ?? {}),
   ])).sort()
 }
