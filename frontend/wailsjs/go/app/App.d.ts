@@ -118,6 +118,8 @@ export function ListTaskRuns():Promise<Array<app.TaskRun>>;
 
 export function ListTodos():Promise<Array<tools.TodoItem>>;
 
+export function ListVPNInterfaces():Promise<Array<app.VPNInterfaceInfo>>;
+
 export function ListWSLDistros():Promise<Array<string>>;
 
 export function ListWorkspaceFolders():Promise<Array<settings.WorkspaceFolder>>;

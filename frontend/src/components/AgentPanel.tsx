@@ -72,6 +72,8 @@ const toolLabels: Record<string, string> = {
   write_file: 'Write files',
   edit_file: 'Edit files',
   shell: 'Shell / Bash',
+  terminal_send: 'Terminal send',
+  terminal_read: 'Terminal read',
   glob: 'Glob',
   grep: 'Grep',
   session_search: 'Session search',
@@ -154,6 +156,8 @@ const toolRisk: Record<string, ToolRisk> = {
   edit_file: 'high',
   shell: 'high',
   bash: 'high',
+  terminal_send: 'high',
+  terminal_read: 'low',
   browser_click: 'high',
   browser_type: 'high',
   browser_agent: 'high',
@@ -295,6 +299,11 @@ export function AgentPanel({
   const updateTools = async (tools: Settings['tools']) => {
     if (!settings) return
     await updateSettings({ ...settings, tools })
+  }
+
+  const updateAgents = async (agents: Settings['agents']) => {
+    if (!settings) return
+    await updateSettings({ ...settings, agents })
   }
 
   const showPanelStatus = (message: string) => {
@@ -691,6 +700,24 @@ export function AgentPanel({
                 />
                 <span className="toggle-track" />
               </span>
+            </label>
+            <label className="agent-setting-row agent-setting-select-row">
+              <div>
+                <div className="agent-setting-name">Reasoning Effort</div>
+                <div className="agent-setting-desc">Starting depth for each run</div>
+              </div>
+              <select
+                className="agent-compact-select"
+                value={settings?.agents.reasoning_effort || 'auto'}
+                onChange={e => settings && void updateAgents({ ...settings.agents, reasoning_effort: e.target.value })}
+                disabled={!settings}
+              >
+                <option value="auto">Auto</option>
+                <option value="minimal">Minimal</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
             </label>
 
             <div className="agent-section-head">Access preset</div>

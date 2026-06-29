@@ -29,7 +29,7 @@ implement without re-deriving context.
 | ID | Title | Tier | Effort | Status |
 |----|-------|------|--------|--------|
 | U1 | Dynamic reasoning-effort control (`set_reasoning_effort` tool) | 1 | S | ✅ first pass |
-| U2 | Tool-result disk offload + `read_tool_result` (replace blind truncation) | 1 | M | 🔨 |
+| U2 | Tool-result disk offload + `read_tool_result` (replace blind truncation) | 1 | M | ✅ first pass |
 | U3 | InferenceBridge launch-flag + quant assertions in Doctor | 1 | S | 🔨 |
 | U4 | Programmatic tool calling (`run_script` over the registry) | 2 | M–L | 🔨 |
 | U5 | Graduated compaction ladder (add microcompact tier) | 2 | M | 🔨 |
@@ -111,7 +111,7 @@ scenario with a live/local backend to compare truncation/auto-continue rates.
 
 ---
 
-## U2. Tool-result disk offload + `read_tool_result` 🔨
+## U2. Tool-result disk offload + `read_tool_result` ✅ first pass
 
 **Goal.** Replace lossy truncation of large tool results with offload-to-disk + a head/tail preview
 + a retrieval handle, so nothing needed is permanently lost.
@@ -157,6 +157,12 @@ loss of a fact that lives in the offloaded middle (a follow-up `read_tool_result
 slice; subagent path uses the same offload.
 
 **Effort.** M.
+
+**Done so far.** Added run-scoped offload storage under the Mauler config dir, context previews with
+recoverable `result_id` handles, app-bound `read_tool_result`, default toolset/settings wiring,
+Settings UI round-trip fields, main-loop and subagent offload usage, per-turn aggregate offload of
+the largest raw tool results, and round-trip/preview/paging/aggregate tests. Remaining: add an
+`agent_eval` scenario that proves a fact from the offloaded middle can be recovered.
 
 ---
 

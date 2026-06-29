@@ -427,6 +427,9 @@ type LabStatus struct {
 	ShellUser      string                     `json:"shell_user"`
 	Target         string                     `json:"target"`
 	VPNInterface   string                     `json:"vpn_interface"`
+	VPNIP          string                     `json:"vpn_ip"`
+	VPNCIDR        string                     `json:"vpn_cidr"`
+	VPNKind        string                     `json:"vpn_kind"`
 	LatestArtifact string                     `json:"latest_artifact"`
 	OpsProfile     string                     `json:"ops_profile"`
 	OpenFolders    []settings.WorkspaceFolder `json:"open_folders"`
@@ -1439,6 +1442,7 @@ func (a *App) GetLabStatus() LabStatus {
 	if latest == "" {
 		latest = latestWorkspaceArtifact(normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, cfg.Context.WorkspaceDir))
 	}
+	vpn, _ := selectedVPNInfo(cfg)
 	return LabStatus{
 		AgentRoot:      filepath.ToSlash(wd),
 		ShellBackend:   cfg.Tools.ShellBackend,
@@ -1446,6 +1450,9 @@ func (a *App) GetLabStatus() LabStatus {
 		ShellUser:      cfg.Tools.ShellUser,
 		Target:         cfg.Context.Lab.Target,
 		VPNInterface:   cfg.Context.Lab.VPNInterface,
+		VPNIP:          vpn.IP,
+		VPNCIDR:        vpn.CIDR,
+		VPNKind:        vpn.Kind,
 		LatestArtifact: filepath.ToSlash(latest),
 		OpsProfile:     normaliseOpsProfile(cfg.Context.Lab.OpsProfile),
 		OpenFolders:    normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, filepath.ToSlash(wd)),
@@ -2201,10 +2208,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	totalToolCallsMade := 0        // cumulative tool calls across all turns this task
 	preOutputInferenceRetries := 0 // bounded retries for backend failures before any model output
 	escalationsUsed := 0
-	currentEffort := normaliseReasoningEffort(mode.DefaultEffort)
-	if currentEffort == "" {
-		currentEffort = defaultReasoningEffortForMode(mode)
-	}
+	currentEffort := configuredReasoningEffort(*cfg, mode)
 	reasoningEffortChanges := 0
 	run.addEvent("reasoning_effort", "Initial reasoning effort", currentEffort)
 	toolBudgetSummaryRequested := false
@@ -2959,6 +2963,7 @@ agentLoop:
 			}
 			if isShellTool(tc.Function.Name) {
 				result = appendShellRecoveryHints(result)
+				result = appendShellCommandRecoveryHints(result, shellCommandFromToolArgs(tc.Function.Arguments))
 				if runErr == nil && isEmptyShellOutputResult(result) {
 					result = strings.TrimRight(result, "\r\n") + "\n[empty shell output: command exited successfully but produced no stdout/stderr. Do not repeat the same command; change flags/path or summarize the empty response.]"
 				} else if runErr == nil {
@@ -2973,10 +2978,7 @@ agentLoop:
 				run.addEvent("guardrail", "Tool result guardrail applied", fmt.Sprintf("%s: %s", tc.Function.Name, strings.Join(findings, ", ")))
 			}
 			budget.after(tc.Function.Name, result, runErr)
-			historyResult := result
-			if isShellTool(tc.Function.Name) {
-				historyResult = summarizeShellResultForContext(result, cfg.Tools.MaxToolResultChars)
-			}
+			historyResult := a.toolResultForContext(run.ID, tc.Function.Name, result, cfg.Tools)
 			toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, historyResult))
 			status := "done"
 			if runErr != nil {
@@ -2995,14 +2997,9 @@ agentLoop:
 			})
 		}
 
+		toolResultMsgs = a.offloadToolResultMessagesForAggregate(run.ID, toolResultMsgs, cfg.Tools)
 		a.mu.Lock()
-		maxChars := cfg.Tools.MaxToolResultChars
 		for _, m := range toolResultMsgs {
-			if maxChars > 0 {
-				if s, ok := m.Content.(string); ok {
-					m.Content = truncateToolResult(s, maxChars)
-				}
-			}
 			a.history.Append(m)
 		}
 		a.mu.Unlock()
@@ -3904,7 +3901,7 @@ func repeatedShellFailureBlock(run TaskRun, tc llm.ToolCallDef) string {
 		if tool.Status == "error" || tool.Status == "blocked" {
 			failures++
 			if failures >= 2 {
-				return fmt.Sprintf("Repeated shell command blocked after %d recent failures: %s\nRecovery: do not run the same command again. Replan from the latest output, narrow the command, use background=true with a job id for long scans, or ask the user before retrying.", failures, command)
+				return fmt.Sprintf("Repeated shell command blocked after %d recent failures: %s\n%s", failures, command, shellRepeatRecoveryHint(run, command))
 			}
 		}
 	}
@@ -3937,7 +3934,7 @@ func repeatedShellEmptyOutputBlock(run TaskRun, tc llm.ToolCallDef) string {
 		}
 		emptySuccesses++
 		if emptySuccesses >= 2 {
-			return fmt.Sprintf("Repeated shell command blocked after %d empty successful results: %s\nRecovery: do not run the same command again. The command exits 0 but produces no useful stdout/stderr. Replan: try curl with -i -L -S and no -s, request a different path, inspect saved files, or summarize that the endpoint returned an empty body.", emptySuccesses, command)
+			return fmt.Sprintf("Repeated shell command blocked after %d empty successful results: %s\n%s", emptySuccesses, command, shellRepeatRecoveryHint(run, command))
 		}
 	}
 	return ""
@@ -3979,8 +3976,109 @@ func repeatedShellSameResultBlock(run TaskRun, tc llm.ToolCallDef) string {
 		}
 		repeats++
 		if repeats >= 2 {
-			return fmt.Sprintf("Repeated shell command blocked after %d identical successful results: %s\nRepeated evidence: %s\nRecovery: do not run the same command again. Treat this output as evidence, update the plan, vary the query/parameter/encoding, or summarize the finding before continuing.", repeats, command, truncateLine(lastResult, 500))
+			return fmt.Sprintf("Repeated shell command blocked after %d identical successful results: %s\nRepeated evidence: %s\n%s", repeats, command, truncateLine(lastResult, 500), shellRepeatRecoveryHint(run, command))
 		}
+	}
+	return ""
+}
+
+func shellRepeatRecoveryHint(run TaskRun, command string) string {
+	var lines []string
+	lines = append(lines, "Recovery: do not run the same command again.")
+	if prior := priorUsefulShellEvidence(run, command); prior != "" {
+		lines = append(lines, "Use this previous successful evidence instead: "+prior)
+	}
+	if hint := commandSpecificRecoveryHint(command); hint != "" {
+		lines = append(lines, hint)
+	}
+	lines = append(lines, "Replan from the latest output, narrow or change the command, use background=true with a job id for long scans, or stop and summarize what is known.")
+	return strings.Join(lines, "\n")
+}
+
+func priorUsefulShellEvidence(run TaskRun, command string) string {
+	currentKey := repeatShellCommandKey(command)
+	for i := len(run.Tools) - 1; i >= 0; i-- {
+		tool := run.Tools[i]
+		if !isShellTool(tool.Name) || tool.Status != "done" {
+			continue
+		}
+		priorCommand := shellCommandFromToolArgs(json.RawMessage(tool.Input))
+		if repeatShellCommandKey(priorCommand) == currentKey {
+			continue
+		}
+		evidence := usefulShellEvidenceSummary(tool.Result)
+		if evidence == "" {
+			continue
+		}
+		if shellEvidenceRelated(command, priorCommand, evidence) {
+			return fmt.Sprintf("%s => %s", truncateLine(priorCommand, 160), evidence)
+		}
+	}
+	return ""
+}
+
+func usefulShellEvidenceSummary(result string) string {
+	var lines []string
+	for _, line := range strings.Split(result, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || isShellMetadataLine(line) {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if lower == "null null null" || strings.Contains(lower, `"status":null`) || strings.Contains(lower, "no such file or directory") {
+			continue
+		}
+		lines = append(lines, line)
+		if len(lines) >= 5 {
+			break
+		}
+	}
+	return truncateLine(strings.Join(lines, " | "), 500)
+}
+
+func shellEvidenceRelated(command, priorCommand, evidence string) bool {
+	combined := strings.ToLower(command + "\n" + priorCommand + "\n" + evidence)
+	if strings.Contains(combined, "ffuf") || strings.Contains(combined, "fuzz_results") || strings.Contains(combined, "web_fuzz_results") {
+		return true
+	}
+	return sharedShellPathTokens(command, priorCommand) > 0
+}
+
+func sharedShellPathTokens(a, b string) int {
+	tokensA := shellPathTokens(a)
+	tokensB := shellPathTokens(b)
+	n := 0
+	for token := range tokensA {
+		if tokensB[token] {
+			n++
+		}
+	}
+	return n
+}
+
+func shellPathTokens(command string) map[string]bool {
+	out := map[string]bool{}
+	for _, field := range strings.Fields(command) {
+		field = strings.Trim(field, `"'`)
+		if strings.Contains(field, ".") || strings.Contains(field, "/") {
+			out[strings.ToLower(field)] = true
+		}
+	}
+	return out
+}
+
+func commandSpecificRecoveryHint(command string) string {
+	lower := strings.ToLower(command)
+	if strings.Contains(lower, "ffuf") || strings.Contains(lower, "fuzz_results") || strings.Contains(lower, "web_fuzz_results") {
+		if strings.Contains(lower, "grep") && strings.Contains(lower, "jq") {
+			return "ffuf output hint: ffuf `-o file` writes one JSON object containing a `.results[]` array. Do not `grep` lines and pipe fragments to jq. Run `jq -r '.results[] | select(.status >= 200 and .status < 400) | \"\\(.status) \\(.input.FUZZ) \\(.url)\"' file` against the actual saved file."
+		}
+		if strings.Contains(lower, ".json") {
+			return "ffuf filename hint: unless `-of json -o name.json` was used, the file may still be named `.txt` while containing JSON. Run `ls -l *fuzz*` once, then parse the existing file."
+		}
+	}
+	if strings.Contains(lower, "| head") && strings.Contains(lower, "curl") {
+		return "curl/head hint: if output was already shown, treat it as evidence; use `sed -n '1,50p'` instead of `head` to avoid broken-pipe exit codes."
 	}
 	return ""
 }
@@ -4242,20 +4340,61 @@ func appendShellRecoveryHints(result string) string {
 	return result
 }
 
+func appendShellCommandRecoveryHints(result, command string) string {
+	if strings.TrimSpace(result) == "" {
+		return result
+	}
+	lowerResult := strings.ToLower(result)
+	lowerCommand := strings.ToLower(command)
+	var hints []string
+	if strings.Contains(lowerResult, "null null null") && strings.Contains(lowerCommand, "grep") && strings.Contains(lowerCommand, "jq") {
+		hints = append(hints, "JSON parsing hint: this command likely piped the whole ffuf JSON object or a bad fragment into jq, so `.status`, `.input.FUZZ`, and `.url` were null. Do not repeat this grep|jq pipeline. Parse the actual ffuf output file directly with `.results[]`, for example: jq -r '.results[] | select(.status >= 200 and .status < 400) | \"\\(.status) \\(.input.FUZZ) \\(.url)\"' fuzz_results.txt")
+	}
+	if strings.Contains(lowerResult, "could not open file") && strings.Contains(lowerCommand, "fuzz_results.json") {
+		hints = append(hints, "ffuf filename hint: check `ls -l *fuzz*` and parse the existing output file. ffuf may write JSON content to the requested `.txt` filename unless `-of json -o name.json` was used.")
+	}
+	if len(hints) == 0 {
+		return result
+	}
+	for _, hint := range hints {
+		if strings.Contains(result, hint) {
+			continue
+		}
+		result = strings.TrimRight(result, "\r\n") + "\nRecovery: " + hint
+	}
+	return result
+}
+
 func recoverBenignShellPipelineClose(tc llm.ToolCallDef, result string, runErr error) (string, bool) {
-	if runErr == nil || !strings.Contains(strings.ToLower(runErr.Error()), "exit code 141") {
+	if runErr == nil {
 		return result, false
 	}
+	errText := strings.ToLower(runErr.Error())
 	command := shellCommandFromToolArgs(tc.Function.Arguments)
-	if !looksLikeHeadTerminatedPipeline(command) || shellResultHasNoEvidence(result) {
+	switch {
+	case strings.Contains(errText, "exit code 141"):
+		if !looksLikeHeadTerminatedPipeline(command) || shellResultHasNoEvidence(result) {
+			return result, false
+		}
+		hint := "Recovery: shell exit 141 is likely SIGPIPE from piping a noisy scanner into head after enough output was captured. Treat the shown output as evidence. Next time, do not pipe long-running scanners through head; write output to a file (-o/-of/-json/tee) or run background=true, then tail/grep the saved file."
+		result = strings.TrimRight(result, "\r\n")
+		if !strings.Contains(result, hint) {
+			result += "\n" + hint
+		}
+		return result, true
+	case strings.Contains(errText, "exit code 23"):
+		if !looksLikeCurlHeadPipeline(command) || shellResultHasNoEvidence(result) {
+			return result, false
+		}
+		hint := "Recovery: curl exit 23 is likely a benign broken pipe from piping curl output into head after useful output was captured. Treat the shown output as evidence. Next time use `curl -sS URL | sed -n '1,50p'`, `curl -sS -o file URL`, or avoid head."
+		result = strings.TrimRight(result, "\r\n")
+		if !strings.Contains(result, hint) {
+			result += "\n" + hint
+		}
+		return result, true
+	default:
 		return result, false
 	}
-	hint := "Recovery: shell exit 141 is likely SIGPIPE from piping a noisy scanner into head after enough output was captured. Treat the shown output as evidence. Next time, do not pipe long-running scanners through head; write output to a file (-o/-of/-json/tee) or run background=true, then tail/grep the saved file."
-	result = strings.TrimRight(result, "\r\n")
-	if !strings.Contains(result, hint) {
-		result += "\n" + hint
-	}
-	return result, true
 }
 
 func looksLikeHeadTerminatedPipeline(command string) bool {
@@ -4264,6 +4403,13 @@ func looksLikeHeadTerminatedPipeline(command string) bool {
 		return false
 	}
 	return hasAny(lower, "ffuf", "gobuster", "feroxbuster", "dirsearch", "nmap", "hydra", "wpscan")
+}
+
+func looksLikeCurlHeadPipeline(command string) bool {
+	lower := strings.ToLower(command)
+	return strings.Contains(lower, "curl") &&
+		strings.Contains(lower, "|") &&
+		regexp.MustCompile(`\|\s*head\b`).MatchString(lower)
 }
 
 func shellResultHasNoEvidence(result string) bool {
@@ -5227,6 +5373,11 @@ type shellSession struct {
 	output    chan terminalOutput
 	interrupt chan struct{}
 	runMu     sync.Mutex
+	// scroll is an always-on rolling line buffer of the live terminal, populated
+	// by pipeShellOutput independently of the marker-protocol output channel. The
+	// interactive terminal_send/terminal_read tools snapshot it for a non-blocking,
+	// real-terminal-style read; the blocking shell command path does not use it.
+	scroll *terminalScrollback
 }
 
 type terminalOutput struct {
@@ -5389,6 +5540,7 @@ func (a *App) OpenShell() (string, error) {
 		},
 		output:    make(chan terminalOutput, 4096),
 		interrupt: make(chan struct{}, 1),
+		scroll:    newTerminalScrollback(0),
 	}
 	a.shellSess = sess
 
@@ -5454,6 +5606,11 @@ func (a *App) pipeShellOutput(id string, r io.Reader, stream string) {
 					record.data = sanitizeTerminalLine(record.data)
 					if strings.TrimSpace(record.data) == "" {
 						continue
+					}
+					// Feed the always-on scrollback for the interactive read tools,
+					// skipping framing markers so a polled screen stays clean.
+					if sess.scroll != nil && !strings.Contains(record.data, "__MAULER_") {
+						sess.scroll.append(record.data)
 					}
 					select {
 					case sess.output <- record:
@@ -5550,6 +5707,7 @@ var (
 	// `__MAULER_`, so a literal `${M}` only exists in an echoed-but-unrun command.
 	markerEchoVar      = []byte("${M}")
 	markerEchoPipefail = []byte("set -o pipefail 2>/dev/null")
+	markerEchoStatus   = []byte(`:" "$status"`)
 )
 
 // isWrapperEchoLine reports whether a (possibly prefix-truncated) line is the
@@ -5558,7 +5716,8 @@ var (
 func isWrapperEchoLine(b []byte) bool {
 	return bytes.Contains(b, markerEchoSig) ||
 		bytes.Contains(b, markerEchoVar) ||
-		bytes.Contains(b, markerEchoPipefail)
+		bytes.Contains(b, markerEchoPipefail) ||
+		bytes.Contains(b, markerEchoStatus)
 }
 
 func (f *uiMarkerFilter) feed(data []byte) []byte {
@@ -6796,6 +6955,7 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 	sb.WriteString("Use session_search when the user asks about prior work, past decisions, remembered fixes, or anything likely discussed in an earlier chat. ")
 	sb.WriteString("Use skills_list at the start of a complex task to see if a relevant procedural skill exists, then skill_view to read its full instructions. ")
 	sb.WriteString("Use set_reasoning_effort to control thinking depth as the task changes: minimal or low for rote reads, small edits, formatting, and running known commands; medium for normal implementation; high for ambiguous design, debugging, exploitation reasoning, or complex reviews. Do not change effort more than a few times per task. ")
+	sb.WriteString("For interactive, prompt-driven, or live-watched terminal work, use terminal_send with terminal_read instead of a blocking shell call; terminal_send types into the same visible PTY and terminal_read snapshots the latest output. ")
 	sb.WriteString("Use http_probe for bounded HTTP header/path probing when you would otherwise run several similar curl commands; it returns a compact summary and artifact path. ")
 	if hint := masterSkillRegistryHint(); hint != "" {
 		sb.WriteString(hint)
@@ -7022,6 +7182,17 @@ func buildWorkspaceContextPrompt() string {
 		}
 		if cfg.Context.Lab.VPNInterface != "" {
 			lab = append(lab, "vpn/interface="+cfg.Context.Lab.VPNInterface)
+			if vpn, ok := selectedVPNInfo(*cfg); ok {
+				if vpn.IP != "" {
+					lab = append(lab, "vpn_ip="+vpn.IP)
+				}
+				if vpn.CIDR != "" {
+					lab = append(lab, "vpn_cidr="+vpn.CIDR)
+				}
+				if vpn.Kind != "" {
+					lab = append(lab, "vpn_source="+vpn.Kind)
+				}
+			}
 		}
 		if cfg.Context.Lab.LatestArtifact != "" {
 			lab = append(lab, "latest_artifact="+cfg.Context.Lab.LatestArtifact)

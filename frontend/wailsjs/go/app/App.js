@@ -226,6 +226,10 @@ export function ListTodos() {
   return window['go']['app']['App']['ListTodos']();
 }
 
+export function ListVPNInterfaces() {
+  return window['go']['app']['App']['ListVPNInterfaces']();
+}
+
 export function ListWSLDistros() {
   return window['go']['app']['App']['ListWSLDistros']();
 }

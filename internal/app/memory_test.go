@@ -232,6 +232,21 @@ func TestSelectRelevantMemoryWithholdsConflictingTarget(t *testing.T) {
 	}
 }
 
+func TestMemoryTargetRefsIgnoreProductVersions(t *testing.T) {
+	entry := MemoryEntry{
+		Title:   "Run memory: FreePBX",
+		Content: `Target app: FreePBX load_version=16.0.40.7 on connected.htb`,
+		Tags:    []string{"run", "milestone"},
+	}
+	refs := memoryTargetRefs(entry)
+	if refs["16.0.40.7"] {
+		t.Fatalf("product version was treated as target ref: %#v", refs)
+	}
+	if !refs["connected.htb"] {
+		t.Fatalf("expected htb host ref to remain: %#v", refs)
+	}
+}
+
 func TestPlanMemoryRetrievalKeepsLayerSlots(t *testing.T) {
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	restoreWorkingDir(t)

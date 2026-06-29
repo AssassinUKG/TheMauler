@@ -50,9 +50,20 @@ func TestLoopMetricsDerivesRunHealth(t *testing.T) {
 
 func TestGoalReminderPromptIncludesOriginalTask(t *testing.T) {
 	prompt := goalReminderPrompt(TaskRun{Prompt: "finish the writeup"})
-	for _, want := range []string{"Original task reminder", "finish the writeup", "Do not restart"} {
+	for _, want := range []string{"Original task reminder", "finish the writeup", "Continue from the latest verified state"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("goal reminder missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestGoalReminderPromptIncludesLatestVerifiedState(t *testing.T) {
+	run := startTaskRun("carry on", "Ops", "profile", "model")
+	run.addTool("shell", `{"command":"cat fuzz_results.txt | jq -r '.results[] | select(.status >= 200 and .status < 400)'"}`, "200 robots.txt http://connected.htb/robots.txt\n[shared_terminal/wsl exit 0, 14ms]", "done", 14)
+	got := goalReminderPrompt(run)
+	for _, want := range []string{"Latest verified state", "robots.txt", "Continue from the latest verified state above"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("goal reminder missing %q:\n%s", want, got)
 		}
 	}
 }

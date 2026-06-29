@@ -73,6 +73,12 @@ func normaliseSettings(s *Settings) {
 	if s.Tools.MaxToolResultChars == 8000 {
 		s.Tools.MaxToolResultChars = defaults.Tools.MaxToolResultChars
 	}
+	if s.Tools.ToolResultPreviewChars <= 0 {
+		s.Tools.ToolResultPreviewChars = defaults.Tools.ToolResultPreviewChars
+	}
+	if s.Tools.ToolResultAggregateChars <= 0 {
+		s.Tools.ToolResultAggregateChars = defaults.Tools.ToolResultAggregateChars
+	}
 	if s.Tools.BashTimeout <= 0 {
 		s.Tools.BashTimeout = defaults.Tools.BashTimeout
 	}
@@ -106,6 +112,7 @@ func normaliseSettings(s *Settings) {
 	if s.Agents.DefaultAutonomy == "" {
 		s.Agents.DefaultAutonomy = defaults.Agents.DefaultAutonomy
 	}
+	s.Agents.ReasoningEffort = normaliseReasoningEffortSetting(s.Agents.ReasoningEffort, defaults.Agents.ReasoningEffort)
 	if s.Agents.MaxToolCalls <= 0 || s.Agents.MaxToolCalls == 40 || s.Agents.MaxToolCalls == 100 {
 		s.Agents.MaxToolCalls = defaults.Agents.MaxToolCalls
 	}
@@ -194,6 +201,20 @@ func migrateOpsPreset(presets, defaults map[string]AgentModePreset) {
 		!current.ToolPermissions["web_search"] &&
 		!current.ToolPermissions["fetch_url"] {
 		presets["Ops"] = next
+	}
+}
+
+func normaliseReasoningEffortSetting(value, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "minimal", "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(value))
+	case "auto", "":
+		if strings.TrimSpace(fallback) == "" {
+			return "auto"
+		}
+		return strings.ToLower(strings.TrimSpace(fallback))
+	default:
+		return "auto"
 	}
 }
 

@@ -57,31 +57,33 @@ func (p Profile) ActiveParams(coding bool) GenerationParams {
 
 // ToolsConfig holds tool-related settings.
 type ToolsConfig struct {
-	Enabled            bool                `toml:"enabled" json:"enabled"`
-	ConfirmReads       bool                `toml:"confirm_reads" json:"confirm_reads"`
-	ConfirmWrites      bool                `toml:"confirm_writes" json:"confirm_writes"`
-	ConfirmExec        bool                `toml:"confirm_exec" json:"confirm_exec"`
-	BashTimeout        int                 `toml:"bash_timeout" json:"bash_timeout"`
-	ShellBackend       string              `toml:"shell_backend" json:"shell_backend"` // auto | powershell | cmd | bash | wsl
-	ShellMode          string              `toml:"shell_mode" json:"shell_mode"`       // isolated | shared_terminal
-	ShellDistro        string              `toml:"shell_distro" json:"shell_distro"`   // optional WSL distro name when shell_backend = wsl
-	ShellUser          string              `toml:"shell_user" json:"shell_user"`       // optional WSL user, e.g. root
-	ArtifactTimeout    int                 `toml:"artifact_timeout" json:"artifact_timeout"`
-	WebEngine          string              `toml:"web_engine" json:"web_engine"`
-	WebBaseURL         string              `toml:"web_base_url" json:"web_base_url"`
-	WebAPIKeyEnv       string              `toml:"web_api_key_env" json:"web_api_key_env"`
-	BraveAPIKey        string              `toml:"brave_api_key" json:"brave_api_key"`
-	MaxSearches        int                 `toml:"max_searches" json:"max_searches"`
-	MaxFetches         int                 `toml:"max_fetches" json:"max_fetches"`
-	MaxFailedFetches   int                 `toml:"max_failed_fetches" json:"max_failed_fetches"`
-	MaxBrowserActions  int                 `toml:"max_browser_actions" json:"max_browser_actions"`
-	MaxToolResultChars int                 `toml:"max_tool_result_chars" json:"max_tool_result_chars"` // 0 = no truncation
-	ProtectedPaths     []string            `toml:"protected_paths" json:"protected_paths"`             // never modify/delete through Mauler tools
-	RedactSecrets      bool                `toml:"redact_secrets" json:"redact_secrets"`               // when true, redact keys/passwords from tool output before the model sees them (off by default; pentest workflows need recovered creds verbatim)
-	ActiveToolset      string              `toml:"active_toolset" json:"active_toolset"`
-	Toolsets           map[string][]string `toml:"toolsets" json:"toolsets"`
-	EnabledTools       map[string]bool     `toml:"enabled_tools" json:"enabled_tools"`
-	SafeRules          []ToolSafeRule      `toml:"safe_rules" json:"safe_rules"`
+	Enabled                  bool                `toml:"enabled" json:"enabled"`
+	ConfirmReads             bool                `toml:"confirm_reads" json:"confirm_reads"`
+	ConfirmWrites            bool                `toml:"confirm_writes" json:"confirm_writes"`
+	ConfirmExec              bool                `toml:"confirm_exec" json:"confirm_exec"`
+	BashTimeout              int                 `toml:"bash_timeout" json:"bash_timeout"`
+	ShellBackend             string              `toml:"shell_backend" json:"shell_backend"` // auto | powershell | cmd | bash | wsl
+	ShellMode                string              `toml:"shell_mode" json:"shell_mode"`       // isolated | shared_terminal
+	ShellDistro              string              `toml:"shell_distro" json:"shell_distro"`   // optional WSL distro name when shell_backend = wsl
+	ShellUser                string              `toml:"shell_user" json:"shell_user"`       // optional WSL user, e.g. root
+	ArtifactTimeout          int                 `toml:"artifact_timeout" json:"artifact_timeout"`
+	WebEngine                string              `toml:"web_engine" json:"web_engine"`
+	WebBaseURL               string              `toml:"web_base_url" json:"web_base_url"`
+	WebAPIKeyEnv             string              `toml:"web_api_key_env" json:"web_api_key_env"`
+	BraveAPIKey              string              `toml:"brave_api_key" json:"brave_api_key"`
+	MaxSearches              int                 `toml:"max_searches" json:"max_searches"`
+	MaxFetches               int                 `toml:"max_fetches" json:"max_fetches"`
+	MaxFailedFetches         int                 `toml:"max_failed_fetches" json:"max_failed_fetches"`
+	MaxBrowserActions        int                 `toml:"max_browser_actions" json:"max_browser_actions"`
+	MaxToolResultChars       int                 `toml:"max_tool_result_chars" json:"max_tool_result_chars"`             // 0 = no truncation
+	ToolResultPreviewChars   int                 `toml:"tool_result_preview_chars" json:"tool_result_preview_chars"`     // chars kept in context when a result is offloaded
+	ToolResultAggregateChars int                 `toml:"tool_result_aggregate_chars" json:"tool_result_aggregate_chars"` // per-turn aggregate context cap for tool results
+	ProtectedPaths           []string            `toml:"protected_paths" json:"protected_paths"`                         // never modify/delete through Mauler tools
+	RedactSecrets            bool                `toml:"redact_secrets" json:"redact_secrets"`                           // when true, redact keys/passwords from tool output before the model sees them (off by default; pentest workflows need recovered creds verbatim)
+	ActiveToolset            string              `toml:"active_toolset" json:"active_toolset"`
+	Toolsets                 map[string][]string `toml:"toolsets" json:"toolsets"`
+	EnabledTools             map[string]bool     `toml:"enabled_tools" json:"enabled_tools"`
+	SafeRules                []ToolSafeRule      `toml:"safe_rules" json:"safe_rules"`
 }
 
 // ToolSafeRule allows a previously approved exact tool request to run without
@@ -115,6 +117,7 @@ type AgentsConfig struct {
 	EscalationProfile     string                     `toml:"escalation_profile" json:"escalation_profile"`
 	RequirePlan           bool                       `toml:"require_plan" json:"require_plan"`
 	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (3)
+	ReasoningEffort       string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | minimal | low | medium | high
 	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
 }
 

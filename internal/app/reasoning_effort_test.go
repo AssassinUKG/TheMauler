@@ -77,6 +77,22 @@ func TestSetReasoningEffortInterceptValidatesAndCaps(t *testing.T) {
 	}
 }
 
+func TestConfiguredReasoningEffortOverridesModeDefault(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	mode := AgentMode{Name: "Ops", DefaultEffort: "high"}
+	if got := configuredReasoningEffort(cfg, mode); got != "high" {
+		t.Fatalf("auto effort = %q, want mode default high", got)
+	}
+	cfg.Agents.ReasoningEffort = "low"
+	if got := configuredReasoningEffort(cfg, mode); got != "low" {
+		t.Fatalf("configured effort = %q, want low", got)
+	}
+	cfg.Agents.ReasoningEffort = "warp"
+	if got := configuredReasoningEffort(cfg, mode); got != "high" {
+		t.Fatalf("invalid configured effort = %q, want fallback high", got)
+	}
+}
+
 func TestReasoningEffortToolDefExposedThroughToolset(t *testing.T) {
 	cfg := settings.DefaultSettings().Tools
 	defs, choice := toolDefsAndChoiceForTurn(tools.New(), cfg, "implement the next feature", 0, 0)

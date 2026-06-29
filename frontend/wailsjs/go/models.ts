@@ -316,6 +316,9 @@ export namespace app {
 	    shell_user: string;
 	    target: string;
 	    vpn_interface: string;
+	    vpn_ip: string;
+	    vpn_cidr: string;
+	    vpn_kind: string;
 	    latest_artifact: string;
 	    ops_profile: string;
 	    open_folders: settings.WorkspaceFolder[];
@@ -332,6 +335,9 @@ export namespace app {
 	        this.shell_user = source["shell_user"];
 	        this.target = source["target"];
 	        this.vpn_interface = source["vpn_interface"];
+	        this.vpn_ip = source["vpn_ip"];
+	        this.vpn_cidr = source["vpn_cidr"];
+	        this.vpn_kind = source["vpn_kind"];
 	        this.latest_artifact = source["latest_artifact"];
 	        this.ops_profile = source["ops_profile"];
 	        this.open_folders = this.convertValues(source["open_folders"], settings.WorkspaceFolder);
@@ -820,6 +826,29 @@ export namespace app {
 	}
 	
 	
+	
+	export class VPNInterfaceInfo {
+	    name: string;
+	    ip: string;
+	    cidr: string;
+	    kind: string;
+	    likely_vpn: boolean;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new VPNInterfaceInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.ip = source["ip"];
+	        this.cidr = source["cidr"];
+	        this.kind = source["kind"];
+	        this.likely_vpn = source["likely_vpn"];
+	        this.label = source["label"];
+	    }
+	}
 
 }
 
@@ -1029,6 +1058,7 @@ export namespace settings {
 	    escalation_profile: string;
 	    require_plan: boolean;
 	    no_think_after_tool_calls: number;
+	    reasoning_effort: string;
 	    presets: Record<string, AgentModePreset>;
 	
 	    static createFrom(source: any = {}) {
@@ -1045,6 +1075,7 @@ export namespace settings {
 	        this.escalation_profile = source["escalation_profile"];
 	        this.require_plan = source["require_plan"];
 	        this.no_think_after_tool_calls = source["no_think_after_tool_calls"];
+	        this.reasoning_effort = source["reasoning_effort"];
 	        this.presets = this.convertValues(source["presets"], AgentModePreset, true);
 	    }
 	
@@ -1444,6 +1475,8 @@ export namespace settings {
 	    max_failed_fetches: number;
 	    max_browser_actions: number;
 	    max_tool_result_chars: number;
+	    tool_result_preview_chars: number;
+	    tool_result_aggregate_chars: number;
 	    protected_paths: string[];
 	    redact_secrets: boolean;
 	    active_toolset: string;
@@ -1476,6 +1509,8 @@ export namespace settings {
 	        this.max_failed_fetches = source["max_failed_fetches"];
 	        this.max_browser_actions = source["max_browser_actions"];
 	        this.max_tool_result_chars = source["max_tool_result_chars"];
+	        this.tool_result_preview_chars = source["tool_result_preview_chars"];
+	        this.tool_result_aggregate_chars = source["tool_result_aggregate_chars"];
 	        this.protected_paths = source["protected_paths"];
 	        this.redact_secrets = source["redact_secrets"];
 	        this.active_toolset = source["active_toolset"];

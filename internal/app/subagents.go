@@ -56,8 +56,11 @@ func (a *App) registerAppTools() {
 	}
 	a.registry.Register(&memoryTool{app: a})
 	a.registry.Register(&fileChangesTool{app: a})
+	a.registry.Register(&readToolResultTool{app: a})
 	a.registry.Register(&httpProbeTool{app: a})
 	a.registry.Register(&evidenceBundleTool{app: a})
+	a.registry.Register(&terminalSendTool{app: a})
+	a.registry.Register(&terminalReadTool{app: a})
 }
 
 func subagentSpecs() []subagentSpec {
@@ -351,7 +354,7 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 				result = guarded
 			}
 			evidence = appendSubagentEvidence(evidence, call.Function.Name, result)
-			msgs = append(msgs, newToolResultMsg(call.ID, call.Function.Name, truncateToolResult(result, cfg.Tools.MaxToolResultChars)))
+			msgs = append(msgs, newToolResultMsg(call.ID, call.Function.Name, a.toolResultForContext(subagentID, call.Function.Name, result, cfg.Tools)))
 		}
 	}
 	report := finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, "turn budget exhausted")

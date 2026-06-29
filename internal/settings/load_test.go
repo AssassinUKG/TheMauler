@@ -53,6 +53,8 @@ func TestNormaliseSettingsMigratesOldBudgetAndOpsDefaults(t *testing.T) {
 	cfg.Tools.MaxFailedFetches = 5
 	cfg.Tools.MaxBrowserActions = 35
 	cfg.Tools.MaxToolResultChars = 8000
+	cfg.Tools.ToolResultPreviewChars = 0
+	cfg.Tools.ToolResultAggregateChars = 0
 	cfg.Agents.MaxToolCalls = 100
 	cfg.Agents.Presets["Ops"] = AgentModePreset{
 		Enabled:  true,
@@ -65,7 +67,7 @@ func TestNormaliseSettingsMigratesOldBudgetAndOpsDefaults(t *testing.T) {
 
 	normaliseSettings(&cfg)
 
-	if cfg.Tools.MaxSearches != 16 || cfg.Tools.MaxFetches != 32 || cfg.Tools.MaxFailedFetches != 10 || cfg.Tools.MaxBrowserActions != 80 || cfg.Tools.MaxToolResultChars != 12000 {
+	if cfg.Tools.MaxSearches != 16 || cfg.Tools.MaxFetches != 32 || cfg.Tools.MaxFailedFetches != 10 || cfg.Tools.MaxBrowserActions != 80 || cfg.Tools.MaxToolResultChars != 12000 || cfg.Tools.ToolResultPreviewChars != 2000 || cfg.Tools.ToolResultAggregateChars != 200000 {
 		t.Fatalf("old tool budgets were not migrated: %#v", cfg.Tools)
 	}
 	if cfg.Agents.MaxToolCalls != 200 {
@@ -136,6 +138,33 @@ func TestEffectiveEnabledToolsAppliesActiveToolsetAsCoarseGate(t *testing.T) {
 	}
 	if effective["write_file"] || effective["web_search"] || effective["browser_agent"] || effective["subagent_testfix"] {
 		t.Fatalf("safe toolset should block write/web/browser-agent tools: %#v", effective)
+	}
+}
+
+func TestInteractiveTerminalToolsOnlyInShellBearingToolsets(t *testing.T) {
+	defaults := DefaultSettings()
+	if !defaults.Tools.EnabledTools["terminal_send"] || !defaults.Tools.EnabledTools["terminal_read"] {
+		t.Fatalf("interactive terminal tools missing from EnabledTools: %#v", defaults.Tools.EnabledTools)
+	}
+	shellBearing := map[string]bool{
+		"local-code":   true,
+		"offline":      true,
+		"balanced":     true,
+		"unrestricted": true,
+	}
+	for name := range defaults.Tools.Toolsets {
+		cfg := defaults.Tools
+		cfg.ActiveToolset = name
+		effective := EffectiveEnabledTools(cfg)
+		if shellBearing[name] {
+			if !effective["terminal_send"] || !effective["terminal_read"] {
+				t.Fatalf("%s should allow interactive terminal tools: %#v", name, effective)
+			}
+			continue
+		}
+		if effective["terminal_send"] || effective["terminal_read"] {
+			t.Fatalf("%s should not allow interactive terminal tools: %#v", name, effective)
+		}
 	}
 }
 

@@ -1,6 +1,9 @@
 package settings
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	defaultCompactionAt = 0.85
@@ -31,6 +34,15 @@ func (s *Settings) Validate() []string {
 	if s.Agents.MaxRunSeconds < 0 {
 		adjustments = append(adjustments, fmt.Sprintf("agents.max_run_seconds clamped from %d to 0", s.Agents.MaxRunSeconds))
 		s.Agents.MaxRunSeconds = 0
+	}
+	switch strings.ToLower(strings.TrimSpace(s.Agents.ReasoningEffort)) {
+	case "", "auto":
+		s.Agents.ReasoningEffort = "auto"
+	case "minimal", "low", "medium", "high":
+		s.Agents.ReasoningEffort = strings.ToLower(strings.TrimSpace(s.Agents.ReasoningEffort))
+	default:
+		adjustments = append(adjustments, fmt.Sprintf("agents.reasoning_effort reset from %q to auto", s.Agents.ReasoningEffort))
+		s.Agents.ReasoningEffort = "auto"
 	}
 	return adjustments
 }

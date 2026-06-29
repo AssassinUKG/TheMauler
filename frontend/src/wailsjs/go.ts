@@ -34,6 +34,8 @@ export interface Settings {
     max_failed_fetches: number
     max_browser_actions: number
     max_tool_result_chars: number
+    tool_result_preview_chars: number
+    tool_result_aggregate_chars: number
     redact_secrets: boolean
     protected_paths: string[]
     active_toolset: string
@@ -50,6 +52,7 @@ export interface Settings {
       escalation_profile: string
       require_plan: boolean
       no_think_after_tool_calls: number
+      reasoning_effort: string
       presets: Record<string, AgentModePreset>
     }
   context: {
@@ -150,9 +153,21 @@ export interface LabStatus {
   shell_user: string
   target: string
   vpn_interface: string
+  vpn_ip: string
+  vpn_cidr: string
+  vpn_kind: string
   latest_artifact: string
   ops_profile: string
   open_folders: WorkspaceFolder[]
+}
+
+export interface VPNInterfaceInfo {
+  name: string
+  ip: string
+  cidr: string
+  kind: string
+  likely_vpn: boolean
+  label: string
 }
 
 export interface GenerationParams {
@@ -635,6 +650,9 @@ export const SelectWorkspaceFolder = (defaultDir: string): Promise<string> =>
 
 export const GetLabStatus = (): Promise<LabStatus> =>
   call('app.App.GetLabStatus')
+
+export const ListVPNInterfaces = (): Promise<VPNInterfaceInfo[]> =>
+  call('app.App.ListVPNInterfaces')
 
 export const UpdateLabContext = (target: string, vpnInterface: string, latestArtifact: string, opsProfile: string): Promise<LabStatus> =>
   call('app.App.UpdateLabContext', target, vpnInterface, latestArtifact, opsProfile)

@@ -54,6 +54,24 @@ func TestMilestoneMemoryRedactsSecretsAndFlags(t *testing.T) {
 	}
 }
 
+func TestBuildRunMilestoneMemoryDoesNotTreatProductVersionAsTarget(t *testing.T) {
+	run := startTaskRun("carry on", "Ops", "profile", "model")
+	run.addTool("shell", `{"command":"curl -s http://connected.htb/admin/config.php | head -n 20"}`, `<title>FreePBX Administration</title><link href="assets/css/app.css?load_version=16.0.40.7">`, "done", 100)
+	run.stop("repeated_tool_failure", "blocked")
+	run.finish("stopped", "blocked")
+
+	mem := buildRunMilestoneMemory(&run)
+	if mem == nil {
+		t.Fatal("expected run memory")
+	}
+	if strings.Contains(mem.Title, "16.0.40.7") || strings.Contains(mem.Content, "Target: 16.0.40.7") {
+		t.Fatalf("product version was treated as target: %#v", mem)
+	}
+	if !strings.Contains(mem.Content, "FreePBX version: 16.0.40.7") {
+		t.Fatalf("product version milestone missing: %s", mem.Content)
+	}
+}
+
 func TestBuildRunMilestoneMemorySkipsEmptyRuns(t *testing.T) {
 	run := startTaskRun("ordinary prompt with no durable result", "Auto", "profile", "model")
 

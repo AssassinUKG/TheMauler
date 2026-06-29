@@ -743,7 +743,11 @@ var hostRefRE = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9
 
 func addTargetRefs(refs map[string]bool, text string) {
 	text = expandDashedIPv4Refs(text)
-	for _, ip := range ipv4RefRE.FindAllString(text, -1) {
+	for _, match := range ipv4RefRE.FindAllStringIndex(text, -1) {
+		ip := text[match[0]:match[1]]
+		if looksLikeVersionIPRef(text, match[0], match[1]) {
+			continue
+		}
 		if validIPv4Ref(ip) {
 			refs[strings.ToLower(ip)] = true
 		}

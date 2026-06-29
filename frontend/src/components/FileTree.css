@@ -129,6 +129,39 @@
   border-color: var(--accent);
 }
 
+.vpn-select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.vpn-select-row select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  background: #0c1110;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  outline: none;
+}
+
+.vpn-select-row select:focus {
+  border-color: var(--accent);
+}
+
+.vpn-select-row button {
+  background: #1b2521;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
 .lab-status-line {
   color: var(--text-dim);
   font-size: 11px;

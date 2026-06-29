@@ -3,8 +3,8 @@ import {
   GetFileTree, GetHomeDir, GetWorkingDir, ReadFileContent,
   SelectWorkingDir, SetWorkingDir, RenameFile, DeleteFile, CreateFile, CreateDir,
   ListWorkspaceFolders, AddWorkspaceFolder, RemoveWorkspaceFolder, SelectWorkspaceFolder,
-  GetLabStatus, UpdateLabContext, ScaffoldWorkspaceFolders,
-  type FileNode, type WorkspaceFolder, type LabStatus,
+  GetLabStatus, UpdateLabContext, ScaffoldWorkspaceFolders, ListVPNInterfaces,
+  type FileNode, type WorkspaceFolder, type LabStatus, type VPNInterfaceInfo,
 } from '../wailsjs/go'
 import './FileTree.css'
 
@@ -24,6 +24,7 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
   const [folders, setFolders] = useState<WorkspaceFolder[]>([])
   const [rootTrees, setRootTrees] = useState<Record<string, FileNode[]>>({})
   const [labStatus, setLabStatus] = useState<LabStatus | null>(null)
+  const [vpnInterfaces, setVpnInterfaces] = useState<VPNInterfaceInfo[]>([])
   const [targetDraft, setTargetDraft] = useState('')
   const [vpnDraft, setVpnDraft] = useState('')
   const [scaffoldDraft, setScaffoldDraft] = useState('notes scans loot scripts screenshots')
@@ -55,6 +56,7 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
       setLabStatus(status)
       setTargetDraft(status?.target ?? '')
       setVpnDraft(status?.vpn_interface ?? '')
+      setVpnInterfaces(await ListVPNInterfaces().catch(() => [] as VPNInterfaceInfo[]))
     } catch (_e) {}
   }, [])
 
@@ -108,6 +110,15 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
   const saveLabContext = async () => {
     const status = await UpdateLabContext(targetDraft, vpnDraft, labStatus?.latest_artifact ?? '', labStatus?.ops_profile ?? 'pentesting').catch(() => null)
     if (status) setLabStatus(status)
+  }
+
+  const refreshVPNInterfaces = async () => {
+    const items = await ListVPNInterfaces().catch(() => [] as VPNInterfaceInfo[])
+    setVpnInterfaces(items)
+    const selected = items.find(item => vpnInterfaceValue(item) === vpnDraft || item.name === vpnDraft)
+    if (selected && labStatus) {
+      setLabStatus({ ...labStatus, vpn_ip: selected.ip, vpn_cidr: selected.cidr, vpn_kind: selected.kind })
+    }
   }
 
   const scaffoldFolders = async () => {
@@ -218,7 +229,36 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
       <div className="lab-status-card">
         <div className="lab-status-title">Run Context</div>
         <input placeholder="Target IP/URL" value={targetDraft} onChange={e => setTargetDraft(e.target.value)} onBlur={() => void saveLabContext()} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
-        <input placeholder="VPN/interface" value={vpnDraft} onChange={e => setVpnDraft(e.target.value)} onBlur={() => void saveLabContext()} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
+        <div className="vpn-select-row">
+          <select
+            value={vpnSelectValue(vpnDraft, vpnInterfaces)}
+            onChange={e => {
+              const value = e.target.value
+              if (value !== '__manual__') {
+                setVpnDraft(value)
+                const selected = vpnInterfaces.find(item => vpnInterfaceValue(item) === value)
+                if (selected && labStatus) {
+                  setLabStatus({ ...labStatus, vpn_interface: selected.name, vpn_ip: selected.ip, vpn_cidr: selected.cidr, vpn_kind: selected.kind })
+                }
+                void UpdateLabContext(targetDraft, value, labStatus?.latest_artifact ?? '', labStatus?.ops_profile ?? 'pentesting').then(setLabStatus).catch(() => null)
+              }
+            }}
+            title="Detected VPN/interface"
+          >
+            <option value="">VPN/interface</option>
+            {vpnInterfaces.map(item => (
+              <option key={`${item.kind}:${item.name}:${item.cidr}`} value={vpnInterfaceValue(item)}>
+                {item.label || vpnInterfaceValue(item)}
+              </option>
+            ))}
+            <option value="__manual__">Manual...</option>
+          </select>
+          <button onClick={() => void refreshVPNInterfaces()} title="Refresh VPN interfaces">Refresh</button>
+        </div>
+        {vpnSelectValue(vpnDraft, vpnInterfaces) === '__manual__' && (
+          <input placeholder="VPN/interface" value={vpnDraft} onChange={e => setVpnDraft(e.target.value)} onBlur={() => void saveLabContext()} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
+        )}
+        <div className="lab-status-line">{vpnLine(labStatus, vpnInterfaces, vpnDraft)}</div>
         <div className="lab-status-line">Shell: {shellLabel(labStatus)}</div>
         <div className="lab-status-line" title={labStatus?.latest_artifact || ''}>Latest: {labStatus?.latest_artifact ? workspaceName(labStatus.latest_artifact) : 'none'}</div>
         <div className="scaffold-row">
@@ -459,6 +499,48 @@ function folderRoleFromName(name: string): string {
   if (lower.includes('script')) return 'scripts'
   if (lower.includes('note')) return 'notes'
   return 'folder'
+}
+
+function vpnInterfaceValue(item: VPNInterfaceInfo): string {
+  return item.name
+}
+
+function vpnSelectValue(value: string, items: VPNInterfaceInfo[]): string {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const match = items.find(item => item.name === trimmed || item.ip === trimmed || item.cidr === trimmed || item.label === trimmed)
+  return match ? vpnInterfaceValue(match) : '__manual__'
+}
+
+function selectedVPNInfo(status: LabStatus | null, items: VPNInterfaceInfo[], draft: string): VPNInterfaceInfo | null {
+  const selected = draft.trim()
+  const byDraft = selected
+    ? items.find(item => item.name === selected || item.ip === selected || item.cidr === selected || item.label === selected)
+    : null
+  if (byDraft) return byDraft
+  if (status?.vpn_interface) {
+    const byStatus = items.find(item => item.name === status.vpn_interface || item.ip === status.vpn_interface || item.cidr === status.vpn_interface)
+    if (byStatus) return byStatus
+  }
+  if (status?.vpn_ip || status?.vpn_cidr) {
+    return {
+      name: status.vpn_interface || selected || 'VPN',
+      ip: status.vpn_ip || '',
+      cidr: status.vpn_cidr || '',
+      kind: status.vpn_kind || '',
+      likely_vpn: true,
+      label: status.vpn_interface || status.vpn_cidr || status.vpn_ip || 'VPN',
+    }
+  }
+  return null
+}
+
+function vpnLine(status: LabStatus | null, items: VPNInterfaceInfo[], draft: string): string {
+  const info = selectedVPNInfo(status, items, draft)
+  if (!info || (!info.ip && !info.cidr)) return 'VPN IP: not detected'
+  const addr = info.cidr || info.ip
+  const suffix = [info.name, info.kind].filter(Boolean).join(' / ')
+  return suffix ? `VPN IP: ${addr} (${suffix})` : `VPN IP: ${addr}`
 }
 
 function languageFromExt(ext: string): string {

@@ -1134,6 +1134,28 @@ func TestRepeatedShellFailureBlock(t *testing.T) {
 	}
 }
 
+func TestRepeatedShellFailureBlockMentionsUsefulPriorEvidence(t *testing.T) {
+	tc := llm.ToolCallDef{
+		Function: llm.FunctionCall{
+			Name:      "shell",
+			Arguments: json.RawMessage(`{"command":"jq -r '.results[] | select(.status >= 200 and .status < 400) | \"\\(.status) \\(.input.FUZZ) \\(.url)\"' web_fuzz_results.json"}`),
+		},
+	}
+	run := TaskRun{
+		Tools: []TaskToolEvent{
+			{Name: "shell", Status: "done", Input: `{"command":"cat fuzz_results.txt | jq -r '.results[] | select(.status >= 200 and .status < 400) | \"\\(.status) \\(.input.FUZZ) \\(.url)\"'"}`, Result: "302  http://connected.htb/\n301 admin http://connected.htb/admin\n200 robots.txt http://connected.htb/robots.txt\n[shared_terminal/wsl exit 0, 14ms]"},
+			{Name: "shell", Status: "error", Input: `{"command":"jq -r '.results[] | select(.status >= 200 and .status < 400) | \"\\(.status) \\(.input.FUZZ) \\(.url)\"' web_fuzz_results.json"}`},
+			{Name: "shell", Status: "error", Input: `{"command":"jq -r '.results[] | select(.status >= 200 and .status < 400) | \"\\(.status) \\(.input.FUZZ) \\(.url)\"' web_fuzz_results.json"}`},
+		},
+	}
+	got := repeatedShellFailureBlock(run, tc)
+	for _, want := range []string{"previous successful evidence", "robots.txt", "ffuf filename hint"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("repeat block missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestRepeatedShellEmptyOutputBlock(t *testing.T) {
 	command := `curl -s http://connected.htb/admin/ | head -n 100`
 	tc := llm.ToolCallDef{
@@ -1448,6 +1470,16 @@ func TestUIMarkerFilterSuppressesTruncatedWrapperEcho(t *testing.T) {
 	if !strings.Contains(got, "\r\x1b[2K") || !strings.Contains(got, "uid=0(root)\n") {
 		t.Fatalf("prompt row not cleared or output lost: %q", got)
 	}
+
+	// When xterm wraps a very long echoed wrapper, the final visual row can arrive
+	// as only the status-print tail. Suppress that tail too.
+	f = uiMarkerFilter{}
+	got = string(f.feed([]byte(`1571575200:" "$status"`)))
+	got += string(f.feed([]byte("\nreal output\n")))
+	got += string(f.flush())
+	if strings.Contains(got, "$status") || !strings.Contains(got, "real output\n") {
+		t.Fatalf("wrapped status tail leaked or output was lost: %q", got)
+	}
 }
 
 // TestUIMarkerFilterStripsRecoverySentinel covers the interrupt-recovery path:
@@ -1633,6 +1665,28 @@ func TestRecoverBenignShellPipelineCloseForScannerHead(t *testing.T) {
 	}
 	if !strings.Contains(got, "SIGPIPE") || !strings.Contains(got, "Treat the shown output as evidence") {
 		t.Fatalf("missing pipeline-close recovery hint:\n%s", got)
+	}
+}
+
+func TestRecoverBenignShellPipelineCloseForCurlHeadExit23(t *testing.T) {
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"command":"curl -s http://connected.htb/admin/config.php | head -n 50"}`),
+	}}
+	result := "<html>FreePBX</html>\n[shared_terminal/wsl exit 23, 200ms]"
+	got, ok := recoverBenignShellPipelineClose(tc, result, errors.New("exit code 23"))
+	if !ok {
+		t.Fatal("expected curl | head exit 23 to be recovered")
+	}
+	if !strings.Contains(got, "curl exit 23") || !strings.Contains(got, "Treat the shown output as evidence") {
+		t.Fatalf("missing curl/head recovery hint:\n%s", got)
+	}
+}
+
+func TestAppendShellCommandRecoveryHintsForFfufGrepJQNulls(t *testing.T) {
+	got := appendShellCommandRecoveryHints("null null null\n[shared_terminal/wsl exit 0, 20ms]", `grep -E '"status":[[:space:]]*(200|301|302)' web_fuzz_results.txt | jq -r '. | "\(.status) \(.input.FUZZ) \(.url)"'`)
+	if !strings.Contains(got, "Do not repeat this grep|jq pipeline") || !strings.Contains(got, ".results[]") {
+		t.Fatalf("missing ffuf jq recovery hint:\n%s", got)
 	}
 }
 
@@ -2168,6 +2222,24 @@ func TestClassifyAgentModeRoutesOperationalAttackWorkToOps(t *testing.T) {
 	}
 	if got := classifyAgentMode("research the latest CVE writeups").Name; got != "Researcher" {
 		t.Fatalf("pure web research should stay Researcher, got %q", got)
+	}
+}
+
+func TestSelectAgentModeRoutesCarryOnInHTBWorkspaceToOps(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Agents.ModeOverride = "Auto"
+	cfg.Context.WorkspaceDir = "C:/Users/richa/Documents/HTB_writeups"
+	cfg.Context.OpenFolders = []settings.WorkspaceFolder{{Path: "C:/Users/richa/Documents/HTB_writeups/scans", Role: "scans"}}
+	got := selectAgentMode("carry on", cfg)
+	if got.Name != "Ops" {
+		t.Fatalf("carry on in HTB workspace routed to %q, want Ops", got.Name)
+	}
+
+	cfg.Context.WorkspaceDir = "C:/Users/richa/Desktop/TheMauler"
+	cfg.Context.OpenFolders = nil
+	got = selectAgentMode("implement the UI feature", cfg)
+	if got.Name != "Builder" {
+		t.Fatalf("codebase implementation routed to %q, want Builder", got.Name)
 	}
 }
 

@@ -92,6 +92,10 @@ func deriveRunMilestones(run *TaskRun) []string {
 			if url := jsonField(tool.Input, "url"); url != "" {
 				out = append(out, "Fetched source: "+truncateLine(url, 160)+".")
 			}
+		case lowerName == "shell" && strings.Contains(lower, "freepbx"):
+			if version := detectProductVersion(text, "freepbx"); version != "" {
+				out = append(out, "Identified FreePBX version: "+version+".")
+			}
 		case lowerName == "write_file" || lowerName == "edit_file":
 			if path := firstNonEmpty(jsonField(tool.Input, "path"), jsonField(tool.Input, "file")); path != "" {
 				out = append(out, "Updated file: "+path+".")
@@ -129,13 +133,64 @@ func deriveNextAction(run *TaskRun) string {
 }
 
 func detectRunTarget(run *TaskRun) string {
-	if ip := ipv4RE.FindString(run.Prompt); ip != "" {
+	if ip := firstTargetLikeIP(run.Prompt); ip != "" {
 		return ip
 	}
 	for _, tool := range run.Tools {
-		if ip := ipv4RE.FindString(tool.Input + "\n" + tool.Result); ip != "" {
+		if ip := firstTargetLikeIP(tool.Input + "\n" + tool.Result); ip != "" {
 			return ip
 		}
+	}
+	return ""
+}
+
+func firstTargetLikeIP(text string) string {
+	for _, match := range ipv4RE.FindAllStringIndex(text, -1) {
+		ip := text[match[0]:match[1]]
+		if !validIPv4Ref(ip) || looksLikeVersionIPRef(text, match[0], match[1]) {
+			continue
+		}
+		return ip
+	}
+	return ""
+}
+
+func looksLikeVersionIPRef(text string, start, end int) bool {
+	lo := start - 48
+	if lo < 0 {
+		lo = 0
+	}
+	hi := end + 48
+	if hi > len(text) {
+		hi = len(text)
+	}
+	near := strings.ToLower(text[lo:hi])
+	if hasAny(near, "version", "load_version", "x-pjax-version", "freepbx", "v=") {
+		return true
+	}
+	if start > 0 && (text[start-1] == 'v' || text[start-1] == 'V') {
+		return true
+	}
+	return false
+}
+
+func detectProductVersion(text, product string) string {
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, strings.ToLower(product))
+	if idx < 0 {
+		return ""
+	}
+	lo := idx - 120
+	if lo < 0 {
+		lo = 0
+	}
+	hi := idx + 240
+	if hi > len(text) {
+		hi = len(text)
+	}
+	window := text[lo:hi]
+	if version := ipv4RE.FindString(window); version != "" && looksLikeVersionIPRef(window, strings.Index(window, version), strings.Index(window, version)+len(version)) {
+		return version
 	}
 	return ""
 }

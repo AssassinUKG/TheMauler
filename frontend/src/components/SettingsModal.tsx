@@ -40,6 +40,7 @@ const toolRisk: Record<string, ToolRisk> = {
   glob: 'low',
   grep: 'low',
   session_search: 'low',
+  read_tool_result: 'low',
   file_changes: 'low',
   sqlite_schema: 'low',
   sqlite_query: 'low',
@@ -1149,9 +1150,14 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     onChange={e => updateSettings('tools', { ...settings.tools, max_browser_actions: parseInt(e.target.value, 10) || 35 })} />
                 </Field>
                 <Field label="Max tool result chars">
-                  <input type="number" min={0} max={100000} value={settings.tools.max_tool_result_chars ?? 8000}
+                  <input type="number" min={0} max={100000} value={settings.tools.max_tool_result_chars ?? 12000}
                     onChange={e => updateSettings('tools', { ...settings.tools, max_tool_result_chars: parseInt(e.target.value, 10) || 0 })} />
-                  <span className="field-hint">Truncates large tool outputs before they enter history. 0 = no limit. Default: 8000</span>
+                  <span className="field-hint">Offloads larger outputs to disk and keeps a preview in context. 0 = no offload. Default: 12000</span>
+                </Field>
+                <Field label="Tool result preview chars">
+                  <input type="number" min={200} max={20000} value={settings.tools.tool_result_preview_chars ?? 2000}
+                    onChange={e => updateSettings('tools', { ...settings.tools, tool_result_preview_chars: parseInt(e.target.value, 10) || 2000 })} />
+                  <span className="field-hint">Head/tail preview size for offloaded tool results. The full output remains available through read_tool_result.</span>
                 </Field>
                 <Field label="Tool access">
                   <div className="tool-grid">

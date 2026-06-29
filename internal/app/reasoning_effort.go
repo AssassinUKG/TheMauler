@@ -42,6 +42,16 @@ func normaliseReasoningEffort(effort string) string {
 	}
 }
 
+func configuredReasoningEffort(cfg settings.Settings, mode AgentMode) string {
+	if effort := normaliseReasoningEffort(cfg.Agents.ReasoningEffort); effort != "" {
+		return effort
+	}
+	if effort := normaliseReasoningEffort(mode.DefaultEffort); effort != "" {
+		return effort
+	}
+	return defaultReasoningEffortForMode(mode)
+}
+
 func effortToThinking(effort string, profile settings.Profile) effortPlan {
 	switch normaliseReasoningEffort(effort) {
 	case "minimal":

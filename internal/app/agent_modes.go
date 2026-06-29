@@ -18,6 +18,8 @@ func selectAgentMode(text string, cfg settings.Settings) AgentMode {
 	var mode AgentMode
 	if !strings.EqualFold(override, "Auto") {
 		mode = baseMode(override)
+	} else if looksOpsWorkspaceTask(text, cfg) {
+		mode = baseMode("Ops")
 	} else {
 		mode = classifyAgentMode(text)
 	}
@@ -26,6 +28,27 @@ func selectAgentMode(text string, cfg settings.Settings) AgentMode {
 		mode.DefaultEffort = defaultReasoningEffortForMode(mode)
 	}
 	return mode
+}
+
+func looksOpsWorkspaceTask(text string, cfg settings.Settings) bool {
+	lower := strings.ToLower(text)
+	if !hasAny(lower, "carry on", "continue", "resume", "next", "box", "target", "hack", "hacking", "foothold", "user", "root", "flag", "scan", "enumerate", "exploit") {
+		return false
+	}
+	if looksCodebaseTask(lower) && !hasAny(lower, "htb", "box", "target", ".htb", "user flag", "root flag") {
+		return false
+	}
+	context := strings.ToLower(strings.Join([]string{
+		cfg.Context.WorkspaceDir,
+		cfg.Context.Lab.Target,
+		cfg.Context.Lab.VPNInterface,
+		cfg.Context.Lab.LatestArtifact,
+		cfg.Context.Lab.OpsProfile,
+	}, "\n"))
+	for _, folder := range cfg.Context.OpenFolders {
+		context += "\n" + strings.ToLower(folder.Path) + "\n" + strings.ToLower(folder.Role)
+	}
+	return hasAny(context, "htb", "hackthebox", ".htb", "writeup", "writeups", "loot", "scans", "nmap", "vpn", "tun0", "pentesting", "ctf")
 }
 
 func baseMode(name string) AgentMode {

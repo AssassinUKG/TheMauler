@@ -5,27 +5,29 @@ func DefaultSettings() Settings {
 	return Settings{
 		ActiveProfile: "qwen3.6-think",
 		Tools: ToolsConfig{
-			Enabled:            true,
-			ConfirmReads:       false,
-			ConfirmWrites:      true,
-			ConfirmExec:        true,
-			BashTimeout:        120,
-			ShellBackend:       "auto",
-			ShellMode:          "shared_terminal",
-			ShellDistro:        "",
-			ShellUser:          "",
-			ArtifactTimeout:    30,
-			WebEngine:          "auto",
-			WebBaseURL:         "",
-			WebAPIKeyEnv:       "",
-			MaxSearches:        16,
-			MaxFetches:         32,
-			MaxFailedFetches:   10,
-			MaxBrowserActions:  80,
-			MaxToolResultChars: 12000,
-			ProtectedPaths:     nil,
-			ActiveToolset:      "balanced",
-			Toolsets:           DefaultToolsets(),
+			Enabled:                  true,
+			ConfirmReads:             false,
+			ConfirmWrites:            true,
+			ConfirmExec:              true,
+			BashTimeout:              120,
+			ShellBackend:             "auto",
+			ShellMode:                "shared_terminal",
+			ShellDistro:              "",
+			ShellUser:                "",
+			ArtifactTimeout:          30,
+			WebEngine:                "auto",
+			WebBaseURL:               "",
+			WebAPIKeyEnv:             "",
+			MaxSearches:              16,
+			MaxFetches:               32,
+			MaxFailedFetches:         10,
+			MaxBrowserActions:        80,
+			MaxToolResultChars:       12000,
+			ToolResultPreviewChars:   2000,
+			ToolResultAggregateChars: 200000,
+			ProtectedPaths:           nil,
+			ActiveToolset:            "balanced",
+			Toolsets:                 DefaultToolsets(),
 			EnabledTools: map[string]bool{
 				"read_file":            true,
 				"read_many":            true,
@@ -63,12 +65,15 @@ func DefaultSettings() Settings {
 				"file_changes":         true,
 				"http_probe":           true,
 				"evidence_bundle":      true,
+				"terminal_send":        true,
+				"terminal_read":        true,
 				"subagent_research":    true,
 				"subagent_explore":     true,
 				"subagent_review":      true,
 				"subagent_testfix":     true,
 				"subagent_summarize":   true,
 				"set_reasoning_effort": true,
+				"read_tool_result":     true,
 			},
 		},
 		Agents: AgentsConfig{
@@ -79,6 +84,7 @@ func DefaultSettings() Settings {
 			MaxRunSeconds:         1800,
 			RequirePlan:           true,
 			NoThinkAfterToolCalls: 3,
+			ReasoningEffort:       "auto",
 			Presets:               defaultAgentPresets(),
 		},
 		Context: ContextConfig{
@@ -142,8 +148,8 @@ func DefaultSettings() Settings {
 }
 
 func DefaultToolsets() map[string][]string {
-	coreRead := []string{"read_file", "read_many", "file_outline", "read_chunks", "read_pdf", "glob", "grep", "session_search", "sqlite_schema", "sqlite_query", "todo_create", "todo_update", "todo_done", "todo_blocked", "todo_list", "todo_clear", "skills_list", "skill_view", "memory", "file_changes", "subagent_review", "subagent_summarize", "set_reasoning_effort"}
-	localCode := append(append([]string{}, coreRead...), "write_file", "edit_file", "shell", "bash", "http_probe", "evidence_bundle")
+	coreRead := []string{"read_file", "read_many", "file_outline", "read_chunks", "read_pdf", "glob", "grep", "session_search", "sqlite_schema", "sqlite_query", "todo_create", "todo_update", "todo_done", "todo_blocked", "todo_list", "todo_clear", "skills_list", "skill_view", "memory", "file_changes", "subagent_review", "subagent_summarize", "set_reasoning_effort", "read_tool_result"}
+	localCode := append(append([]string{}, coreRead...), "write_file", "edit_file", "shell", "bash", "terminal_send", "terminal_read", "http_probe", "evidence_bundle")
 	explore := []string{"read_file", "read_many", "file_outline", "read_chunks", "read_pdf", "glob", "grep"}
 	webResearch := append(append([]string{}, coreRead...), "web_search", "fetch_url", "browser_open", "browser_snapshot", "browser_extract", "browser_screenshot", "subagent_research", "subagent_explore")
 	browser := append(append([]string{}, coreRead...), "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot", "browser_close", "browser_agent")
@@ -154,7 +160,7 @@ func DefaultToolsets() map[string][]string {
 		"explore":      explore,
 		"web-research": webResearch,
 		"browser":      browser,
-		"memory":       {"memory", "file_changes", "session_search", "sqlite_schema", "sqlite_query", "todo_create", "todo_update", "todo_done", "todo_blocked", "todo_list", "todo_clear"},
+		"memory":       {"memory", "file_changes", "session_search", "read_tool_result", "sqlite_schema", "sqlite_query", "todo_create", "todo_update", "todo_done", "todo_blocked", "todo_list", "todo_clear"},
 		"offline":      append(append([]string{}, localCode...), "subagent_testfix"),
 		"balanced":     append(append([]string{}, localCode...), "web_search", "fetch_url", "browser_open", "browser_snapshot", "browser_extract", "browser_screenshot", "subagent_research", "subagent_explore", "subagent_testfix"),
 		"unrestricted": unrestricted,
@@ -170,7 +176,7 @@ func defaultAgentPresets() map[string]AgentModePreset {
 			ContextBudget: 32768,
 			Instructions:  "Operate against authorised lab/client targets from WSL/Kali first. Use WSL shell for target interaction, target DNS, VPN-routed traffic, scans, curl/ffuf/gobuster, exploit checks, and evidence capture. Public web research is allowed for CVEs, docs, tool syntax, and exploit background, but verify everything against live target evidence before acting. Keep notes and report evidence current. Do not perform remediation or fix client systems unless the user explicitly changes the task.",
 			ToolPermissions: map[string]bool{
-				"read_file": true, "read_pdf": true, "write_file": true, "edit_file": true, "shell": true, "bash": true, "glob": true, "grep": true, "http_probe": true, "evidence_bundle": true,
+				"read_file": true, "read_pdf": true, "write_file": true, "edit_file": true, "shell": true, "bash": true, "terminal_send": true, "terminal_read": true, "glob": true, "grep": true, "http_probe": true, "evidence_bundle": true,
 				"skills_list": true, "skill_view": true, "file_changes": true, "todo_create": true, "todo_update": true, "todo_done": true, "todo_blocked": true, "todo_list": true,
 				"web_search": true, "fetch_url": true, "browser_open": true, "browser_snapshot": true, "browser_click": true, "browser_type": true, "browser_extract": true, "browser_screenshot": true, "browser_close": true, "browser_agent": true,
 				"subagent_research": true, "subagent_explore": true, "subagent_testfix": true, "subagent_review": true, "subagent_summarize": true,
@@ -183,7 +189,7 @@ func defaultAgentPresets() map[string]AgentModePreset {
 			ContextBudget: 32768,
 			Instructions:  "Implement requested changes end to end, keep edits scoped, update docs when behavior changes, and run focused verification.",
 			ToolPermissions: map[string]bool{
-				"read_file": true, "read_pdf": true, "file_changes": true, "write_file": true, "edit_file": true, "shell": true, "glob": true, "grep": true,
+				"read_file": true, "read_pdf": true, "file_changes": true, "write_file": true, "edit_file": true, "shell": true, "terminal_send": true, "terminal_read": true, "glob": true, "grep": true,
 				"web_search": true, "fetch_url": true, "browser_open": true, "browser_snapshot": true, "browser_extract": true,
 			},
 		},
@@ -194,7 +200,7 @@ func defaultAgentPresets() map[string]AgentModePreset {
 			ContextBudget: 32768,
 			Instructions:  "Reproduce or inspect failures first, identify the smallest likely cause, patch narrowly, and verify the exact failure path.",
 			ToolPermissions: map[string]bool{
-				"read_file": true, "read_pdf": true, "file_changes": true, "write_file": true, "edit_file": true, "shell": true, "glob": true, "grep": true,
+				"read_file": true, "read_pdf": true, "file_changes": true, "write_file": true, "edit_file": true, "shell": true, "terminal_send": true, "terminal_read": true, "glob": true, "grep": true,
 				"web_search": true, "fetch_url": true,
 			},
 		},
