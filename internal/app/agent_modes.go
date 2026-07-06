@@ -18,8 +18,6 @@ func selectAgentMode(text string, cfg settings.Settings) AgentMode {
 	var mode AgentMode
 	if !strings.EqualFold(override, "Auto") {
 		mode = baseMode(override)
-	} else if looksOpsWorkspaceTask(text, cfg) {
-		mode = baseMode("Ops")
 	} else {
 		mode = classifyAgentMode(text)
 	}
@@ -121,7 +119,7 @@ func applyAgentPreset(cfg *settings.Settings, pf *settings.ProfilesFile, mode Ag
 		}
 		for _, name := range []string{
 			"web_search", "fetch_url",
-			"browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot",
+			"browser",
 		} {
 			cfg.Tools.EnabledTools[name] = false
 		}
@@ -160,6 +158,7 @@ func applyWorkingContextBudget(a *App, presetBudget, profileContext int) bool {
 	}
 	if profileContext > 0 {
 		a.contextWindow = profileContext
+		a.configuredContextWindow = profileContext
 	}
 	a.mu.Unlock()
 	if changed && a.ctx != nil {

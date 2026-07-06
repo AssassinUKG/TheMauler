@@ -28,12 +28,12 @@ func snapshotToolTarget(tc llm.ToolCallDef) fileChangeSnapshot {
 
 func fileChangePath(tc llm.ToolCallDef) string {
 	switch tc.Function.Name {
-	case "write_file":
+	case "write_file", "write":
 		var p verifyWriteParams
 		if err := json.Unmarshal(tc.Function.Arguments, &p); err == nil {
 			return strings.TrimSpace(p.Path)
 		}
-	case "edit_file":
+	case "edit_file", "edit":
 		var p verifyEditParams
 		if err := json.Unmarshal(tc.Function.Arguments, &p); err == nil {
 			return strings.TrimSpace(p.Path)

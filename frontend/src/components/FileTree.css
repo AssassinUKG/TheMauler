@@ -1,6 +1,8 @@
 .file-tree {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
   background: var(--c-panel);
   border-right: 0;
   overflow: hidden;
@@ -178,8 +180,10 @@
 
 .file-tree-body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-width: thin;
 }
 
 .workspace-root {
@@ -314,4 +318,62 @@
   padding: 3px 7px;
   border-radius: 4px;
   outline: none;
+}
+
+/* Hermes-style sidebar scale pass. */
+.file-tree {
+  background: var(--c-panel);
+}
+
+.file-tree-header {
+  min-height: 50px;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.file-tree-title {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.icon-btn {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+}
+
+.file-tree-cwd,
+.lab-status-card {
+  padding: 12px;
+}
+
+.file-tree-cwd-name {
+  font-size: 14px;
+}
+
+.lab-status-title {
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.lab-status-card input,
+.vpn-select-row select {
+  min-height: 32px;
+  border-radius: 7px;
+}
+
+.file-entry {
+  min-height: 26px;
+  margin: 1px 8px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.workspace-root-header {
+  min-height: 32px;
+  padding: 4px 10px;
 }

@@ -24,7 +24,14 @@ func (a *App) ListLedgerEvents(limit int) ([]ledger.Event, error) {
 	if a == nil || a.ledger == nil {
 		return []ledger.Event{}, nil
 	}
-	return a.ledger.List(limit)
+	events, err := a.ledger.List(limit)
+	if err != nil {
+		return nil, err
+	}
+	if events == nil {
+		return []ledger.Event{}, nil
+	}
+	return events, nil
 }
 
 func (a *App) ClearLedgerEvents() error {

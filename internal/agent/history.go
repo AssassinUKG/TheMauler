@@ -96,6 +96,46 @@ type ToolClearStats struct {
 	AfterTokens  int
 }
 
+type MicrocompactStats struct {
+	Compacted    int
+	BeforeTokens int
+	AfterTokens  int
+}
+
+type RepairAction struct {
+	Phase  int
+	Action string
+	Index  int
+	Detail string
+}
+
+func (a RepairAction) String() string {
+	if a.Detail == "" {
+		return fmt.Sprintf("phase=%d action=%s index=%d", a.Phase, a.Action, a.Index)
+	}
+	return fmt.Sprintf("phase=%d action=%s index=%d detail=%s", a.Phase, a.Action, a.Index, a.Detail)
+}
+
+const RepairPlaceholder = "[internal repair: previous empty message omitted; continue the current task.]"
+
+func IsRepairPlaceholder(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	return trimmed == RepairPlaceholder ||
+		strings.Contains(lower, "message content repaired") ||
+		strings.Contains(lower, "internal repair: previous empty message omitted")
+}
+
+func (h *History) RepairStructure() []RepairAction {
+	repaired, actions := RepairMessages(h.messages)
+	if len(actions) == 0 {
+		return nil
+	}
+	h.messages = repaired
+	h.recount()
+	return actions
+}
+
 // ClearOldToolResults replaces stale, re-fetchable tool payloads with compact
 // placeholders while preserving the tool message and call pairing.
 func (h *History) ClearOldToolResults(keepRecent int) ToolClearStats {
@@ -130,6 +170,42 @@ func (h *History) ClearOldToolResults(keepRecent int) ToolClearStats {
 		stats.Cleared++
 	}
 	h.recount()
+	stats.AfterTokens = h.tokenCount
+	return stats
+}
+
+// MicrocompactThinking replaces older assistant thinking blocks with a small
+// marker. This is cheaper than summarizing history and preserves visible task
+// output, tool calls, and tool-result pairing.
+func (h *History) MicrocompactThinking(keepRecentAssistant int) MicrocompactStats {
+	stats := MicrocompactStats{BeforeTokens: h.tokenCount}
+	if keepRecentAssistant < 0 {
+		keepRecentAssistant = 0
+	}
+	assistantIndexes := make([]int, 0)
+	for i, msg := range h.messages {
+		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) == 0 && hasThinkingTrace(messageContentText(msg)) {
+			assistantIndexes = append(assistantIndexes, i)
+		}
+	}
+	compactUntil := len(assistantIndexes) - keepRecentAssistant
+	if compactUntil <= 0 {
+		stats.AfterTokens = h.tokenCount
+		return stats
+	}
+	for _, idx := range assistantIndexes[:compactUntil] {
+		msg := &h.messages[idx]
+		if text, ok := msg.Content.(string); ok {
+			updated := stripThinkingTrace(text)
+			if updated != text {
+				msg.Content = updated
+				stats.Compacted++
+			}
+		}
+	}
+	if stats.Compacted > 0 {
+		h.recount()
+	}
 	stats.AfterTokens = h.tokenCount
 	return stats
 }
@@ -219,12 +295,12 @@ func estimateTokens(m llm.Message) int {
 const evidenceKeepMaxChars = 1200
 
 var evidencePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`~[^~\n]{2,}~`),                     // EXTRACTVALUE/XPath leak markers
-	regexp.MustCompile(`(?i)pass(word|wd)?\s*[:=]`),        // password: / passwd=
-	regexp.MustCompile(`(?i)BEGIN [A-Z0-9 ]*PRIVATE KEY`),  // private keys
-	regexp.MustCompile(`(?i)\b(flag|htb|root|user)\{`),     // CTF/HTB flags
-	regexp.MustCompile(`\b[a-f0-9]{16,64}\b`),              // hash-like hex (md5/sha/ntlm), bounded so it can't match long hex blobs
-	regexp.MustCompile(`(?i)uid=\d+\([^)]+\)\s+gid=`),      // id(1) output
+	regexp.MustCompile(`~[^~\n]{2,}~`),                    // EXTRACTVALUE/XPath leak markers
+	regexp.MustCompile(`(?i)pass(word|wd)?\s*[:=]`),       // password: / passwd=
+	regexp.MustCompile(`(?i)BEGIN [A-Z0-9 ]*PRIVATE KEY`), // private keys
+	regexp.MustCompile(`(?i)\b(flag|htb|root|user)\{`),    // CTF/HTB flags
+	regexp.MustCompile(`\b[a-f0-9]{16,64}\b`),             // hash-like hex (md5/sha/ntlm), bounded so it can't match long hex blobs
+	regexp.MustCompile(`(?i)uid=\d+\([^)]+\)\s+gid=`),     // id(1) output
 	regexp.MustCompile(`(?i)(api[_-]?key|secret|token)\s*[:=]\s*\S`),
 }
 
@@ -277,46 +353,159 @@ func messageContentText(msg llm.Message) string {
 	}
 }
 
+func hasThinkingTrace(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "<think>") && strings.Contains(lower, "</think>")
+}
+
+func stripThinkingTrace(text string) string {
+	for {
+		lower := strings.ToLower(text)
+		start := strings.Index(lower, "<think>")
+		if start < 0 {
+			return text
+		}
+		end := strings.Index(lower[start:], "</think>")
+		if end < 0 {
+			return text
+		}
+		end += start + len("</think>")
+		text = strings.TrimSpace(text[:start]) + "\n[old thinking trace microcompacted]\n" + strings.TrimSpace(text[end:])
+	}
+}
+
 func sanitizeCompactedMessages(messages []llm.Message) []llm.Message {
-	out := make([]llm.Message, 0, len(messages))
+	repaired, _ := RepairMessages(messages)
+	return repaired
+}
+
+func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
+	valid := make([]llm.Message, 0, len(messages))
+	actions := make([]RepairAction, 0)
+	for i, msg := range messages {
+		if !validRole(msg.Role) {
+			actions = append(actions, RepairAction{Phase: 1, Action: "drop_invalid_role", Index: i, Detail: msg.Role})
+			continue
+		}
+		valid = append(valid, msg)
+	}
+
+	withoutLeadingAssistant := make([]llm.Message, 0, len(valid))
+	seenUser := false
+	for i, msg := range valid {
+		if msg.Role == llm.RoleUser {
+			seenUser = true
+		}
+		if !seenUser && msg.Role == llm.RoleAssistant {
+			actions = append(actions, RepairAction{Phase: 2, Action: "drop_leading_assistant", Index: i})
+			continue
+		}
+		withoutLeadingAssistant = append(withoutLeadingAssistant, msg)
+	}
+
+	merged := make([]llm.Message, 0, len(withoutLeadingAssistant))
+	for i, msg := range withoutLeadingAssistant {
+		if msg.Role == llm.RoleUser && len(merged) > 0 && merged[len(merged)-1].Role == llm.RoleUser {
+			prev := &merged[len(merged)-1]
+			prev.Content = mergeMessageContent(*prev, msg)
+			actions = append(actions, RepairAction{Phase: 3, Action: "merge_consecutive_user", Index: i})
+			continue
+		}
+		merged = append(merged, msg)
+	}
+
+	out := make([]llm.Message, 0, len(merged))
 	pendingToolIDs := map[string]bool{}
-	for _, msg := range messages {
+	for i := 0; i < len(merged); i++ {
+		msg := merged[i]
+		if (msg.Role == llm.RoleAssistant || msg.Role == llm.RoleUser) && isEmptyMessageContent(msg) {
+			msg.Content = RepairPlaceholder
+			actions = append(actions, RepairAction{Phase: 6, Action: "fill_empty_content", Index: i, Detail: msg.Role})
+		}
+		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
+			resultIDs := followingToolResultIDs(merged, i+1)
+			kept := make([]llm.ToolCallDef, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				if tc.ID != "" && resultIDs[tc.ID] {
+					kept = append(kept, tc)
+					continue
+				}
+				actions = append(actions, RepairAction{Phase: 4, Action: "strip_unmatched_tool_call", Index: i, Detail: firstNonEmpty(tc.ID, tc.Function.Name)})
+			}
+			if len(kept) == 0 {
+				msg.ToolCalls = nil
+				if messageContentText(msg) == RepairPlaceholder {
+					msg.Content = "[Tool calls were removed because their results are unavailable.]"
+				}
+			} else {
+				msg.ToolCalls = kept
+			}
+			pendingToolIDs = map[string]bool{}
+			for _, tc := range msg.ToolCalls {
+				pendingToolIDs[tc.ID] = true
+			}
+			out = append(out, msg)
+			continue
+		}
 		if msg.Role == llm.RoleTool {
-			if msg.ToolCallID != "" && !pendingToolIDs[msg.ToolCallID] {
+			if msg.ToolCallID == "" || !pendingToolIDs[msg.ToolCallID] {
+				actions = append(actions, RepairAction{Phase: 5, Action: "drop_orphaned_tool_result", Index: i, Detail: msg.ToolCallID})
 				continue
 			}
 			out = append(out, msg)
 			delete(pendingToolIDs, msg.ToolCallID)
 			continue
 		}
-		if len(pendingToolIDs) > 0 && len(out) > 0 {
-			last := &out[len(out)-1]
-			if last.Role == llm.RoleAssistant && len(last.ToolCalls) > 0 {
-				last.ToolCalls = nil
-				if text, ok := last.Content.(string); ok && text == "" {
-					last.Content = "[Tool calls were compacted; results are unavailable.]"
-				}
-			}
-			pendingToolIDs = map[string]bool{}
-		}
-		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
-			pendingToolIDs = map[string]bool{}
-			for _, tc := range msg.ToolCalls {
-				if tc.ID != "" {
-					pendingToolIDs[tc.ID] = true
-				}
-			}
-		}
+		pendingToolIDs = map[string]bool{}
 		out = append(out, msg)
 	}
-	if len(pendingToolIDs) > 0 && len(out) > 0 {
-		last := &out[len(out)-1]
-		if last.Role == llm.RoleAssistant && len(last.ToolCalls) > 0 {
-			last.ToolCalls = nil
-			if text, ok := last.Content.(string); ok && text == "" {
-				last.Content = "[Tool calls were compacted; results are unavailable.]"
-			}
+	return out, actions
+}
+
+func validRole(role string) bool {
+	switch role {
+	case llm.RoleSystem, llm.RoleUser, llm.RoleAssistant, llm.RoleTool:
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeMessageContent(a, b llm.Message) string {
+	left := strings.TrimSpace(messageContentText(a))
+	right := strings.TrimSpace(messageContentText(b))
+	if left == "" {
+		return right
+	}
+	if right == "" {
+		return left
+	}
+	return left + "\n" + right
+}
+
+func isEmptyMessageContent(msg llm.Message) bool {
+	return strings.TrimSpace(messageContentText(msg)) == ""
+}
+
+func followingToolResultIDs(messages []llm.Message, start int) map[string]bool {
+	ids := map[string]bool{}
+	for i := start; i < len(messages); i++ {
+		msg := messages[i]
+		if msg.Role != llm.RoleTool {
+			break
+		}
+		if msg.ToolCallID != "" {
+			ids[msg.ToolCallID] = true
 		}
 	}
-	return out
+	return ids
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return "-"
 }

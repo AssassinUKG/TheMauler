@@ -136,6 +136,37 @@ func TestOpenAICompatBuildBodySerializesToolCallArgumentsAsString(t *testing.T) 
 	}
 }
 
+func TestOpenAICompatBuildBodyIncludesJSONSchemaResponseFormat(t *testing.T) {
+	client := newOpenAICompat("llamacpp", "http://example.test/v1", "gemma-local", 32768, "", true)
+	bodyBytes, err := client.buildBody(llm.Request{
+		Messages:   []llm.Message{llm.NewTextMessage(llm.RoleUser, "call read_file")},
+		ToolChoice: "required",
+		Tools: []llm.ToolDef{{
+			Type: "function",
+			Function: llm.ToolFunctionDef{
+				Name:       "read_file",
+				Parameters: json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}`),
+			},
+		}},
+		JSONSchema: json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &got); err != nil {
+		t.Fatal(err)
+	}
+	format, ok := got["response_format"].(map[string]interface{})
+	if !ok || format["type"] != "json_schema" {
+		t.Fatalf("response_format json_schema missing: %#v", got["response_format"])
+	}
+	schema, ok := format["json_schema"].(map[string]interface{})
+	if !ok || schema["schema"] == nil {
+		t.Fatalf("json_schema.schema missing: %#v", format)
+	}
+}
+
 func TestLMStudioLoadModelSendsContextLengthToNativeLoadEndpoint(t *testing.T) {
 	var path string
 	var auth string
@@ -209,6 +240,27 @@ func TestLlamaCppLoadModelSendsContextSizeToNativeLoadEndpoint(t *testing.T) {
 	assertJSONNumber(t, body, "context_size", 32768)
 	if body["echo_load_config"] != true {
 		t.Fatalf("echo_load_config = %v, want true", body["echo_load_config"])
+	}
+}
+
+func TestLlamaCppForceLoadModelSendsForceReload(t *testing.T) {
+	var body map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"loaded","load_config":{"context_length":16384}}`))
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("llamacpp", server.URL+"/v1", "Qwen3.6-35B.gguf", 16384, "", true)
+	if err := client.ForceLoadModel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONNumber(t, body, "context_size", 16384)
+	if body["force_reload"] != true {
+		t.Fatalf("force_reload = %v, want true", body["force_reload"])
 	}
 }
 
@@ -611,5 +663,31 @@ func assertJSONNumber(t *testing.T, m map[string]interface{}, key string, want f
 	}
 	if got != want {
 		t.Fatalf("%s = %v, want %v", key, got, want)
+	}
+}
+
+func TestOpenAICompatBuildBodyCarriesGrammar(t *testing.T) {
+	client := newOpenAICompat("llamacpp", "http://example.test/v1", "gemma-local", 32768, "", true)
+	// with grammar set
+	bodyBytes, err := client.buildBody(llm.Request{
+		Messages: []llm.Message{llm.NewTextMessage(llm.RoleUser, "hi")},
+		Grammar:  `root ::= "x"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["grammar"] != `root ::= "x"` {
+		t.Fatalf("grammar not carried: %v", got["grammar"])
+	}
+	// omitted when empty
+	bodyBytes, _ = client.buildBody(llm.Request{Messages: []llm.Message{llm.NewTextMessage(llm.RoleUser, "hi")}})
+	got = map[string]interface{}{}
+	_ = json.Unmarshal(bodyBytes, &got)
+	if _, ok := got["grammar"]; ok {
+		t.Fatalf("grammar should be omitted when empty, got %v", got["grammar"])
 	}
 }

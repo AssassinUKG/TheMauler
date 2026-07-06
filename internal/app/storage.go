@@ -31,6 +31,7 @@ func (a *App) ListStorageItems() ([]StorageItem, error) {
 	stateDB, _ := store.DefaultPath()
 	ledgerPath, _ := ledger.DefaultPath()
 	benchPath, _ := benchmarkRunsPath()
+	evalPath, _ := agentEvalReportsPath()
 	taskPath, _ := taskRunsPath()
 	memPath, _ := memoryPath()
 	sessDir, _ := sessionsDir()
@@ -40,6 +41,7 @@ func (a *App) ListStorageItems() ([]StorageItem, error) {
 		storageItem("config", "Config directory", configDir, "folder", false, "Settings, profiles, memory, logs, caches, and app state."),
 		storageItem("state_db", "SQLite state database", stateDB, "database", false, "Session recall, task logs, ledger mirror, todos, memory, learning decisions, and checkpoints."),
 		storageItem("benchmark_runs", "Benchmark history", benchPath, "file", true, "Saved model benchmark and context-sweep results."),
+		storageItem("agent_eval_runs", "Agent eval history", evalPath, "file", true, "Saved pass/fail agent capability suite reports."),
 		storageItem("task_runs", "Legacy task-run JSON", taskPath, "file", true, "Older task-run log file kept for migration/backward compatibility."),
 		storageItem("ledger", "RunLedger JSONL", ledgerPath, "file", true, "Canonical append-only event stream used by Brain and diagnostics."),
 		storageItem("sessions", "Saved chat sessions", sessDir, "folder", false, "Saved chat transcripts; session recall index can be cleared separately."),
@@ -55,6 +57,8 @@ func (a *App) ClearStorageItem(id string) error {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case "benchmark_runs":
 		return a.ClearBenchmarkRuns()
+	case "agent_eval_runs":
+		return a.ClearAgentEvalReports()
 	case "task_runs":
 		return a.ClearTaskRuns()
 	case "ledger":

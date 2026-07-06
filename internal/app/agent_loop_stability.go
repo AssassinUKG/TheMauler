@@ -14,9 +14,10 @@ import (
 // arguments returns the same data, so a second (or third) identical call is a
 // sign the model is spinning rather than making progress. fetch_url and the
 // shell tools have their own dedicated detectors (duplicateFetchURLSkip and the
-// repeatedShell*Block family); write_file/edit_file are excluded because they
+// repeatedShell*Block family); write/edit are excluded because they
 // legitimately re-target the same path.
 var idempotentReadTools = map[string]bool{
+	"read":      true,
 	"read_file": true,
 	"read_many": true,
 	"read_pdf":  true,
@@ -36,6 +37,9 @@ func canonicalToolArgs(raw json.RawMessage) string {
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return trimmed
+	}
+	if command, ok := obj["command"].(string); ok {
+		obj["command"] = normalizeShellCommandForDedup(command)
 	}
 	// encoding/json marshals map keys in sorted order, giving a canonical form.
 	canon, err := json.Marshal(obj)
@@ -63,10 +67,8 @@ func idempotentReadKey(name string, raw json.RawMessage) string {
 // repeatedIdenticalReadBlock fires when an idempotent read-only tool is about to
 // run with arguments byte-identical to two or more prior successful calls this
 // run. Re-reading the same file or re-running the same glob/grep a third time
-// cannot yield new information, so it nudges the model to use what it already
-// has. It is registered as a *soft* rule: the first hit only skips the call, and
-// the run stops only if the model ignores the nudge and issues the exact same
-// call yet again (see repeatedPreToolRecoveryIgnored).
+// cannot yield new information, so it returns cached evidence and nudges the
+// model to use what it already has instead of stopping the run.
 //
 // The threshold is two prior calls (so the block lands on the third), not one:
 // a single legitimate re-read is common after context compaction drops an older
@@ -78,6 +80,7 @@ func repeatedIdenticalReadBlock(run TaskRun, tc llm.ToolCallDef) string {
 		return ""
 	}
 	matches := 0
+	cached := ""
 	for i := len(run.Tools) - 1; i >= 0; i-- {
 		tool := run.Tools[i]
 		if tool.Name != tc.Function.Name {
@@ -88,12 +91,18 @@ func repeatedIdenticalReadBlock(run TaskRun, tc llm.ToolCallDef) string {
 		}
 		if strings.EqualFold(strings.TrimSpace(tool.Status), "done") {
 			matches++
+			if cached == "" {
+				cached = strings.TrimSpace(truncateRunes(tool.Result, 1200))
+			}
 		}
 	}
 	if matches < 2 {
 		return ""
 	}
-	return fmt.Sprintf("%s skipped: this exact call (same arguments) already ran %d times this run with the same result. Re-running it cannot produce new information — use the output you already have, change the arguments, or move on to the next step.", tc.Function.Name, matches)
+	if cached != "" {
+		return fmt.Sprintf("%s cache hit: this exact call (same arguments) already ran %d times this run with the same result. Re-running it cannot produce new information - use the cached output below, change the arguments, or move on to the next step.\nCached result preview:\n%s", tc.Function.Name, matches, cached)
+	}
+	return fmt.Sprintf("%s cache hit: this exact call (same arguments) already ran %d times this run with the same result. Re-running it cannot produce new information - use the output you already have, change the arguments, or move on to the next step.", tc.Function.Name, matches)
 }
 
 // modelParamBillionsRE matches a parameter-count token like "27b", "8b", or the

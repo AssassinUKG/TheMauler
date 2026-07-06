@@ -23,7 +23,8 @@ export function MemoryPage({ version }: { version: number }) {
   const [recallStatus, setRecallStatus] = useState('')
 
   const load = async () => {
-    const entries = await ListMemory().catch(() => [] as MemoryEntry[])
+    const loaded = await ListMemory().catch(() => [] as MemoryEntry[])
+    const entries = Array.isArray(loaded) ? loaded : []
     setMemory(entries)
     setSelectedId(prev => prev && entries.some(item => item.id === prev) ? prev : entries[0]?.id ?? '')
   }
@@ -88,7 +89,8 @@ export function MemoryPage({ version }: { version: number }) {
     if (!q) return
     setRecallStatus('searching')
     try {
-      const results = await SearchSessionRecall(q, 20)
+      const loaded = await SearchSessionRecall(q, 20)
+      const results = Array.isArray(loaded) ? loaded : []
       setRecallResults(results)
       setRecallStatus(results.length === 0 ? 'no matches' : `${results.length} match${results.length === 1 ? '' : 'es'}`)
     } catch (e) {

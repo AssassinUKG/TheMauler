@@ -210,6 +210,32 @@
   line-height: 1.4;
 }
 
+.agent-eval-dimensions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.agent-eval-dimensions span {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--c-card);
+}
+
+.agent-eval-dimensions span.ok {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+}
+
+.agent-eval-dimensions span.warn {
+  color: var(--yellow);
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+}
+
 .agent-eval-fail {
   color: var(--yellow);
 }

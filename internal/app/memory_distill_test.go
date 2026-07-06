@@ -109,7 +109,7 @@ func TestAutoDistillLearningsCapturesCommandStorm(t *testing.T) {
 	// A storm of near-identical extraction requests against one endpoint.
 	for i := 0; i < shellStormThreshold+2; i++ {
 		args, _ := json.Marshal(map[string]string{"command": "curl -s http://connected.htb/admin/ajax.php?p=" + strings.Repeat("a", i)})
-		run.Tools = append(run.Tools, TaskToolEvent{Name: "bash", Input: string(args), Status: "done"})
+		run.Tools = append(run.Tools, TaskToolEvent{Name: "shell", Input: string(args), Status: "done"})
 	}
 	app.autoDistillLearnings(&run, app.cfg.Memory)
 	entries, _ := loadMemory()

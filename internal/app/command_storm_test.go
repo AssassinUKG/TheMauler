@@ -10,12 +10,12 @@ import (
 
 func shellTC(cmd string) llm.ToolCallDef {
 	args, _ := json.Marshal(map[string]string{"command": cmd})
-	return llm.ToolCallDef{Function: llm.FunctionCall{Name: "bash", Arguments: args}}
+	return llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: args}}
 }
 
 func shellToolEvent(cmd string) TaskToolEvent {
 	args, _ := json.Marshal(map[string]string{"command": cmd})
-	return TaskToolEvent{Name: "bash", Input: string(args), Status: "done"}
+	return TaskToolEvent{Name: "shell", Input: string(args), Status: "done"}
 }
 
 func TestShellCommandFamilyGroupsByEndpoint(t *testing.T) {
@@ -51,12 +51,36 @@ func TestShellCommandStormHintFiresAtThreshold(t *testing.T) {
 	if h == "" || !strings.Contains(h, "similar") {
 		t.Fatalf("expected storm hint at threshold, got %q", h)
 	}
+	if !strings.Contains(h, "save it once with curl") || !strings.Contains(h, "inspect the saved file locally") {
+		t.Fatalf("storm hint should steer curl loops to saved artifacts, got %q", h)
+	}
+}
+
+func TestCurlFilterRecoveryHintSavesResponseBeforeInspecting(t *testing.T) {
+	h := commandSpecificRecoveryHint(`curl -sk "http://connected.htb/admin/config.php?display=epm_advanced" 2>&1 | grep -iE "fwbrand|endpoint"`)
+	for _, want := range []string{"curl capture hint", "save the full HTTP response to a file", "inspect the saved file"} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("curl recovery hint missing %q: %q", want, h)
+		}
+	}
+}
+
+func TestMissingPathShellRecoveryAnchorsWorkspace(t *testing.T) {
+	result := appendShellCommandRecoveryHints("ls: cannot access '/root/HTB_writeups/scripts/': No such file or directory\n[wsl exit 2, 100ms]", "ls /root/HTB_writeups/scripts/")
+	for _, want := range []string{"Workspace path hint", "Do not retry guessed absolute paths", "find . -maxdepth 3"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("missing path recovery hint lacks %q:\n%s", want, result)
+		}
+	}
+	if strings.Contains(result, "Use /root/HTB_writeups") {
+		t.Fatalf("hint should not reinforce the bad /root path:\n%s", result)
+	}
 }
 
 func TestShellCommandStormHintPointsAtWrittenScript(t *testing.T) {
 	run := startTaskRun("x", "Ops", "default", "model")
 	wargs, _ := json.Marshal(map[string]string{"path": "/tmp/scripts/freepbx_cve.py", "content": "..."})
-	run.Tools = append(run.Tools, TaskToolEvent{Name: "write_file", Input: string(wargs), Status: "done"})
+	run.Tools = append(run.Tools, TaskToolEvent{Name: "write", Input: string(wargs), Status: "done"})
 	for i := 0; i < shellStormThreshold-1; i++ {
 		run.Tools = append(run.Tools, shellToolEvent("curl -s http://connected.htb/admin/ajax.php?p="+strings.Repeat("a", i)))
 	}

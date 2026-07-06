@@ -30,6 +30,9 @@ func TestOpenRunsMigrationsAndSetsUserVersion(t *testing.T) {
 		"todos",
 		"memory_entries", "memory_tags",
 		"learning_decisions",
+		"run_checkpoints",
+		"channel_work_queue",
+		"app_state",
 	} {
 		var name string
 		if err := db.QueryRow(`select name from sqlite_schema where name = ?`, table).Scan(&name); err != nil {

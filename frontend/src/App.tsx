@@ -1,14 +1,18 @@
 import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { EventsOn } from './wailsjs/runtime'
 import { FileTree } from './components/FileTree'
+import { HermesSidebar } from './components/HermesSidebar'
 import { ChatPane } from './components/ChatPane'
 import { FileViewer, type OpenFile } from './components/FileViewer'
 import { AgentPanel } from './components/AgentPanel'
+import { RightInspector } from './components/RightInspector'
 import { LogsPage } from './components/LogsPage'
 import { MemoryPage } from './components/MemoryPage'
 import { BenchmarkPage } from './components/BenchmarkPage'
 import { LiveOpsPage } from './components/LiveOpsPage'
 import { BrainPage } from './components/BrainPage'
+import { ProjectsPage } from './components/ProjectsPage'
+import { TelegramPage } from './components/TelegramPage'
 import { StatusBar } from './components/StatusBar'
 import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -26,13 +30,12 @@ import {
   SaveSession,
   SetAutoAgents,
   SetAutonomous,
-  SwitchProfile,
   GetAutoAgents,
   GetAutonomous,
   GetAgentMode,
-  GetProfileNames,
   GetSettings,
   GetHistoryStats,
+  ListTodos,
   SendMessage,
   UpdateSettings,
   type ChatAttachment,
@@ -41,6 +44,7 @@ import {
   type ChatRole,
   type SessionChatMessage,
   type SkillSuggestion,
+  type TodoItem,
 } from './wailsjs/go'
 import './App.css'
 
@@ -82,6 +86,31 @@ function toolTimeoutFromInput(input: string): number {
     return 0
   }
   return 0
+}
+
+function isPlanTool(name: string): boolean {
+  return name.startsWith('todo_')
+}
+
+function cleanAssistantTranscriptText(text: string): string {
+  let next = stripVisibleThinkTags(text).trim()
+  if (next === '*' || next === '.' || next === '-' || next === '...') return ''
+  if (next.length < 4) return ''
+  return next
+}
+
+function stripVisibleThinkTags(text: string): string {
+  let next = text || ''
+  while (true) {
+    const lower = next.toLowerCase()
+    const start = lower.indexOf('<think')
+    if (start < 0) return next
+    const tagEnd = lower.indexOf('>', start)
+    if (tagEnd < 0) return next.slice(0, start).trim()
+    const close = lower.indexOf('</think>', tagEnd + 1)
+    if (close < 0) return next.slice(0, start).trim()
+    next = `${next.slice(0, start).trim()}\n${next.slice(close + '</think>'.length).trim()}`
+  }
 }
 
 export interface ChatMessage {
@@ -148,25 +177,6 @@ export interface BackgroundJob {
   updated_at_unix?: number
 }
 
-function parseToolInput(input: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(input)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
-  } catch {
-    return null
-  }
-}
-
-function isBackgroundJobToolInput(input: string): boolean {
-  const parsed = parseToolInput(input)
-  return Boolean(parsed && (typeof parsed.job === 'string' || parsed.background === true))
-}
-
-function isBackgroundJobToolResult(result: string): boolean {
-  const text = result.trim()
-  return /^Started background job\s+j\d+:/i.test(text) || /\[background job\s+j\d+:/i.test(text)
-}
-
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
@@ -179,11 +189,10 @@ export default function App() {
   const [statsVersion, setStatsVersion] = useState(0)
   const [sessions, setSessions] = useState<string[]>([])
   const [selectedSession, setSelectedSession] = useState('')
-  const [profileNames, setProfileNames] = useState<string[]>([])
   const [activeProfile, setActiveProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'file' | 'logs' | 'memory' | 'brain' | 'benchmarks'>('chat')
+  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks'>('chat')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
   const [artifactOutput, setArtifactOutput] = useState('')
@@ -219,28 +228,37 @@ export default function App() {
   const pendingInterruptRef = useRef<{ text: string; images: string[]; attachments: ChatAttachment[] } | null>(null)
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
-  const [leftWidth, setLeftWidth] = useState(240)
-  const [rightWidth, setRightWidth] = useState(300)
+  const [leftWidth, setLeftWidth] = useState(300)
+  const [rightWidth, setRightWidth] = useState(460)
   const [thinkingBuffer, setThinkingBuffer] = useState('')
   const pendingThinkingRef = useRef('')
   const [showTerminal, setShowTerminal] = useState(false)
   const [terminalHeight, setTerminalHeight] = useState(220)
   const [bottomTab, setBottomTab] = useState<'terminal' | 'stream' | 'jobs'>('terminal')
   const [skillSuggestion, setSkillSuggestion] = useState<SkillSuggestion | null>(null)
+  const [workspaceVersion, setWorkspaceVersion] = useState(0)
   const [toolCountdown, setToolCountdown] = useState<ToolCountdown | null>(null)
   const [showToolCountdown, setShowToolCountdown] = useState(false)
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([])
+  const [todos, setTodos] = useState<TodoItem[]>([])
+
+  const refreshTodos = useCallback(() => {
+    void ListTodos().then(setTodos).catch(() => setTodos([]))
+  }, [])
 
   useEffect(() => {
     const offs = [
       EventsOn('mauler:stream_start', () => {
         setStreaming(true)
-        setShowTerminal(true)
-        setBottomTab('stream')
         setRunStartedAt(Date.now())
         setRunState({ state: 'starting', detail: 'Preparing request' })
         setStreamBuffer('')
         setThinkingBuffer('')
+        setShowTerminal(true)
+        setTerminalHeight(prev => {
+          const focusHeight = Math.min(520, Math.max(340, Math.round(window.innerHeight * 0.42)))
+          return Math.max(prev, focusHeight)
+        })
         pendingThinkingRef.current = ''
       }),
       EventsOn('mauler:budget_updated', () => {
@@ -269,16 +287,19 @@ export default function App() {
         setStreaming(false)
         setToolCountdown(null)
         setStreamBuffer(prev => {
-          if (prev.trim()) {
+          const visible = cleanAssistantTranscriptText(prev)
+          if (visible) {
             const thinking = pendingThinkingRef.current || undefined
             pendingThinkingRef.current = ''
             setMessages(m => [...m, {
               id: crypto.randomUUID(),
               role: 'assistant',
-              content: prev,
+              content: visible,
               thinking,
               timestamp: Date.now(),
             }])
+          } else {
+            pendingThinkingRef.current = ''
           }
           return ''
         })
@@ -335,15 +356,6 @@ export default function App() {
           startTime: Date.now(),
         }
         setActivity(items => [nextItem, ...items].slice(0, 12))
-        const isJobTool = (tc.name === 'shell' || tc.name === 'bash') && isBackgroundJobToolInput(tc.input)
-        if (!isJobTool) {
-          setMessages(m => [...m, {
-            id: crypto.randomUUID(),
-            role: 'tool_call',
-            content: tc.input,
-            timestamp: Date.now(),
-          }])
-        }
         const emittedTimeout = Number(tc.timeout)
         const timeoutSec = Number.isFinite(emittedTimeout) && emittedTimeout > 0
           ? Math.floor(emittedTimeout)
@@ -377,18 +389,10 @@ export default function App() {
           }
           return [nextItem, ...items].slice(0, 12)
         })
-        const isJobResult = (tr.name === 'shell' || tr.name === 'bash') && isBackgroundJobToolResult(tr.result)
-        if (!isJobResult) {
-          setMessages(m => [...m, {
-            id: crypto.randomUUID(),
-            role: 'tool_result',
-            content: tr.result,
-            timestamp: Date.now(),
-          }])
-        }
         setStatsVersion(v => v + 1)
-        if (tr.name.startsWith('todo_')) {
+        if (isPlanTool(tr.name)) {
           setTaskRunVersion(v => v + 1)
+          refreshTodos()
         }
       }),
       EventsOn('mauler:job_update', (...args: unknown[]) => {
@@ -402,12 +406,8 @@ export default function App() {
             .sort((a, b) => (b.updated_at_unix ?? 0) - (a.updated_at_unix ?? 0))
             .slice(0, 20)
         })
-        // Only surface the Jobs tab when a job first appears, so live polls don't
-        // repeatedly yank the user away from the terminal/stream they're watching.
-        if (isNew) {
-          setShowTerminal(true)
-          setBottomTab('jobs')
-        }
+        // Do not auto-switch the bottom panel; users may be watching Terminal.
+        void isNew
       }),
       EventsOn('mauler:confirm', (...args: unknown[]) => {
         setConfirm(args[0] as ConfirmPayload)
@@ -430,6 +430,11 @@ export default function App() {
       }),
       EventsOn('mauler:task_run', () => {
         setTaskRunVersion(v => v + 1)
+        refreshTodos()
+      }),
+      EventsOn('mauler:workspace_changed', () => {
+        setWorkspaceVersion(v => v + 1)
+        setStatsVersion(v => v + 1)
       }),
       EventsOn('mauler:suggest_learning', (...args: unknown[]) => {
         const suggestion = args[0] as SkillSuggestion
@@ -445,7 +450,11 @@ export default function App() {
       }),
     ]
     return () => offs.forEach(off => off())
-  }, [])
+  }, [refreshTodos])
+
+  useEffect(() => {
+    refreshTodos()
+  }, [refreshTodos, taskRunVersion])
 
   const refreshSessions = useCallback(async () => {
     const names = await ListSessions().catch(() => [] as string[])
@@ -458,14 +467,12 @@ export default function App() {
   }, [refreshSessions])
 
   const refreshProfiles = useCallback(async () => {
-    const [names, settings, auto, autoAgentEnabled, mode] = await Promise.all([
-      GetProfileNames().catch(() => [] as string[]),
+    const [settings, auto, autoAgentEnabled, mode] = await Promise.all([
       GetSettings().catch(() => null),
       GetAutonomous().catch(() => false),
       GetAutoAgents().catch(() => true),
       GetAgentMode().catch(() => 'Auto'),
     ])
-    setProfileNames(names)
     if (settings) {
       setActiveProfile(settings.active_profile)
       setShowToolCountdown(settings.ui.tool_countdown ?? false)
@@ -641,13 +648,6 @@ export default function App() {
     })
   }, [])
 
-  const handleSwitchProfile = useCallback(async (name: string) => {
-    if (!name || name === activeProfile) return
-    await SwitchProfile(name)
-    setActiveProfile(name)
-    setStatsVersion(v => v + 1)
-  }, [activeProfile])
-
   const handleToggleAutonomous = useCallback(async (enabled: boolean) => {
     await SetAutonomous(enabled)
     setAutonomousState(enabled)
@@ -731,7 +731,7 @@ export default function App() {
       if (side === 'left') {
         setLeftWidth(Math.min(420, Math.max(180, startLeft + dx)))
       } else {
-        setRightWidth(Math.min(520, Math.max(240, startRight - dx)))
+        setRightWidth(Math.min(680, Math.max(320, startRight - dx)))
       }
     }
     const onUp = () => {
@@ -752,7 +752,7 @@ export default function App() {
           <span className="titlebar-name">TheMauler</span>
         </div>
         <div className="titlebar-actions">
-          <div className="titlebar-group">
+          <div className="titlebar-group titlebar-session-group" aria-label="Session actions">
             <select
               className="session-select"
               value={selectedSession}
@@ -764,16 +764,17 @@ export default function App() {
             </select>
             <button onClick={() => void handleSaveSession()} title="Save session">Save</button>
             <button onClick={() => void handleLoadSession()} disabled={!selectedSession} title="Load session">Load</button>
-            <button onClick={() => void handleDeleteSession()} disabled={!selectedSession} title="Delete session">Del</button>
-            <button className="titlebar-clear-session" onClick={handleClearChat} disabled={streaming} title="Clear current chat/session history">Clear</button>
+            <button onClick={() => void handleDeleteSession()} disabled={!selectedSession} title="Delete saved session">Delete</button>
+            <button className="titlebar-clear-session" onClick={handleClearChat} disabled={streaming} title="Clear current chat transcript">Clear Chat</button>
           </div>
           <div className="titlebar-sep" />
           <div className="titlebar-group">
             <button onClick={() => setLeftOpen(v => !v)} title="Toggle Explorer panel" className={leftOpen ? 'panel-toggle on' : 'panel-toggle'}>Explorer</button>
-            <button onClick={() => setRightOpen(v => !v)} title="Toggle Agent panel" className={rightOpen ? 'panel-toggle on' : 'panel-toggle'}>Agent</button>
+            <button onClick={() => setRightOpen(v => !v)} title="Toggle inspector panel" className={rightOpen ? 'panel-toggle on' : 'panel-toggle'}>Inspector</button>
           </div>
           <div className="titlebar-sep" />
           <button
+            className="titlebar-doctor"
             onClick={() => {
               setRightOpen(true)
               setDoctorRunRequest(v => v + 1)
@@ -801,7 +802,19 @@ export default function App() {
       <div className="workspace" style={{ gridTemplateColumns: gridColumns }}>
         <div className={leftOpen ? 'pane-slot' : 'pane-slot closed'}>
           {leftOpen ? (
-            <FileTree onOpenFile={handleOpenFile} />
+            <HermesSidebar
+              sessions={sessions}
+              selectedSession={selectedSession}
+              activeProfile={activeProfile}
+              centerTab={centerTab}
+              onSelectSession={setSelectedSession}
+              onLoadSession={() => void handleLoadSession()}
+              onSaveSession={() => void handleSaveSession()}
+              onDeleteSession={() => void handleDeleteSession()}
+              onClearChat={handleClearChat}
+              onSelectTab={setCenterTab}
+              onOpenSettings={() => setShowSettings(true)}
+            />
           ) : (
             <button className="collapsed-rail collapsed-rail-left" onClick={() => setLeftOpen(true)} title="Open Explorer">
               <span>Explorer</span>
@@ -818,10 +831,12 @@ export default function App() {
         <main className="center-pane">
           <div className="center-tabs">
             <button className={centerTab === 'chat' ? 'active' : ''} onClick={() => setCenterTab('chat')}>Chat</button>
-            <button className={centerTab === 'ops' ? 'active' : ''} onClick={() => setCenterTab('ops')}>Ops</button>
+            <button className={centerTab === 'ops' ? 'active' : ''} onClick={() => setCenterTab('ops')}>Run</button>
+            <button className={centerTab === 'projects' ? 'active' : ''} onClick={() => setCenterTab('projects')}>Projects</button>
             <button className={centerTab === 'logs' ? 'active' : ''} onClick={() => setCenterTab('logs')}>Logs</button>
             <button className={centerTab === 'memory' ? 'active' : ''} onClick={() => setCenterTab('memory')}>Memory</button>
             <button className={centerTab === 'brain' ? 'active' : ''} onClick={() => setCenterTab('brain')}>Brain</button>
+            <button className={centerTab === 'telegram' ? 'active' : ''} onClick={() => setCenterTab('telegram')}>Telegram</button>
             <button className={centerTab === 'benchmarks' ? 'active' : ''} onClick={() => setCenterTab('benchmarks')}>Benchmarks</button>
             {openFiles.map((f, i) => (
               <span key={`${f.path || f.name}-${i}`} className={`center-file-tab ${centerTab === 'file' && activeFileIdx === i ? 'active' : ''}`}>
@@ -837,19 +852,19 @@ export default function App() {
                 streaming={streaming}
                 streamBuffer={streamBuffer}
                 thinkingBuffer={thinkingBuffer}
-                profiles={profileNames}
                 activeProfile={activeProfile}
                 autonomous={autonomous}
                 pendingInterrupt={pendingInterrupt !== null}
                 toolCountdown={showToolCountdown ? toolCountdown : null}
                 runState={runState}
+                todos={todos}
+                activity={activity}
                 onSubmitMessage={handleSubmitMessage}
                 onCancelPending={handleCancelPending}
                 onCancelTool={handleCancelTool}
                 onStopAgent={() => void StopAgent()}
                 onClearChat={handleClearChat}
                 onArtifact={handleArtifact}
-                onProfileChange={handleSwitchProfile}
                 onAutonomousChange={handleToggleAutonomous}
               />
             ) : centerTab === 'ops' ? (
@@ -862,6 +877,15 @@ export default function App() {
                 statsVersion={statsVersion}
                 taskRunVersion={taskRunVersion}
                 runStartedAt={runStartedAt}
+                onOpenFile={handleOpenFile}
+              />
+            ) : centerTab === 'projects' ? (
+              <ProjectsPage
+                version={statsVersion + workspaceVersion}
+                onProjectChanged={() => {
+                  setWorkspaceVersion(v => v + 1)
+                  setStatsVersion(v => v + 1)
+                }}
               />
             ) : centerTab === 'logs' ? (
               <LogsPage version={taskRunVersion + statsVersion} />
@@ -869,14 +893,24 @@ export default function App() {
               <MemoryPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'brain' ? (
               <BrainPage version={taskRunVersion + statsVersion} />
+            ) : centerTab === 'telegram' ? (
+              <TelegramPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'benchmarks' ? (
               <BenchmarkPage version={statsVersion} onProfilesChanged={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
             ) : (
               <FileViewer
                 file={openFiles[activeFileIdx] ?? null}
+                openFiles={openFiles}
+                activeIndex={activeFileIdx}
                 artifactOutput={artifactOutput}
                 artifactRunning={artifactRunning}
                 onArtifactOutputClear={() => setArtifactOutput('')}
+                onSwitchFile={idx => {
+                  setActiveFileIdx(idx)
+                  setCenterTab('file')
+                }}
+                onCloseFile={closeFile}
+                onClose={() => closeFile(activeFileIdx)}
               />
             )}
           </div>
@@ -886,30 +920,41 @@ export default function App() {
           className={rightOpen ? 'resize-handle resize-handle-right' : 'resize-handle disabled'}
           onMouseDown={rightOpen ? startResize('right') : undefined}
           onDoubleClick={() => setRightOpen(false)}
-          title={rightOpen ? 'Drag to resize, double-click to collapse Agent panel' : undefined}
+          title={rightOpen ? 'Drag to resize, double-click to collapse inspector panel' : undefined}
         />
         <div className={rightOpen ? 'pane-slot' : 'pane-slot closed'}>
           {rightOpen ? (
-            <AgentPanel
-              autonomous={autonomous}
-              autoAgents={autoAgents}
-              activeProfile={activeProfile}
-              streaming={streaming}
-              onAutonomousChange={handleToggleAutonomous}
-              onAutoAgentsChange={handleToggleAutoAgents}
-              onOpenSettings={() => setShowSettings(true)}
-              onClearChat={handleClearChat}
-              onSettingsChanged={() => setStatsVersion(v => v + 1)}
+            <RightInspector
               activity={activity}
-              agentMode={agentMode}
-              doctorRunRequest={doctorRunRequest}
+              runState={runState}
+              streaming={streaming}
               taskRunVersion={taskRunVersion}
-              skillSuggestion={skillSuggestion}
-              onDismissSkillSuggestion={() => setSkillSuggestion(null)}
+              workspaceVersion={workspaceVersion}
+              doctorFocusRequest={doctorRunRequest}
+              workspaceBrowser={<FileTree key={workspaceVersion} onOpenFile={handleOpenFile} />}
+              agentPanel={(
+                <AgentPanel
+                  autonomous={autonomous}
+                  autoAgents={autoAgents}
+                  activeProfile={activeProfile}
+                  streaming={streaming}
+                  onAutonomousChange={handleToggleAutonomous}
+                  onAutoAgentsChange={handleToggleAutoAgents}
+                  onOpenSettings={() => setShowSettings(true)}
+                  onClearChat={handleClearChat}
+                  onSettingsChanged={() => setStatsVersion(v => v + 1)}
+                  activity={activity}
+                  agentMode={agentMode}
+                  doctorRunRequest={doctorRunRequest}
+                  taskRunVersion={taskRunVersion}
+                  skillSuggestion={skillSuggestion}
+                  onDismissSkillSuggestion={() => setSkillSuggestion(null)}
+                />
+              )}
             />
           ) : (
-            <button className="collapsed-rail collapsed-rail-right" onClick={() => setRightOpen(true)} title="Open Agent panel">
-              <span>Agent</span>
+            <button className="collapsed-rail collapsed-rail-right" onClick={() => setRightOpen(true)} title="Open Inspector panel">
+              <span>Inspector</span>
             </button>
           )}
         </div>
@@ -946,7 +991,7 @@ export default function App() {
       )}
       {/* Terminal panel — always mounted so session/output survive toggle */}
       <div
-        className="terminal-panel"
+        className={`terminal-panel ${streaming ? 'terminal-panel-live' : ''}`}
         style={{ height: showTerminal ? terminalHeight : 0, display: showTerminal ? 'flex' : 'none' }}
       >
         <div className="bottom-panel-tabs">
@@ -996,7 +1041,7 @@ export default function App() {
         </div>
       </div>
 
-      <StatusBar statsVersion={statsVersion} runState={runState} />
+      <StatusBar statsVersion={statsVersion} runState={runState} onProfileChanged={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
 
       <ToastContainer
         toasts={toasts}

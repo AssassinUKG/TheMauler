@@ -43,7 +43,13 @@ type subagentTool struct {
 	spec subagentSpec
 }
 
+type taskTool struct {
+	app   *App
+	specs map[string]subagentSpec
+}
+
 type subagentArgs struct {
+	Type           string `json:"type"`
 	Task           string `json:"task"`
 	Context        string `json:"context"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
@@ -51,16 +57,21 @@ type subagentArgs struct {
 }
 
 func (a *App) registerAppTools() {
+	task := &taskTool{app: a, specs: map[string]subagentSpec{}}
 	for _, spec := range subagentSpecs() {
-		a.registry.Register(&subagentTool{app: a, spec: spec})
+		task.specs[subagentTypeName(spec.ToolName)] = spec
 	}
+	a.registry.Register(task)
 	a.registry.Register(&memoryTool{app: a})
 	a.registry.Register(&fileChangesTool{app: a})
 	a.registry.Register(&readToolResultTool{app: a})
+	a.registry.Register(&progressTool{app: a})
+	a.registry.Register(&runScriptTool{app: a})
 	a.registry.Register(&httpProbeTool{app: a})
 	a.registry.Register(&evidenceBundleTool{app: a})
 	a.registry.Register(&terminalSendTool{app: a})
 	a.registry.Register(&terminalReadTool{app: a})
+	a.registry.Register(&startListenerTool{app: a})
 }
 
 func subagentSpecs() []subagentSpec {
@@ -162,6 +173,50 @@ func (t *subagentTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 }
 
 func (t *subagentTool) Destructive() bool { return t.spec.Destructive }
+
+func (t *taskTool) Name() string { return "task" }
+
+func (t *taskTool) Description() string {
+	return "Delegate a bounded sub-task to type explore, research, review, testfix, or summarize; returns a compact report and keeps main context clean."
+}
+
+func (t *taskTool) Schema() json.RawMessage {
+	return json.RawMessage(`{
+		"type":"object",
+		"additionalProperties":false,
+		"properties":{
+			"type":{"type":"string","enum":["explore","research","review","testfix","summarize"],"description":"Subagent type."},
+			"task":{"type":"string","description":"Specific task for the bounded subagent."},
+			"context":{"type":"string","description":"Optional concise context the subagent should consider."},
+			"timeout_seconds":{"type":"integer","minimum":10,"maximum":600,"description":"Optional timeout override within the type's hard cap."},
+			"max_tool_calls":{"type":"integer","minimum":0,"maximum":30,"description":"Optional tool-call budget override within the type's hard cap."}
+		},
+		"required":["type","task"]
+	}`)
+}
+
+func (t *taskTool) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args subagentArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return "", err
+	}
+	typ := strings.ToLower(strings.TrimSpace(args.Type))
+	spec, ok := t.specs[typ]
+	if !ok {
+		return "", fmt.Errorf("task: unknown type %q", args.Type)
+	}
+	args.Task = strings.TrimSpace(args.Task)
+	if args.Task == "" {
+		return "", fmt.Errorf("task is required")
+	}
+	return t.app.runBoundedSubagent(ctx, spec, args)
+}
+
+func (t *taskTool) Destructive() bool { return true }
+
+func subagentTypeName(toolName string) string {
+	return strings.TrimPrefix(strings.TrimSpace(toolName), "subagent_")
+}
 
 func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args subagentArgs) (string, error) {
 	a.mu.Lock()

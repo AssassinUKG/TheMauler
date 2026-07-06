@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeLintFile(t *testing.T, name, content string) string {
@@ -18,7 +20,18 @@ func writeLintFile(t *testing.T, name, content string) string {
 	return path
 }
 
-func findBash() (string, error) { return exec.LookPath("bash") }
+func findBash() (string, error) {
+	p, err := exec.LookPath("bash")
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, p, "-c", "exit 0").CombinedOutput(); err == nil && len(out) == 0 {
+		return p, nil
+	}
+	return "", exec.ErrNotFound
+}
 
 // findPython returns a working python binary path (not the Windows Store stub).
 func findPython() (string, error) {

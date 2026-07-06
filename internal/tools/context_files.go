@@ -17,7 +17,7 @@ func (t *FileOutline) Name() string      { return "file_outline" }
 func (t *FileOutline) Destructive() bool { return false }
 
 func (t *FileOutline) Description() string {
-	return "Return a compact outline of a source or Markdown file without reading the full contents. Use this before reading large files."
+	return "Return a compact outline of a source or Markdown file without reading the full contents. Prefer this before reading large files, then use read_chunks or read_file line ranges for only the needed sections instead of pulling the whole file into context."
 }
 
 func (t *FileOutline) Schema() json.RawMessage {
@@ -104,7 +104,7 @@ func (t *ReadChunks) Name() string      { return "read_chunks" }
 func (t *ReadChunks) Destructive() bool { return false }
 
 func (t *ReadChunks) Description() string {
-	return "Read one bounded chunk of a large file by chunk index. Use file_outline first to choose the right chunk."
+	return "Read one bounded chunk of a large file by chunk index. Use file_outline first to choose the right chunk, especially for logs, saved command output, HTTP probe artifacts, large source files, and documents that would bloat the prompt."
 }
 
 func (t *ReadChunks) Schema() json.RawMessage {

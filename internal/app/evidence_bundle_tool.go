@@ -30,7 +30,7 @@ func (t *evidenceBundleTool) Schema() json.RawMessage {
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "title": {"type": "string", "description": "Short bundle title, e.g. connected.htb FreePBX evidence"},
+    "title": {"type": "string", "description": "Short bundle title, e.g. boxname.htb service evidence"},
     "target": {"type": "string", "description": "Optional target host/IP/name"},
     "paths": {"type": "array", "items": {"type": "string"}, "description": "Files or directories to include. Directories are scanned shallowly for common evidence files."},
     "notes": {"type": "string", "description": "Optional analyst notes or finding summary"},
@@ -105,7 +105,7 @@ func (t *evidenceBundleTool) Run(_ context.Context, raw json.RawMessage) (string
 }
 
 func defaultEvidencePaths() []string {
-	return []string{".mauler_artifacts", "scans", "notes", "loot", "screenshots", "report.md", "Connected.md"}
+	return []string{".mauler_artifacts", "scans", "notes", "loot", "screenshots", "report.md", "writeup.md"}
 }
 
 func collectEvidenceFiles(paths []string, maxFiles, previewBytes int) []evidenceFile {

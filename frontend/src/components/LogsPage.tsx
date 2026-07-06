@@ -16,7 +16,8 @@ export function LogsPage({ version }: { version: number }) {
   const [actionStatus, setActionStatus] = useState('')
 
   const load = async () => {
-    const next = await ListTaskRuns().catch(() => [] as TaskRun[])
+    const loaded = await ListTaskRuns().catch(() => [] as TaskRun[])
+    const next = Array.isArray(loaded) ? loaded : []
     setRuns(next)
     setSelectedId(prev => prev && next.some(run => run.id === prev) ? prev : next[0]?.id ?? '')
   }
@@ -152,6 +153,7 @@ export function LogsPage({ version }: { version: number }) {
 }
 
 function RunDetail({ run }: { run: TaskRun }) {
+  const telemetry = runTelemetry(run)
   return (
     <>
       <section className="logs-detail-hero">
@@ -167,9 +169,28 @@ function RunDetail({ run }: { run: TaskRun }) {
         <Metric label="State" value={run.state || '-'} />
         <Metric label="Duration" value={run.duration_ms != null ? fmtDuration(run.duration_ms) : '-'} />
         <Metric label="Tokens" value={run.total_tokens != null && run.total_tokens > 0 ? run.total_tokens.toLocaleString() : '-'} />
-        <Metric label="Tools" value={`${(run.tools ?? []).length}`} />
-        <Metric label="Compactions" value={`${compactionCount(run)}`} />
+        <Metric label="Avg TTFT" value={telemetry.avgTtftMs == null ? '-' : `${Math.round(telemetry.avgTtftMs)}ms`} />
+        <Metric label="Tok/s" value={telemetry.avgTokensPerSecond == null ? '-' : telemetry.avgTokensPerSecond.toFixed(1)} />
       </section>
+
+      {(telemetry.modelCalls.length > 0 || telemetry.promptBudgets.length > 0 || telemetry.latestLoopMetrics) && (
+        <section className="logs-section">
+          <h2>Inference Tuning</h2>
+          <div className="logs-telemetry-summary">
+            <Metric label="Model Calls" value={`${telemetry.modelCalls.length}`} />
+            <Metric label="Prompt Warnings" value={`${telemetry.promptWarnings}`} />
+            <Metric label="Prompt Hashes" value={`${telemetry.uniquePromptHashes}`} />
+            <Metric label="Tool Hashes" value={`${telemetry.uniqueToolSchemaHashes}`} />
+            <Metric label="Tools" value={`${(run.tools ?? []).length}`} />
+            <Metric label="Compactions" value={`${compactionCount(run)}`} />
+          </div>
+          <div className="logs-telemetry-cards">
+            {telemetry.latestLoopMetrics && <RunTelemetryCard event={telemetry.latestLoopMetrics} />}
+            {telemetry.latestModelCall && <RunTelemetryCard event={telemetry.latestModelCall} />}
+            {telemetry.latestPromptBudget && <RunTelemetryCard event={telemetry.latestPromptBudget} />}
+          </div>
+        </section>
+      )}
 
       <LogSection title="Prompt" body={run.prompt} />
       {run.response && <LogSection title="Full Response" body={run.response} />}
@@ -185,9 +206,10 @@ function RunDetail({ run }: { run: TaskRun }) {
               <details key={`${run.id}-event-${index}`} className="logs-event compact">
                 <summary>
                   <span className={`logs-status ${eventStatusClass(event.kind)}`}>{event.kind}</span>
-                  <span>{event.message}</span>
+                  <span>{timelineSummary(event)}</span>
                   <time>{new Date(event.timestamp).toLocaleTimeString()}</time>
                 </summary>
+                {(['model_call', 'prompt_budget', 'loop_metrics'].includes(event.kind)) && <RunTelemetryCard event={event} />}
                 {event.detail && <pre>{event.detail}</pre>}
               </details>
             ))}
@@ -215,6 +237,87 @@ function RunDetail({ run }: { run: TaskRun }) {
       )}
     </>
   )
+}
+
+function RunTelemetryCard({ event }: { event: { kind: string; message: string; detail?: string } }) {
+  const data = parseKV(event.detail || '')
+  if (event.kind === 'loop_metrics') {
+    const metrics = { ...parseJSONRecord(event.detail || ''), ...data }
+    const score = num(metrics.stability_score)
+    const tone = Number.isFinite(score) && score < 70 ? 'warn' : ''
+    return (
+      <div className={`logs-telemetry-card ${tone}`}>
+        <div className="logs-telemetry-head">
+          <strong>Run Stability</strong>
+          <span>{Number.isFinite(score) ? `${Math.round(score)}/100` : 'n/a'}</span>
+        </div>
+        <div className="logs-telemetry-grid">
+          <MiniMetric label="Tools" value={fmtInt(metrics.tool_calls)} />
+          <MiniMetric label="Errors" value={fmtInt(metrics.tool_errors)} />
+          <MiniMetric label="Repeats" value={fmtInt(metrics.repeated_tool_inputs)} />
+          <MiniMetric label="Skipped" value={fmtInt(metrics.repeated_skips)} />
+          <MiniMetric label="Verifiers" value={fmtInt(metrics.verifier_prompts)} />
+          <MiniMetric label="Max Tools" value={fmtInt(metrics.max_routed_tools)} />
+          <MiniMetric label="Prompt Warn" value={fmtInt(metrics.prompt_warnings)} />
+          <MiniMetric label="Stop" value={metrics.stop_reason || '-'} />
+        </div>
+      </div>
+    )
+  }
+  if (event.kind === 'model_call') {
+    return (
+      <div className="logs-telemetry-card">
+        <div className="logs-telemetry-head">
+          <strong>Model Call</strong>
+          <span>{data.status || 'ok'}</span>
+        </div>
+        <div className="logs-telemetry-grid">
+          <MiniMetric label="TTFT" value={fmtMaybeMs(data.ttft_ms)} />
+          <MiniMetric label="Duration" value={fmtMaybeMs(data.duration_ms)} />
+          <MiniMetric label="Tok/s" value={fmtMaybeFloat(data.tokens_per_second)} />
+          <MiniMetric label="Tool Choice" value={data.tool_choice || '-'} />
+          <MiniMetric label="Tools" value={data.tools || data.tool_count || '0'} />
+          <MiniMetric label="Model Load" value={data.model_load || '-'} />
+          <MiniMetric label="Prompt Hash" value={data.prompt_hash || '-'} />
+          <MiniMetric label="Tool Hash" value={data.tool_schema_hash || '-'} />
+        </div>
+      </div>
+    )
+  }
+  const promptWarn = data.over_20_pct === 'true' || data.over_system_target === 'true' || data.over_tool_target === 'true' || data.over_tool_schema_target === 'true' || event.message.toLowerCase().includes('over target') || event.message.toLowerCase().includes('exceeds')
+  return (
+    <div className={`logs-telemetry-card ${promptWarn ? 'warn' : ''}`}>
+      <div className="logs-telemetry-head">
+        <strong>Prompt Budget</strong>
+        <span>{promptWarn ? 'over target' : 'ok'}</span>
+      </div>
+      <div className="logs-telemetry-grid">
+        <MiniMetric label="Estimated" value={fmtInt(data.estimated_total_tokens || data.estimated_tokens)} />
+        <MiniMetric label="System" value={targetValue(data.system_tokens, data.system_target || data.system_target_tokens)} />
+        <MiniMetric label="Tools" value={targetValue(data.tool_schema_tokens, data.tool_schema_target || data.tool_schema_target_tokens)} />
+        <MiniMetric label="Conversation" value={fmtInt(data.conversation_tokens)} />
+        <MiniMetric label="System+Tools" value={fmtPct(data.system_plus_tools_pct || data.system_pct)} />
+        <MiniMetric label="Context" value={fmtInt(data.context_window)} />
+        <MiniMetric label="Prompt Hash" value={data.prompt_hash || '-'} />
+        <MiniMetric label="Tool Hash" value={data.tool_schema_hash || '-'} />
+      </div>
+    </div>
+  )
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="logs-mini-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function targetValue(value?: string, target?: string) {
+  const base = fmtInt(value)
+  const cap = fmtInt(target)
+  return target ? `${base} / ${cap}` : base
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -258,4 +361,96 @@ function eventStatusClass(kind: string): string {
 
 function compactionCount(run: TaskRun): number {
   return (run.events ?? []).filter(event => event.kind === 'compaction').length
+}
+
+function runTelemetry(run: TaskRun) {
+  const modelCalls = (run.events ?? []).filter(event => event.kind === 'model_call')
+  const promptBudgets = (run.events ?? []).filter(event => event.kind === 'prompt_budget')
+  const loopMetrics = (run.events ?? []).filter(event => event.kind === 'loop_metrics')
+  const ttfts = modelCalls.map(event => num(parseKV(event.detail || '').ttft_ms)).filter(isFiniteNumber)
+  const tps = modelCalls.map(event => num(parseKV(event.detail || '').tokens_per_second)).filter(value => isFiniteNumber(value) && value > 0)
+  const promptHashes = new Set(modelCalls.map(event => parseKV(event.detail || '').prompt_hash).filter(Boolean))
+  const toolHashes = new Set(modelCalls.map(event => parseKV(event.detail || '').tool_schema_hash).filter(Boolean))
+  return {
+    modelCalls,
+    promptBudgets,
+    latestModelCall: modelCalls[modelCalls.length - 1],
+    latestPromptBudget: promptBudgets[promptBudgets.length - 1],
+    latestLoopMetrics: loopMetrics[loopMetrics.length - 1],
+    avgTtftMs: average(ttfts),
+    avgTokensPerSecond: average(tps),
+    promptWarnings: promptBudgets.filter(event => event.message.toLowerCase().includes('exceeds') || parseKV(event.detail || '').over_20_pct === 'true').length,
+    uniquePromptHashes: promptHashes.size,
+    uniqueToolSchemaHashes: toolHashes.size,
+  }
+}
+
+function timelineSummary(event: { kind: string; message: string; detail?: string }) {
+  const data = parseKV(event.detail || '')
+  if (event.kind === 'model_call') {
+    return `TTFT ${fmtMaybeMs(data.ttft_ms)} / ${fmtMaybeFloat(data.tokens_per_second)} tok/s / tools ${data.tools || data.tool_count || '0'}`
+  }
+  if (event.kind === 'prompt_budget') {
+    return `${event.message}: ${fmtInt(data.estimated_total_tokens || data.estimated_tokens)} est tok / system+tools ${fmtPct(data.system_plus_tools_pct || data.system_pct)}`
+  }
+  if (event.kind === 'loop_metrics') {
+    const metrics = { ...parseJSONRecord(event.detail || ''), ...data }
+    return `stability ${metrics.stability_score || '-'} / repeats ${metrics.repeated_tool_inputs || '0'} / errors ${metrics.tool_errors || '0'} / max tools ${metrics.max_routed_tools || '-'}`
+  }
+  return event.message
+}
+
+function parseKV(detail: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const line of detail.split(/\r?\n/)) {
+    const idx = line.indexOf('=')
+    if (idx <= 0) continue
+    out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
+  }
+  return out
+}
+
+function parseJSONRecord(detail: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(detail) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value)]))
+  } catch {
+    return {}
+  }
+}
+
+function num(value?: string) {
+  if (!value) return NaN
+  const n = Number(value)
+  return Number.isFinite(n) ? n : NaN
+}
+
+function isFiniteNumber(value: number): value is number {
+  return Number.isFinite(value)
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return null
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+function fmtMaybeMs(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? `${Math.round(n)}ms` : '-'
+}
+
+function fmtMaybeFloat(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? n.toFixed(1) : '-'
+}
+
+function fmtInt(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? Math.round(n).toLocaleString() : '-'
+}
+
+function fmtPct(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '-'
 }

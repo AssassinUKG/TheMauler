@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"mauler/internal/settings"
 	"runtime"
 	"strings"
@@ -30,6 +32,43 @@ func TestDetectShellBackendAuto(t *testing.T) {
 	}
 	if got != "bash" {
 		t.Fatalf("auto backend on non-windows = %q, want bash", got)
+	}
+}
+
+func TestShellRepairsLegacyBashArgumentKey(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{`{"bash":"echo bash","timeout":5}`, "echo bash"},
+		{`{"cmd":"echo cmd","timeout":5}`, "echo cmd"},
+		{`{"powershell":"Write-Output ps","timeout":5}`, "Write-Output ps"},
+		{`{"input":"echo input","timeout":5}`, "echo input"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			var p shellParams
+			raw := json.RawMessage(tc.raw)
+			if err := json.Unmarshal(raw, &p); err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(p.Command) == "" {
+				p.Command = firstNonEmptyShellArg(p.Bash, p.Cmd, p.PowerShell, p.Input)
+			}
+			if p.Command != tc.want {
+				t.Fatalf("legacy arg was not repaired, got %q want %q", p.Command, tc.want)
+			}
+		})
+	}
+}
+
+func TestShellLegacyBashArgDoesNotReturnCommandRequired(t *testing.T) {
+	useDiskToolConfig(t)
+	t.Setenv("MAULER_SHELL_BACKEND", "auto")
+	tool := &Shell{TimeoutSecs: 5}
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"bash":"echo mauler-legacy-bash-repair"}`))
+	if err != nil && strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("legacy bash arg should be repaired before PrepareShellCommand: %v", err)
 	}
 }
 
@@ -163,6 +202,12 @@ func TestCleanShellCommandCollapsesDeeplyEscapedOperators(t *testing.T) {
 	want := `curl -s "http://connected.htb/conn.php?cmd=x" 2>&1`
 	if got := cleanShellCommand(deep); got != want {
 		t.Fatalf("deep unescape = %q, want %q", got, want)
+	}
+}
+
+func TestPrepareShellCommandRejectsResidualHTMLEntities(t *testing.T) {
+	if _, err := PrepareShellCommand(`curl http://example.test &ammp; echo bad`); err == nil {
+		t.Fatal("expected malformed residual entity to be rejected")
 	}
 }
 

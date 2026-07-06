@@ -35,6 +35,10 @@ func (s *Settings) Validate() []string {
 		adjustments = append(adjustments, fmt.Sprintf("agents.max_run_seconds clamped from %d to 0", s.Agents.MaxRunSeconds))
 		s.Agents.MaxRunSeconds = 0
 	}
+	if s.Telegram.ProgressIntervalS < 3 {
+		adjustments = append(adjustments, fmt.Sprintf("telegram.progress_interval_s clamped from %d to 3", s.Telegram.ProgressIntervalS))
+		s.Telegram.ProgressIntervalS = 3
+	}
 	switch strings.ToLower(strings.TrimSpace(s.Agents.ReasoningEffort)) {
 	case "", "auto":
 		s.Agents.ReasoningEffort = "auto"

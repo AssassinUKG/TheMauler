@@ -68,10 +68,10 @@ func TestTaskBudgetStopsAfterFailedWebAttempts(t *testing.T) {
 
 func TestTaskBudgetStopsBrowserActions(t *testing.T) {
 	b := newTaskBudget(settings.ToolsConfig{MaxSearches: 4, MaxFetches: 6, MaxFailedFetches: 3, MaxBrowserActions: 1})
-	if msg := b.before("browser_open"); msg != "" {
+	if msg := b.before("browser"); msg != "" {
 		t.Fatalf("first browser action blocked: %s", msg)
 	}
-	if msg := b.before("browser_snapshot"); !strings.Contains(msg, "browser automation budget exhausted") {
+	if msg := b.before("browser"); !strings.Contains(msg, "browser automation budget exhausted") {
 		t.Fatalf("second browser action was not budget-blocked: %q", msg)
 	}
 }

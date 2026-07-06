@@ -11,6 +11,8 @@ import {
   ClearStorageItem,
   ListStorageItems,
   UseProfile,
+  GetChannelBusStatus,
+  ListChannelWorkQueue,
   type Settings,
   type ProfilesFile,
   type Profile,
@@ -18,6 +20,7 @@ import {
   type GenerationParams,
   type ProfileBenchmarkResult,
   type StorageItem,
+  type ChannelWorkItem,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
 import './SettingsModal.css'
@@ -27,47 +30,45 @@ interface Props {
   onSaved?: () => void
 }
 
-type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'tools' | 'context' | 'storage' | 'ui' | 'image'
+type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'environment' | 'tools' | 'telegram' | 'context' | 'storage' | 'ui' | 'image'
 
 type ToolRisk = 'low' | 'medium' | 'high'
 
+const settingsTabs: Array<{ id: Tab; label: string; description: string }> = [
+  { id: 'general', label: 'General', description: 'Active profile and logging' },
+  { id: 'providers', label: 'Providers', description: 'Local API endpoints' },
+  { id: 'profiles', label: 'Profiles', description: 'Models and generation' },
+  { id: 'agents', label: 'Agents', description: 'Modes and autonomy' },
+  { id: 'environment', label: 'Environment', description: 'VPN, listener, shell paths' },
+  { id: 'tools', label: 'Tools', description: 'Toolsets, shell, web limits' },
+  { id: 'telegram', label: 'Telegram', description: 'Bot, voice, remote control' },
+  { id: 'context', label: 'Context', description: 'Workspace and memory' },
+  { id: 'storage', label: 'Storage', description: 'Caches and local state' },
+  { id: 'ui', label: 'Interface', description: 'Theme and layout' },
+  { id: 'image', label: 'Images', description: 'Vision and clipboard' },
+]
+
 const toolRisk: Record<string, ToolRisk> = {
-  read_file: 'low',
-  read_many: 'low',
-  file_outline: 'low',
-  read_chunks: 'low',
-  read_pdf: 'low',
+  read: 'low',
   glob: 'low',
   grep: 'low',
   session_search: 'low',
   read_tool_result: 'low',
   file_changes: 'low',
-  sqlite_schema: 'low',
-  sqlite_query: 'low',
-  todo_create: 'low',
-  todo_update: 'low',
-  todo_done: 'low',
-  todo_blocked: 'low',
-  todo_list: 'low',
-  todo_clear: 'low',
-  skills_list: 'low',
-  skill_view: 'low',
+  sqlite: 'low',
+  todo_write: 'low',
+  skill: 'low',
   http_probe: 'medium',
   evidence_bundle: 'medium',
-  subagent_explore: 'low',
+  task: 'medium',
   fetch_url: 'medium',
   web_search: 'medium',
-  browser_open: 'medium',
-  browser_snapshot: 'medium',
-  browser_extract: 'medium',
-  browser_screenshot: 'medium',
-  write_file: 'high',
-  edit_file: 'high',
+  browser: 'high',
+  write: 'high',
+  edit: 'high',
   shell: 'high',
-  bash: 'high',
-  browser_click: 'high',
-  browser_type: 'high',
-  browser_agent: 'high',
+  terminal_send: 'high',
+  terminal_read: 'low',
 }
 
 const toolRiskLabel: Record<ToolRisk, string> = {
@@ -79,19 +80,11 @@ const toolRiskLabel: Record<ToolRisk, string> = {
 const onlineTools = new Set([
   'web_search',
   'fetch_url',
-  'browser_open',
-  'browser_snapshot',
-  'browser_click',
-  'browser_type',
-  'browser_extract',
-  'browser_screenshot',
-  'browser_close',
-  'browser_agent',
-  'subagent_research',
+  'browser',
 ])
 
 const preferredOnlineToolset = (name: string) =>
-  name.startsWith('browser_') || name === 'browser_agent' ? 'browser' : 'web-research'
+  name === 'browser' ? 'browser' : 'web-research'
 
 const themeOptions = [
   { value: 'mauler-ops', label: 'Mauler Ops', accent: '#4ade80', primary: '#16a34a', note: 'Green-black operator console.' },
@@ -148,6 +141,8 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [benchmarkResult, setBenchmarkResult] = useState<ProfileBenchmarkResult | null>(null)
   const [storageItems, setStorageItems] = useState<StorageItem[]>([])
   const [storageStatus, setStorageStatus] = useState('')
+  const [channelStatus, setChannelStatus] = useState<Record<string, string>>({})
+  const [channelQueue, setChannelQueue] = useState<ChannelWorkItem[]>([])
 
   useEffect(() => {
     void Promise.all([GetSettings(), GetProfiles()]).then(([s, pf]) => {
@@ -165,11 +160,27 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     }).catch(() => {})
     void ListWSLDistros().then(setWslDistros).catch(() => setWslDistros([]))
     void refreshStorage()
+    void refreshChannelBus()
   }, [])
+
+  useEffect(() => {
+    if (tab !== 'telegram') return
+    const id = window.setInterval(() => { void refreshChannelBus() }, 3000)
+    return () => window.clearInterval(id)
+  }, [tab])
 
   const refreshStorage = async () => {
     const items = await ListStorageItems().catch(() => [] as StorageItem[])
     setStorageItems(items)
+  }
+
+  const refreshChannelBus = async () => {
+    const [status, queue] = await Promise.all([
+      GetChannelBusStatus().catch(() => ({} as Record<string, string>)),
+      ListChannelWorkQueue().then(items => items.slice(0, 8)).catch(() => [] as ChannelWorkItem[]),
+    ])
+    setChannelStatus(status)
+    setChannelQueue(queue)
   }
 
   const clearStorage = async (item: StorageItem) => {
@@ -193,6 +204,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     try {
       await UpdateSettings(settings)
       await UpdateProfiles(profilesFile)
+      await refreshChannelBus()
       setDirty(false)
       setSaveStatus('Saved')
       onSaved?.()
@@ -214,6 +226,121 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     markDirty()
   }
 
+  const updateEnvironment = (patch: Partial<Settings['environment']>) => {
+    if (!settings) return
+    updateSettings('environment', { ...settings.environment, ...patch })
+  }
+
+  const updateTelegram = (patch: Partial<Settings['telegram']>) => {
+    if (!settings) return
+    updateSettings('telegram', { ...settings.telegram, ...patch })
+  }
+
+  const updateLab = (patch: Partial<Settings['context']['lab']>) => {
+    if (!settings) return
+    updateSettings('context', {
+      ...settings.context,
+      lab: { ...settings.context.lab, ...patch },
+    })
+  }
+
+  const saveCurrentLabProfile = () => {
+    if (!settings) return
+    const lab = settings.context.lab
+    const id = (lab.id || settings.context.active_lab_profile || lab.name || 'default').trim().replace(/[^a-zA-Z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'default'
+    const profile = {
+      id,
+      name: lab.name || id,
+      workspace_dir: settings.context.workspace_dir || '',
+      target: lab.target || '',
+      hostname: lab.hostname || '',
+      vpn_interface: lab.vpn_interface || '',
+      latest_artifact: lab.latest_artifact || '',
+      ops_profile: lab.ops_profile || 'pentesting',
+      evidence_policy: lab.evidence_policy || defaultEvidencePolicy(lab.ops_profile),
+      access_preference: lab.access_preference || 'auto',
+      notes: lab.notes || '',
+    }
+    const profiles = [...(settings.context.lab_profiles ?? [])]
+    const existing = profiles.findIndex(item => item.id === id)
+    if (existing >= 0) profiles[existing] = profile
+    else profiles.unshift(profile)
+    updateSettings('context', {
+      ...settings.context,
+      active_lab_profile: id,
+      lab: { ...lab, id, name: profile.name },
+      lab_profiles: profiles,
+    })
+  }
+
+  const selectLabProfile = (id: string) => {
+    if (!settings) return
+    const profile = (settings.context.lab_profiles ?? []).find(item => item.id === id)
+    if (!profile) return
+    updateSettings('context', {
+      ...settings.context,
+      active_lab_profile: profile.id,
+      workspace_dir: profile.workspace_dir || settings.context.workspace_dir,
+      lab: {
+        id: profile.id,
+        name: profile.name || profile.id,
+        target: profile.target || '',
+        hostname: profile.hostname || '',
+        vpn_interface: profile.vpn_interface || '',
+        latest_artifact: profile.latest_artifact || '',
+        ops_profile: profile.ops_profile || 'pentesting',
+        evidence_policy: profile.evidence_policy || defaultEvidencePolicy(profile.ops_profile),
+        access_preference: profile.access_preference || 'auto',
+        notes: profile.notes || '',
+      },
+    })
+  }
+
+  const newLabProfile = () => {
+    if (!settings) return
+    const id = `lab-${Date.now()}`
+    const profile = {
+      id,
+      name: 'New lab',
+      workspace_dir: settings.context.workspace_dir || '',
+      target: '',
+      hostname: '',
+      vpn_interface: settings.context.lab.vpn_interface || '',
+      latest_artifact: '',
+      ops_profile: 'pentesting',
+      evidence_policy: 'research_assisted',
+      access_preference: 'auto',
+      notes: '',
+    }
+    updateSettings('context', {
+      ...settings.context,
+      active_lab_profile: id,
+      lab: {
+        id,
+        name: profile.name,
+        target: '',
+        hostname: '',
+        vpn_interface: profile.vpn_interface,
+        latest_artifact: '',
+        ops_profile: 'pentesting',
+        evidence_policy: 'research_assisted',
+        access_preference: 'auto',
+        notes: '',
+      },
+      lab_profiles: [profile, ...(settings.context.lab_profiles ?? [])],
+    })
+  }
+
+  const deleteLabProfile = (id: string) => {
+    if (!settings) return
+    const profiles = (settings.context.lab_profiles ?? []).filter(item => item.id !== id)
+    updateSettings('context', {
+      ...settings.context,
+      lab_profiles: profiles,
+      active_lab_profile: settings.context.active_lab_profile === id ? (profiles[0]?.id || '') : settings.context.active_lab_profile,
+    })
+  }
+
   const setToolEnabled = (toolName: string, enabled: boolean) => {
     setSettings(prev => {
       if (!prev) return prev
@@ -230,7 +357,6 @@ export function SettingsModal({ onClose, onSaved }: Props) {
           enabled_tools: {
             ...(prev.tools.enabled_tools ?? {}),
             [toolName]: enabled,
-            ...(toolName === 'shell' ? { bash: enabled } : {}),
           },
         },
       }
@@ -440,6 +566,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const providerNames = Object.keys(profilesFile.providers ?? {})
   const profileNames = Object.keys(profilesFile.profiles ?? {}).filter(name => Boolean(profilesFile.profiles[name]?.model_id?.trim()))
   const toolsetNames = Object.keys(settings.tools.toolsets ?? {}).sort()
+  const activeToolsetName = settings.tools.active_toolset || 'balanced'
+  const activeToolsetTools = settings.tools.toolsets?.[activeToolsetName] ?? []
+  const enabledToolNames = effectiveToolNames(settings.tools.enabled_tools, activeToolsetTools)
   const provider = profilesFile.providers[selectedProvider]
   const profile = profilesFile.profiles[selectedProfile]
 
@@ -521,9 +650,12 @@ export function SettingsModal({ onClose, onSaved }: Props) {
 
   return (
     <div className="overlay" onClick={e => { if (e.target === e.currentTarget) void close() }}>
-      <div className="settings-modal">
-        <div className="settings-header">
-          <span className="settings-title">Settings</span>
+      <div className="settings-modal control-center">
+        <div className="settings-header control-center-header">
+          <div>
+            <span className="settings-kicker">Mauler Control Center</span>
+            <span className="settings-title">Configure the agent workbench</span>
+          </div>
           <div className="settings-header-actions">
             {saveStatus && <span className="save-status">{saveStatus}</span>}
             {(dirty || saving) && (
@@ -535,15 +667,37 @@ export function SettingsModal({ onClose, onSaved }: Props) {
           </div>
         </div>
 
+        {settings && profilesFile && (
+          <div className="control-center-summary">
+            <div>
+              <span>Profile</span>
+              <strong>{settings.active_profile || 'none'}</strong>
+            </div>
+            <div>
+              <span>Toolset</span>
+              <strong>{settings.tools?.active_toolset || 'default'}</strong>
+            </div>
+            <div>
+              <span>Shell</span>
+              <strong>{[settings.tools?.shell_backend, settings.tools?.shell_mode].filter(Boolean).join(' / ') || 'auto'}</strong>
+            </div>
+            <div>
+              <span>Providers</span>
+              <strong>{Object.keys(profilesFile.providers ?? {}).length}</strong>
+            </div>
+          </div>
+        )}
+
         <div className="settings-body">
-          <div className="settings-tabs">
-            {(['general', 'providers', 'profiles', 'agents', 'tools', 'context', 'storage', 'ui', 'image'] as Tab[]).map(t => (
+          <div className="settings-tabs control-center-nav">
+            {settingsTabs.map(item => (
               <button
-                key={t}
-                className={`tab-btn ${tab === t ? 'active' : ''}`}
-                onClick={() => setTab(t)}
+                key={item.id}
+                className={`tab-btn ${tab === item.id ? 'active' : ''}`}
+                onClick={() => setTab(item.id)}
               >
-                {t.charAt(0).toUpperCase() + t.slice(1)}
+                <span>{item.label}</span>
+                <small>{item.description}</small>
               </button>
             ))}
           </div>
@@ -858,7 +1012,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     value={settings.agents.mode_override || 'Auto'}
                     onChange={e => updateSettings('agents', { ...settings.agents, mode_override: e.target.value })}
                   >
-                    {['Auto', 'Manual', 'Ops', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+                    {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
                       <option key={mode} value={mode}>{mode}</option>
                     ))}
                   </select>
@@ -930,14 +1084,14 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     type="number"
                     min={1}
                     max={20}
-                    value={settings.agents.no_think_after_tool_calls ?? 3}
-                    onChange={e => updateSettings('agents', { ...settings.agents, no_think_after_tool_calls: parseInt(e.target.value, 10) || 3 })}
+                    value={settings.agents.no_think_after_tool_calls ?? 2}
+                    onChange={e => updateSettings('agents', { ...settings.agents, no_think_after_tool_calls: parseInt(e.target.value, 10) || 2 })}
                   />
-                  <span className="field-hint">Qwen3 fix: disables &lt;think&gt; once this many tool calls have been made (default 3)</span>
+                  <span className="field-hint">Qwen3 fix: disables &lt;think&gt; once this many tool calls have been made (default 2)</span>
                 </Field>
 
                 <div className="preset-editor-list">
-                  {['Auto', 'Ops', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(name => {
+                  {['Auto', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(name => {
                     const preset = settings.agents.presets?.[name]
                     if (!preset) return null
                     return (
@@ -999,23 +1153,183 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                           />
                         </Field>
                         <Field label="Tool permissions">
-                          <div className="tool-grid">
-                            {knownTools(settings.tools.enabled_tools).map(toolName => (
-                              <label className="checkbox-label" key={`${name}-${toolName}`}>
-                                <input
-                                  type="checkbox"
-                                  checked={preset.tool_permissions?.[toolName] ?? settings.tools.enabled_tools?.[toolName] ?? true}
-                                  onChange={e => updateAgentPresetTool(name, toolName, e.target.checked)}
-                                />
-                                {toolName}
-                              </label>
-                            ))}
-                          </div>
+                          <details className="advanced-drawer">
+                            <summary>
+                              <span>Advanced per-tool overrides</span>
+                              <small>{summarizePresetToolPermissions(preset.tool_permissions)}</small>
+                            </summary>
+                            <div className="tool-grid compact-tool-grid">
+                              {knownTools(settings.tools.enabled_tools).map(toolName => (
+                                <label className="checkbox-label" key={`${name}-${toolName}`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={preset.tool_permissions?.[toolName] ?? settings.tools.enabled_tools?.[toolName] ?? true}
+                                    onChange={e => updateAgentPresetTool(name, toolName, e.target.checked)}
+                                  />
+                                  {toolName}
+                                </label>
+                              ))}
+                            </div>
+                          </details>
                         </Field>
                       </details>
                     )
                   })}
                 </div>
+              </div>
+            )}
+
+            {tab === 'environment' && (
+              <div className="settings-section">
+                <h3>Environment Routing</h3>
+                <Field label="Main OS">
+                  <select value={settings.environment.main_os || 'windows'} onChange={e => updateEnvironment({ main_os: e.target.value })}>
+                    <option value="auto">auto</option>
+                    <option value="windows">windows</option>
+                    <option value="linux">linux</option>
+                    <option value="macos">macos</option>
+                  </select>
+                </Field>
+                <Field label="AI shell backend">
+                  <select value={settings.environment.ai_shell_backend || settings.tools.shell_backend || 'wsl'} onChange={e => updateEnvironment({ ai_shell_backend: e.target.value })}>
+                    <option value="auto">auto</option>
+                    <option value="wsl">wsl</option>
+                    <option value="powershell">powershell</option>
+                    <option value="cmd">cmd</option>
+                    <option value="bash">bash</option>
+                  </select>
+                  <span className="field-hint">What the agent should treat as its normal work shell. For HTB on Windows this is usually WSL/Kali.</span>
+                </Field>
+                <Field label="AI WSL distro">
+                  <select value={settings.environment.ai_shell_distro || settings.tools.shell_distro || ''} onChange={e => updateEnvironment({ ai_shell_distro: e.target.value })}>
+                    <option value="">default distro</option>
+                    {wslDistros.map(name => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </Field>
+                <Field label="AI WSL user">
+                  <input value={settings.environment.ai_shell_user || settings.tools.shell_user || ''} onChange={e => updateEnvironment({ ai_shell_user: e.target.value })} placeholder="root" />
+                </Field>
+                <Field label="Target work backend">
+                  <select value={settings.environment.target_work_backend || 'ai_shell'} onChange={e => updateEnvironment({ target_work_backend: e.target.value })}>
+                    <option value="ai_shell">AI shell</option>
+                    <option value="wsl">WSL</option>
+                    <option value="windows_powershell">Windows PowerShell</option>
+                    <option value="bash">bash</option>
+                  </select>
+                  <span className="field-hint">Where scans, curl/ffuf, exploit checks, and target filesystem tooling should run.</span>
+                </Field>
+                <Field label="Listener backend">
+                  <select value={settings.environment.listener_backend || 'windows_powershell'} onChange={e => updateEnvironment({ listener_backend: e.target.value })}>
+                    <option value="windows_powershell">Windows PowerShell</option>
+                    <option value="ai_shell">AI shell</option>
+                    <option value="wsl">WSL</option>
+                    <option value="bash">bash</option>
+                    <option value="manual">manual / user-owned</option>
+                  </select>
+                </Field>
+                <Field label="Listener command">
+                  <input value={settings.environment.listener_command || ''} onChange={e => updateEnvironment({ listener_command: e.target.value })} placeholder="ncat.exe -lvp {port}" />
+                  <span className="field-hint">Use placeholders like {'{port}'}. The prompt tells the agent to start this with terminal_send, not blocking shell.</span>
+                </Field>
+                <Field label="LHOST source">
+                  <select value={settings.environment.lhost_source || 'selected_vpn_interface'} onChange={e => updateEnvironment({ lhost_source: e.target.value })}>
+                    <option value="selected_vpn_interface">selected VPN/interface</option>
+                    <option value="manual">manual LHOST</option>
+                    <option value="auto">auto</option>
+                  </select>
+                </Field>
+                <Field label="Manual LHOST">
+                  <input value={settings.environment.manual_lhost || ''} onChange={e => updateEnvironment({ manual_lhost: e.target.value })} placeholder="10.10.x.x" />
+                </Field>
+                <Field label="Terminal tools">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.environment.prefer_terminal_tools}
+                      onChange={e => updateEnvironment({ prefer_terminal_tools: e.target.checked })} />
+                    Prefer terminal_send / terminal_read for live shells and listeners
+                  </label>
+                </Field>
+                <Field label="Correction policy">
+                  <select value={settings.environment.user_correction_policy || 'latest_user_wins'} onChange={e => updateEnvironment({ user_correction_policy: e.target.value })}>
+                    <option value="latest_user_wins">latest user instruction wins</option>
+                    <option value="normal">normal</option>
+                  </select>
+                  <span className="field-hint">Use latest_user_wins when you want interrupts like "use webshell" to override stale plans immediately.</span>
+                </Field>
+                <Field label="Reverse shell guidance">
+                  <textarea rows={5} value={settings.environment.reverse_shell_guidance || ''} onChange={e => updateEnvironment({ reverse_shell_guidance: e.target.value })} />
+                </Field>
+
+                <h3>Current Project / Box</h3>
+                <Field label="Saved lab profile">
+                  <div className="settings-inline-actions">
+                    <select value={settings.context.active_lab_profile || settings.context.lab.id || ''} onChange={e => selectLabProfile(e.target.value)}>
+                      {(settings.context.lab_profiles ?? []).map(profile => <option key={profile.id} value={profile.id}>{profile.name || profile.id}</option>)}
+                    </select>
+                    <button type="button" onClick={newLabProfile}>New</button>
+                    <button type="button" onClick={saveCurrentLabProfile}>Save current</button>
+                  </div>
+                </Field>
+                <Field label="Lab name">
+                  <input value={settings.context.lab.name || ''} onChange={e => updateLab({ name: e.target.value })} placeholder="Box name / HTB box / client test" />
+                </Field>
+                <Field label="Profile id">
+                  <input value={settings.context.lab.id || ''} onChange={e => updateLab({ id: e.target.value })} placeholder="connected" />
+                </Field>
+                <Field label="Target IP / URL">
+                  <input value={settings.context.lab.target || ''} onChange={e => updateLab({ target: e.target.value })} placeholder="10.129.x.x or https://host" />
+                </Field>
+                <Field label="Hostname">
+                  <input value={settings.context.lab.hostname || ''} onChange={e => updateLab({ hostname: e.target.value })} placeholder="boxname.htb" />
+                </Field>
+                <Field label="VPN/interface">
+                  <input value={settings.context.lab.vpn_interface || ''} onChange={e => updateLab({ vpn_interface: e.target.value })} placeholder="Ethernet 3 / tun0 / 10.10.x.x" />
+                </Field>
+                <Field label="Ops profile">
+                  <select value={settings.context.lab.ops_profile || 'pentesting'} onChange={e => updateLab({ ops_profile: e.target.value })}>
+                    <option value="pentesting">Pentesting</option>
+                    <option value="htb">HTB / CTF</option>
+                  </select>
+                </Field>
+                <Field label="Evidence policy">
+                  <select value={settings.context.lab.evidence_policy || defaultEvidencePolicy(settings.context.lab.ops_profile)} onChange={e => updateLab({ evidence_policy: e.target.value })}>
+                    <option value="discovery_first">Discovery-first</option>
+                    <option value="research_assisted">Research-assisted</option>
+                    <option value="reference_allowed">Reference allowed</option>
+                    <option value="fastest_path">Fastest path</option>
+                  </select>
+                  <span className="field-hint">Discovery-first avoids exact-box writeups for discovery while still allowing CVEs, vendor docs, and PoCs after live evidence.</span>
+                </Field>
+                <Field label="Preferred access">
+                  <select value={settings.context.lab.access_preference || 'auto'} onChange={e => updateLab({ access_preference: e.target.value })}>
+                    <option value="auto">auto</option>
+                    <option value="webshell">webshell</option>
+                    <option value="reverse_shell">reverse shell</option>
+                    <option value="bind_shell">bind shell</option>
+                    <option value="none">none / report only</option>
+                  </select>
+                </Field>
+                <Field label="Latest artifact">
+                  <input value={settings.context.lab.latest_artifact || ''} onChange={e => updateLab({ latest_artifact: e.target.value })} placeholder="scans/nmap_full.xml, report.md, screenshot.png" />
+                </Field>
+                <Field label="Lab notes">
+                  <textarea rows={5} value={settings.context.lab.notes || ''} onChange={e => updateLab({ notes: e.target.value })} placeholder="Per-box constraints, known bad paths, client scope, or 'do not retry RCE path X'." />
+                </Field>
+                <Field label="Saved profiles">
+                  <div className="safe-rule-list">
+                    {(settings.context.lab_profiles ?? []).length === 0 ? (
+                      <div className="safe-rule-empty">No saved lab profiles yet</div>
+                    ) : settings.context.lab_profiles.map(profile => (
+                      <div className="safe-rule" key={profile.id}>
+                        <div className="safe-rule-main">
+                          <strong>{profile.name || profile.id}</strong>
+                          <span>{[profile.target, profile.hostname, profile.access_preference, profile.workspace_dir].filter(Boolean).join(' | ') || profile.id}</span>
+                        </div>
+                        <button type="button" onClick={() => selectLabProfile(profile.id)}>Use</button>
+                        <button type="button" onClick={() => deleteLabProfile(profile.id)}>Delete</button>
+                      </div>
+                    ))}
+                  </div>
+                </Field>
               </div>
             )}
 
@@ -1033,7 +1347,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   <label className="checkbox-label">
                     <input type="checkbox" checked={settings.tools.confirm_writes}
                       onChange={e => updateSettings('tools', { ...settings.tools, confirm_writes: e.target.checked })} />
-                    Pause before write_file / edit_file
+                    Pause before write / edit
                   </label>
                 </Field>
                 <Field label="Confirm exec">
@@ -1042,6 +1356,14 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       onChange={e => updateSettings('tools', { ...settings.tools, confirm_exec: e.target.checked })} />
                     Pause before shell execution
                   </label>
+                </Field>
+                <Field label="Tool-call grammar">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={!!settings.tools.tool_grammar_constraint}
+                      onChange={e => updateSettings('tools', { ...settings.tools, tool_grammar_constraint: e.target.checked })} />
+                    Force valid tool-call JSON (GBNF) for local models
+                  </label>
+                  <span className="field-hint">Constrains non-native (gemma / repair-text) models to emit a valid tool call. Experimental — verify against your llama.cpp build before relying on it.</span>
                 </Field>
                 <Field label="Shell backend">
                   <select value={settings.tools.shell_backend || 'auto'}
@@ -1101,17 +1423,38 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     onChange={e => updateSettings('tools', { ...settings.tools, active_toolset: e.target.value })}>
                     {toolsetNames.map(name => <option key={name} value={name}>{name}</option>)}
                   </select>
+                  <span className="field-hint">{enabledToolNames.length} tools active for model prompts after this coarse gate.</span>
                 </Field>
                 <Field label="Toolset contents">
-                  <div className="safe-rule-list">
-                    {toolsetNames.map(name => (
-                      <div className="safe-rule" key={name}>
-                        <div className="safe-rule-main">
-                          <strong>{name}</strong>
-                          <span>{(settings.tools.toolsets?.[name] ?? []).join(', ')}</span>
-                        </div>
+                  <div className="toolset-summary-card">
+                    <div className="toolset-summary-head">
+                      <div>
+                        <strong>{activeToolsetName}</strong>
+                        <span>{activeToolsetTools.length} allowed by toolset · {enabledToolNames.length} enabled</span>
                       </div>
-                    ))}
+                      <div className="toolset-counts">
+                        <span>{countRisk(enabledToolNames, 'low')} low</span>
+                        <span>{countRisk(enabledToolNames, 'medium')} med</span>
+                        <span>{countRisk(enabledToolNames, 'high')} high</span>
+                      </div>
+                    </div>
+                    <ToolPillGrid tools={enabledToolNames} />
+                    <details className="advanced-drawer">
+                      <summary>
+                        <span>All toolsets</span>
+                        <small>{toolsetNames.length} groups</small>
+                      </summary>
+                      <div className="safe-rule-list">
+                        {toolsetNames.map(name => (
+                          <div className="safe-rule" key={name}>
+                            <div className="safe-rule-main">
+                              <strong>{name}</strong>
+                              <span>{(settings.tools.toolsets?.[name] ?? []).join(', ')}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   </div>
                 </Field>
                 <Field label="Web engine">
@@ -1160,21 +1503,27 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   <span className="field-hint">Head/tail preview size for offloaded tool results. The full output remains available through read_tool_result.</span>
                 </Field>
                 <Field label="Tool access">
-                  <div className="tool-grid">
-                    {knownTools(settings.tools.enabled_tools).map(name => (
-                      <label className="checkbox-label tool-risk-row" key={name}>
-                        <span className="tool-risk-control">
-                          <input
-                            type="checkbox"
-                            checked={settings.tools.enabled_tools?.[name] ?? true}
-                            onChange={e => setToolEnabled(name, e.target.checked)}
-                          />
-                          {name}
-                        </span>
-                        <span className={`settings-risk settings-risk-${toolRisk[name] ?? 'medium'}`}>{toolRiskLabel[toolRisk[name] ?? 'medium']}</span>
-                      </label>
-                    ))}
-                  </div>
+                  <details className="advanced-drawer">
+                    <summary>
+                      <span>Advanced per-tool switches</span>
+                      <small>{knownTools(settings.tools.enabled_tools).length} known tools</small>
+                    </summary>
+                    <div className="tool-grid compact-tool-grid">
+                      {knownTools(settings.tools.enabled_tools).map(name => (
+                        <label className="checkbox-label tool-risk-row" key={name}>
+                          <span className="tool-risk-control">
+                            <input
+                              type="checkbox"
+                              checked={settings.tools.enabled_tools?.[name] ?? true}
+                              onChange={e => setToolEnabled(name, e.target.checked)}
+                            />
+                            {name}
+                          </span>
+                          <span className={`settings-risk settings-risk-${toolRisk[name] ?? 'medium'}`}>{toolRiskLabel[toolRisk[name] ?? 'medium']}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
                 </Field>
                 <Field label="Safe list">
                   <div className="safe-rule-list">
@@ -1187,6 +1536,174 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                           <span>{rule.label || rule.input_hash}</span>
                         </div>
                         <button type="button" onClick={() => removeSafeRule(rule.id)}>Remove</button>
+                      </div>
+                    ))}
+                  </div>
+                </Field>
+              </div>
+            )}
+
+            {tab === 'telegram' && (
+              <div className="settings-section">
+                <h3>Telegram Bot</h3>
+                <Field label="Enable bot">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={!!settings.telegram?.enabled}
+                      onChange={e => updateTelegram({ enabled: e.target.checked })}
+                    />
+                    Accept Telegram updates through the channel bus
+                  </label>
+                </Field>
+                <Field label="Bot token">
+                  <input
+                    type="password"
+                    value={settings.telegram?.token ?? ''}
+                    onChange={e => updateTelegram({ token: e.target.value })}
+                    placeholder="123456:ABC..."
+                  />
+                  <span className="field-hint">Stored in settings.toml for now. Leave blank to keep the bot disabled at runtime.</span>
+                </Field>
+                <Field label="Bot username">
+                  <input
+                    value={settings.telegram?.bot_username ?? ''}
+                    onChange={e => updateTelegram({ bot_username: e.target.value })}
+                    placeholder="TheMaulerBot"
+                  />
+                </Field>
+                <Field label="Require mention">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.telegram?.require_mention ?? true}
+                      onChange={e => updateTelegram({ require_mention: e.target.checked })}
+                    />
+                    Ignore group messages unless they mention the bot or use a command
+                  </label>
+                </Field>
+                <Field label="Allowed chats/users">
+                  <textarea
+                    rows={3}
+                    value={(settings.telegram?.allow_from ?? []).join('\n')}
+                    onChange={e => updateTelegram({ allow_from: e.target.value.split(/\r?\n|,/).map(v => v.trim()).filter(Boolean) })}
+                    placeholder="Telegram user IDs, chat IDs, or @usernames; one per line"
+                  />
+                  <span className="field-hint">Empty means no allow-list filter. Use IDs for reliability.</span>
+                </Field>
+
+                <h3>Remote Routing Defaults</h3>
+                <Field label="Default project">
+                  <input
+                    value={settings.telegram?.default_project ?? ''}
+                    onChange={e => updateTelegram({ default_project: e.target.value })}
+                    placeholder={settings.context.workspace_dir || 'Use current workspace'}
+                  />
+                </Field>
+                <Field label="Default profile">
+                  <select
+                    value={settings.telegram?.default_profile || ''}
+                    onChange={e => updateTelegram({ default_profile: e.target.value })}
+                  >
+                    <option value="">Use active profile</option>
+                    {profileNames.map(profileName => <option key={profileName} value={profileName}>{profileName}</option>)}
+                  </select>
+                </Field>
+                <Field label="Default mode">
+                  <select
+                    value={settings.telegram?.default_mode || 'Auto'}
+                    onChange={e => updateTelegram({ default_mode: e.target.value })}
+                  >
+                    {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+                      <option key={mode} value={mode}>{mode}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Default toolset">
+                  <select
+                    value={settings.telegram?.default_toolset || settings.tools.active_toolset || 'unrestricted'}
+                    onChange={e => updateTelegram({ default_toolset: e.target.value })}
+                  >
+                    {toolsetNames.map(name => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Progress replies">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.telegram?.send_progress ?? true}
+                      onChange={e => updateTelegram({ send_progress: e.target.checked })}
+                    />
+                    Send concise run progress updates back to Telegram
+                  </label>
+                </Field>
+                <Field label="Progress interval">
+                  <input
+                    type="number"
+                    min={3}
+                    max={300}
+                    value={settings.telegram?.progress_interval_s ?? 10}
+                    onChange={e => updateTelegram({ progress_interval_s: parseInt(e.target.value, 10) || 10 })}
+                  />
+                  <span className="field-hint">Seconds between progress updates while a remote-launched task is running.</span>
+                </Field>
+
+                <h3>Voice</h3>
+                <Field label="Voice replies">
+                  <select
+                    value={settings.telegram?.voice_replies || 'on_voice'}
+                    onChange={e => updateTelegram({ voice_replies: e.target.value })}
+                  >
+                    <option value="off">off</option>
+                    <option value="on_voice">reply with voice only to voice messages</option>
+                    <option value="always">always send voice replies</option>
+                  </select>
+                </Field>
+                <Field label="Transcription mode">
+                  <select
+                    value={settings.telegram?.transcription_mode || 'local'}
+                    onChange={e => updateTelegram({ transcription_mode: e.target.value })}
+                  >
+                    <option value="disabled">disabled</option>
+                    <option value="local">local helper</option>
+                    <option value="openai_compatible">OpenAI-compatible endpoint</option>
+                  </select>
+                </Field>
+                <Field label="Transcription URL">
+                  <input
+                    value={settings.telegram?.transcription_url ?? ''}
+                    onChange={e => updateTelegram({ transcription_url: e.target.value })}
+                    placeholder="optional local speech endpoint"
+                  />
+                </Field>
+
+                <h3>Channel Bus</h3>
+                <div className="telegram-status-grid">
+                  {Object.entries(channelStatus).length === 0 ? (
+                    <div className="telegram-status-card">
+                      <span>Status</span>
+                      <strong>Not loaded</strong>
+                    </div>
+                  ) : Object.entries(channelStatus).map(([key, value]) => (
+                    <div className="telegram-status-card" key={key}>
+                      <span>{key.replaceAll('_', ' ')}</span>
+                      <strong>{value || '-'}</strong>
+                    </div>
+                  ))}
+                </div>
+                <Field label="Queued work">
+                  <div className="safe-rule-list">
+                    <div className="settings-inline-actions">
+                      <button type="button" onClick={() => void refreshChannelBus()}>Refresh queue</button>
+                    </div>
+                    {channelQueue.length === 0 ? (
+                      <div className="safe-rule-empty">No remote work requests queued</div>
+                    ) : channelQueue.map(item => (
+                      <div className="safe-rule" key={item.id}>
+                        <div className="safe-rule-main">
+                          <strong>{item.envelope.source} · {item.route.lane} · {item.status}</strong>
+                          <span>{item.envelope.text}</span>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1508,42 +2025,69 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function knownTools(enabled: Record<string, boolean> | undefined): string[] {
   return Array.from(new Set([
-    'read_file',
-    'read_many',
-    'read_pdf',
-    'write_file',
-    'edit_file',
+    'read',
+    'write',
+    'edit',
     'shell',
-    'bash',
+    'terminal_send',
+    'terminal_read',
+    'run_script',
     'glob',
     'grep',
     'web_search',
     'fetch_url',
-    'browser_open',
-    'browser_snapshot',
-    'browser_click',
-    'browser_type',
-    'browser_extract',
-    'browser_screenshot',
-    'browser_close',
-    'browser_agent',
+    'browser',
     'session_search',
     'file_changes',
-    'sqlite_schema',
-    'sqlite_query',
-    'todo_create',
-    'todo_update',
-    'todo_done',
-    'todo_blocked',
-    'todo_list',
-    'todo_clear',
-    'skills_list',
-    'skill_view',
+    'sqlite',
+    'todo_write',
+    'skill',
     'http_probe',
+    'start_listener',
     'evidence_bundle',
-    'subagent_explore',
+    'memory',
+    'progress',
+    'read_tool_result',
+    'set_reasoning_effort',
+    'task',
     ...Object.keys(enabled ?? {}),
   ])).sort()
+}
+
+function effectiveToolNames(enabled: Record<string, boolean> | undefined, toolsetTools: string[]): string[] {
+  const allowed = new Set(toolsetTools)
+  return toolsetTools
+    .filter(name => (enabled?.[name] ?? true) && allowed.has(name))
+    .sort()
+}
+
+function countRisk(tools: string[], risk: ToolRisk): number {
+  return tools.filter(name => (toolRisk[name] ?? 'medium') === risk).length
+}
+
+function summarizePresetToolPermissions(permissions: Record<string, boolean> | undefined): string {
+  const entries = Object.entries(permissions ?? {})
+  if (entries.length === 0) return 'inherits toolset'
+  const enabled = entries.filter(([, value]) => value).length
+  const disabled = entries.length - enabled
+  return `${enabled} enabled overrides, ${disabled} disabled`
+}
+
+function ToolPillGrid({ tools }: { tools: string[] }) {
+  if (tools.length === 0) {
+    return <div className="safe-rule-empty">No tools enabled in the active toolset</div>
+  }
+  return (
+    <div className="tool-pill-grid">
+      {tools.map(name => (
+        <span className={`tool-pill tool-pill-${toolRisk[name] ?? 'medium'}`} key={name}>{name}</span>
+      ))}
+    </div>
+  )
+}
+
+function defaultEvidencePolicy(opsProfile: string): string {
+  return /htb|ctf/i.test(opsProfile || '') ? 'discovery_first' : 'research_assisted'
 }
 
 function ParamsEditor({

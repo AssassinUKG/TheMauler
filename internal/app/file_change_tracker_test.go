@@ -14,7 +14,7 @@ import (
 func TestRecordFileChangeClassifiesCreatedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "scratch.txt")
-	tc := toolCallForFileChangeTest("write_file", map[string]any{
+	tc := toolCallForFileChangeTest("write", map[string]any{
 		"path":    path,
 		"content": "temporary\n",
 	})
@@ -58,10 +58,10 @@ func TestRecordFileChangeClassifiesModifiedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tc := toolCallForFileChangeTest("edit_file", map[string]any{
+	tc := toolCallForFileChangeTest("edit", map[string]any{
 		"path":       path,
-		"old_string": "before",
-		"new_string": "after",
+		"old":        "before",
+		"new":        "after",
 	})
 	before := snapshotToolTarget(tc)
 	if !before.Exists {
@@ -97,7 +97,7 @@ func TestRecordFileChangeClassifiesModifiedFile(t *testing.T) {
 func TestFileChangesToolListsCreatedFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cleanup.tmp")
-	tc := toolCallForFileChangeTest("write_file", map[string]any{
+	tc := toolCallForFileChangeTest("write", map[string]any{
 		"path":    path,
 		"content": "temporary\n",
 	})

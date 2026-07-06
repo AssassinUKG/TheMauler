@@ -35,15 +35,27 @@ type AgentEvalScenario struct {
 }
 
 type AgentEvalResult struct {
-	Name          string `json:"name"`
-	Pass          bool   `json:"pass"`
-	Status        string `json:"status"`
-	ToolCalls     int    `json:"tool_calls"`
-	AutoContinues int    `json:"auto_continues"`
-	Truncations   int    `json:"truncations"`
-	ToolErrors    int    `json:"tool_errors"`
-	DurationMs    int64  `json:"duration_ms"`
-	FailReason    string `json:"fail_reason,omitempty"`
+	Name               string `json:"name"`
+	Pass               bool   `json:"pass"`
+	ArtifactPass       bool   `json:"artifact_pass"`
+	HygienePass        bool   `json:"hygiene_pass"`
+	StatusPass         bool   `json:"status_pass"`
+	Status             string `json:"status"`
+	ToolCalls          int    `json:"tool_calls"`
+	ToolSuccessRate    int    `json:"tool_success_rate"`
+	AutoContinues      int    `json:"auto_continues"`
+	Truncations        int    `json:"truncations"`
+	ToolErrors         int    `json:"tool_errors"`
+	RepeatedToolInputs int    `json:"repeated_tool_inputs"`
+	RepeatedSkips      int    `json:"repeated_skips"`
+	RepeatToolRate     int    `json:"repeat_tool_rate"`
+	VerifierPrompts    int    `json:"verifier_prompts"`
+	MaxRoutedTools     int    `json:"max_routed_tools"`
+	PromptWarnings     int    `json:"prompt_warnings"`
+	StabilityScore     int    `json:"stability_score"`
+	FalseDone          bool   `json:"false_done"`
+	DurationMs         int64  `json:"duration_ms"`
+	FailReason         string `json:"fail_reason,omitempty"`
 }
 
 type AgentEvalReport struct {
@@ -51,6 +63,8 @@ type AgentEvalReport struct {
 	PassCount int               `json:"pass_count"`
 	Total     int               `json:"total"`
 	Profile   string            `json:"profile"`
+	ID        string            `json:"id,omitempty"`
+	CreatedAt string            `json:"created_at,omitempty"`
 }
 
 func (a *App) RunAgentEval(profileName string) AgentEvalReport {
@@ -67,7 +81,9 @@ func (a *App) RunAgentEval(profileName string) AgentEvalReport {
 			Total: 1,
 		}
 	}
-	return a.runAgentEvalScenarios(profileName, scenarios)
+	report := a.runAgentEvalScenarios(profileName, scenarios)
+	_ = saveAgentEvalReport(report)
+	return report
 }
 
 func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalScenario) AgentEvalReport {
@@ -99,7 +115,12 @@ func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalSce
 		cfg.Tools.EnabledTools = settings.DefaultSettings().Tools.EnabledTools
 	}
 
-	report := AgentEvalReport{Profile: cfg.ActiveProfile, Total: len(scenarios)}
+	report := AgentEvalReport{
+		ID:        fmt.Sprintf("agent-eval-%s", time.Now().Format("20060102-150405")),
+		CreatedAt: time.Now().Format(time.RFC3339),
+		Profile:   cfg.ActiveProfile,
+		Total:     len(scenarios),
+	}
 	for _, scenario := range scenarios {
 		result := runOneAgentEvalScenario(cfg, profiles, profile, scenario)
 		if result.Pass {
@@ -108,6 +129,64 @@ func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalSce
 		report.Results = append(report.Results, result)
 	}
 	return report
+}
+
+func agentEvalReportsPath() (string, error) {
+	dir, err := settings.ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "agent-eval-runs.json"), nil
+}
+
+func loadAgentEvalReports() ([]AgentEvalReport, error) {
+	path, err := agentEvalReportsPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []AgentEvalReport{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var reports []AgentEvalReport
+	if err := json.Unmarshal(data, &reports); err != nil {
+		return nil, err
+	}
+	return reports, nil
+}
+
+func saveAgentEvalReport(report AgentEvalReport) error {
+	reports, err := loadAgentEvalReports()
+	if err != nil {
+		return err
+	}
+	reports = append([]AgentEvalReport{report}, reports...)
+	if len(reports) > 100 {
+		reports = reports[:100]
+	}
+	path, err := agentEvalReportsPath()
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(reports, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func (a *App) ClearAgentEvalReports() error {
+	path, err := agentEvalReportsPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func runOneAgentEvalScenario(cfg settings.Settings, profiles settings.ProfilesFile, profile settings.Profile, scenario AgentEvalScenario) AgentEvalResult {
@@ -211,25 +290,36 @@ func seedAgentEvalWorkspace(root string, files map[string]string) error {
 }
 
 func scoreAgentEvalResult(result *AgentEvalResult, run TaskRun, workspace string, scenario AgentEvalScenario) {
+	metrics := buildLoopMetrics(run)
 	result.Status = run.Status
-	result.ToolCalls = len(run.Tools)
-	result.AutoContinues = countRunEvents(run.Events, "continue")
-	result.Truncations = countRunEvents(run.Events, "truncated")
-	result.ToolErrors = countRunEvents(run.Events, "tool_error")
+	result.ToolCalls = metrics.ToolCalls
+	result.ToolSuccessRate = toolSuccessRate(run.Tools)
+	result.AutoContinues = metrics.AutoContinues
+	result.Truncations = metrics.Truncations
+	result.ToolErrors = metrics.ToolErrors
+	result.RepeatedToolInputs = metrics.RepeatedToolInputs
+	result.RepeatedSkips = metrics.RepeatedSkips
+	result.RepeatToolRate = repeatToolRate(metrics)
+	result.VerifierPrompts = metrics.VerifierPrompts
+	result.MaxRoutedTools = metrics.MaxRoutedTools
+	result.PromptWarnings = metrics.PromptWarnings
+	result.StabilityScore = metrics.StabilityScore
 	result.DurationMs = run.DurationMs
 
-	var failures []string
+	var statusFailures []string
+	var artifactFailures []string
+	var hygieneFailures []string
 	if want := strings.TrimSpace(scenario.ExpectStatus); want != "" && run.Status != want {
-		failures = append(failures, fmt.Sprintf("status=%q want %q", run.Status, want))
+		statusFailures = append(statusFailures, fmt.Sprintf("status=%q want %q", run.Status, want))
 	}
 	for rel, wantSubstr := range scenario.ExpectFiles {
 		data, err := os.ReadFile(filepath.Join(workspace, filepath.Clean(filepath.FromSlash(rel))))
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s missing: %v", rel, err))
+			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing: %v", rel, err))
 			continue
 		}
 		if !strings.Contains(string(data), wantSubstr) {
-			failures = append(failures, fmt.Sprintf("%s missing expected substring %q", rel, wantSubstr))
+			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing expected substring %q", rel, wantSubstr))
 		}
 	}
 	for _, forbidden := range scenario.ForbidSubstr {
@@ -238,16 +328,55 @@ func scoreAgentEvalResult(result *AgentEvalResult, run TaskRun, workspace string
 		}
 		for _, tool := range run.Tools {
 			if strings.Contains(tool.Result, forbidden) {
-				failures = append(failures, fmt.Sprintf("tool result leaked forbidden substring %q", forbidden))
+				artifactFailures = append(artifactFailures, fmt.Sprintf("tool result leaked forbidden substring %q", forbidden))
 				break
 			}
 		}
 	}
 	if scenario.MaxAutoContinues >= 0 && result.AutoContinues > scenario.MaxAutoContinues {
-		failures = append(failures, fmt.Sprintf("auto_continues=%d > %d", result.AutoContinues, scenario.MaxAutoContinues))
+		hygieneFailures = append(hygieneFailures, fmt.Sprintf("auto_continues=%d > %d", result.AutoContinues, scenario.MaxAutoContinues))
 	}
-	result.Pass = len(failures) == 0
+	if result.MaxRoutedTools > 24 {
+		hygieneFailures = append(hygieneFailures, fmt.Sprintf("max_routed_tools=%d > 24", result.MaxRoutedTools))
+	}
+	result.StatusPass = len(statusFailures) == 0
+	result.ArtifactPass = len(artifactFailures) == 0
+	result.HygienePass = len(hygieneFailures) == 0
+	result.FalseDone = strings.EqualFold(run.Status, "done") && !result.ArtifactPass
+	failures := append([]string{}, statusFailures...)
+	failures = append(failures, artifactFailures...)
+	failures = append(failures, hygieneFailures...)
+	if result.FalseDone {
+		failures = append(failures, "false_done=true")
+	}
+	result.Pass = result.StatusPass && result.ArtifactPass && result.HygienePass
 	result.FailReason = strings.Join(failures, "; ")
+}
+
+func toolSuccessRate(tools []TaskToolEvent) int {
+	if len(tools) == 0 {
+		return 100
+	}
+	success := 0
+	for _, tool := range tools {
+		switch strings.ToLower(strings.TrimSpace(tool.Status)) {
+		case "done", "ok":
+			success++
+		case "skipped":
+			if strings.Contains(strings.ToLower(tool.Result), "cached") || strings.Contains(strings.ToLower(tool.Result), "repeated") {
+				success++
+			}
+		}
+	}
+	return (success * 100) / len(tools)
+}
+
+func repeatToolRate(metrics LoopMetrics) int {
+	if metrics.ToolCalls <= 0 {
+		return 0
+	}
+	repeats := metrics.RepeatedToolInputs + metrics.RepeatedSkips
+	return (repeats * 100) / metrics.ToolCalls
 }
 
 func countRunEvents(events []TaskRunEvent, kind string) int {

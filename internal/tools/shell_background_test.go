@@ -3,10 +3,13 @@ package tools
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"mauler/internal/settings"
 )
 
 func TestRunShellBackgroundDispatch(t *testing.T) {
@@ -56,13 +59,38 @@ func TestExitCodeFromWaitErr(t *testing.T) {
 	}
 }
 
+func TestShellResultContractShape(t *testing.T) {
+	got := shellResultContract("shell", "wsl", "done", 0, "/work", "-", "proceed", "hello")
+	for _, want := range []string{"[shell_result state=done backend=wsl]", "contract:", "state: done", "exit: 0", "cwd: /work", "result_id: -", "next_tool: proceed", "hello"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("contract missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func useStableBackgroundShell(t *testing.T) {
+	t.Helper()
+	cfg := settings.DefaultSettings().Tools
+	if runtime.GOOS == "windows" {
+		cfg.ShellBackend = "powershell"
+	} else {
+		cfg.ShellBackend = "bash"
+	}
+	SetConfigSnapshot(cfg)
+	t.Cleanup(ResetConfigSnapshot)
+}
+
 // TestBackgroundJobLifecycle launches a real detached command and polls it to
 // completion. echo and `exit N` are valid in both bash and PowerShell, so this
 // works regardless of the resolved backend.
 func TestBackgroundJobLifecycle(t *testing.T) {
+	useStableBackgroundShell(t)
 	start, _, err := runShellBackground(shellParams{Command: "echo backgroundmarker", Background: true})
 	if err != nil {
 		t.Fatalf("start background job: %v", err)
+	}
+	if !strings.Contains(start, "[shell_result state=started") || !strings.Contains(start, "result_id: ") || !strings.Contains(start, "next_tool: poll shell job") {
+		t.Fatalf("start output missing structured contract:\n%s", start)
 	}
 	id := extractJobID(t, start)
 
@@ -73,12 +101,16 @@ func TestBackgroundJobLifecycle(t *testing.T) {
 	if !strings.Contains(text, "exit 0") {
 		t.Fatalf("job output %q missing exit 0", text)
 	}
+	if !strings.Contains(text, "[shell_result state=done backend=background]") || !strings.Contains(text, "result_id: "+id) || !strings.Contains(text, "next_tool: proceed") {
+		t.Fatalf("done output missing structured contract:\n%s", text)
+	}
 	if _, _, err := runShellBackground(shellParams{Job: id}); err == nil {
 		t.Fatal("a finished job should be cleared and error on re-poll")
 	}
 }
 
 func TestBackgroundJobObserverFires(t *testing.T) {
+	useStableBackgroundShell(t)
 	var mu sync.Mutex
 	var states []string
 	OnBackgroundJobUpdate = func(u BackgroundJobUpdate) {
@@ -112,6 +144,7 @@ func TestBackgroundJobObserverFires(t *testing.T) {
 }
 
 func TestBackgroundJobCapturesNonZeroExit(t *testing.T) {
+	useStableBackgroundShell(t)
 	start, _, err := runShellBackground(shellParams{Command: "exit 7", Background: true})
 	if err != nil {
 		t.Fatalf("start background job: %v", err)
@@ -124,6 +157,7 @@ func TestBackgroundJobCapturesNonZeroExit(t *testing.T) {
 }
 
 func TestReapFinishedJobsClearsDoneAndLog(t *testing.T) {
+	useStableBackgroundShell(t)
 	start, _, err := runShellBackground(shellParams{Command: "echo reapme", Background: true})
 	if err != nil {
 		t.Fatalf("start: %v", err)

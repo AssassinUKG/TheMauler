@@ -29,6 +29,18 @@ interface ReplayRun {
   title: string
 }
 
+interface TuningSummary {
+  modelCalls: LedgerEvent[]
+  promptBudgets: LedgerEvent[]
+  avgTtftMs: number | null
+  avgTokensPerSecond: number | null
+  promptWarnings: number
+  uniquePromptHashes: number
+  uniqueToolSchemaHashes: number
+  latestModelCall?: LedgerEvent
+  latestPromptBudget?: LedgerEvent
+}
+
 export function BrainPage({ version }: { version: number }) {
   const [events, setEvents] = useState<LedgerEvent[]>([])
   const [selectedId, setSelectedId] = useState('')
@@ -41,10 +53,12 @@ export function BrainPage({ version }: { version: number }) {
   const [approvedCandidates, setApprovedCandidates] = useState<Set<string>>(() => new Set())
 
   const load = async (nextLimit = limit) => {
-    const [next, learning] = await Promise.all([
+    const [loadedEvents, loadedLearning] = await Promise.all([
       ListLedgerEvents(nextLimit).catch(() => [] as LedgerEvent[]),
       ListLearningCandidates(nextLimit).catch(() => [] as LearningCandidate[]),
     ])
+    const next = Array.isArray(loadedEvents) ? loadedEvents : []
+    const learning = Array.isArray(loadedLearning) ? loadedLearning : []
     setEvents(next)
     setCandidates(learning)
     setSelectedId(prev => prev && next.some(event => event.id === prev) ? prev : next[0]?.id ?? '')
@@ -73,6 +87,7 @@ export function BrainPage({ version }: { version: number }) {
   const stats = useMemo(() => buildStats(events), [events])
   const signals = useMemo(() => buildSignals(events), [events])
   const replayRuns = useMemo(() => buildReplayRuns(events), [events])
+  const tuning = useMemo(() => buildTuningSummary(events), [events])
 
   useEffect(() => {
     if (filtered.length > 0 && (!selectedId || !filtered.some(event => event.id === selectedId))) {
@@ -176,9 +191,11 @@ export function BrainPage({ version }: { version: number }) {
         <Metric label="Events" value={events.length.toLocaleString()} />
         <Metric label="Runs" value={stats.runs.toLocaleString()} />
         <Metric label="Problems" value={stats.problems.toLocaleString()} tone={stats.problems > 0 ? 'bad' : 'ok'} />
+        <Metric label="Model Calls" value={stats.modelCalls.toLocaleString()} />
+        <Metric label="Avg TTFT" value={tuning.avgTtftMs == null ? '-' : `${Math.round(tuning.avgTtftMs)}ms`} />
+        <Metric label="Prompt Warns" value={tuning.promptWarnings.toLocaleString()} tone={tuning.promptWarnings > 0 ? 'bad' : 'ok'} />
         <Metric label="Model Loads" value={stats.modelLoads.toLocaleString()} />
         <Metric label="Tool Events" value={stats.toolEvents.toLocaleString()} />
-        <Metric label="Memory Writes" value={stats.memoryWrites.toLocaleString()} />
       </section>
 
       <div className="brain-filters">
@@ -212,7 +229,7 @@ export function BrainPage({ version }: { version: number }) {
                 <time>{formatTime(event.timestamp)}</time>
               </div>
               <div className="brain-event-title">{event.tool || event.message || event.source || event.kind}</div>
-              <div className="brain-event-detail">{event.error || event.detail || event.output || event.input || '-'}</div>
+              <div className="brain-event-detail">{eventListSummary(event)}</div>
             </button>
           ))}
         </aside>
@@ -220,12 +237,14 @@ export function BrainPage({ version }: { version: number }) {
         <main className="brain-detail">
           <section className="brain-section">
             <div className="brain-section-header">
-              <h2>Signals</h2>
+              <h2>Problem Signals</h2>
               <span>{signals.length} active</span>
             </div>
             {signals.length === 0 ? (
               <div className="brain-empty inline">No problem signals in the loaded ledger window.</div>
             ) : (
+              <>
+              <div className="brain-section-note">Warnings, stops, model errors, and failed tool calls pulled from the ledger so tuning problems are easy to spot.</div>
               <div className="brain-signal-grid">
                 {signals.slice(0, 8).map(signal => (
                   <div key={signal.id} className={`brain-signal ${signal.tone}`}>
@@ -234,6 +253,7 @@ export function BrainPage({ version }: { version: number }) {
                   </div>
                 ))}
               </div>
+              </>
             )}
           </section>
 
@@ -258,6 +278,24 @@ export function BrainPage({ version }: { version: number }) {
                 ))}
               </div>
             )}
+          </section>
+
+          <section className="brain-section">
+            <div className="brain-section-header">
+              <h2>Inference Tuning</h2>
+              <span>{tuning.modelCalls.length} calls</span>
+            </div>
+            <div className="brain-tuning-grid">
+              <Metric label="Avg TTFT" value={tuning.avgTtftMs == null ? '-' : `${Math.round(tuning.avgTtftMs)}ms`} />
+              <Metric label="Avg tok/s" value={tuning.avgTokensPerSecond == null ? '-' : tuning.avgTokensPerSecond.toFixed(1)} />
+              <Metric label="Prompt hashes" value={tuning.uniquePromptHashes.toLocaleString()} />
+              <Metric label="Tool schema hashes" value={tuning.uniqueToolSchemaHashes.toLocaleString()} />
+              <Metric label="Budget warnings" value={tuning.promptWarnings.toLocaleString()} tone={tuning.promptWarnings > 0 ? 'bad' : 'ok'} />
+            </div>
+            <div className="brain-tuning-cards">
+              {tuning.latestModelCall ? <TelemetryCard event={tuning.latestModelCall} /> : <div className="brain-empty inline">No model-call telemetry yet.</div>}
+              {tuning.latestPromptBudget ? <TelemetryCard event={tuning.latestPromptBudget} /> : null}
+            </div>
           </section>
 
           <section className="brain-section">
@@ -379,6 +417,7 @@ function CandidateCard({
 function EventDetail({ event }: { event: LedgerEvent }) {
   return (
     <div className="brain-event-detail-panel">
+      {(event.kind === 'model_call' || event.kind === 'prompt_budget') && <TelemetryCard event={event} expanded />}
       <div className="brain-detail-grid">
         <Field label="ID" value={event.id} />
         <Field label="Run" value={event.run_id || '-'} />
@@ -400,6 +439,51 @@ function EventDetail({ event }: { event: LedgerEvent }) {
       {event.metadata && Object.keys(event.metadata).length > 0 && (
         <TextBlock title="Metadata" value={JSON.stringify(event.metadata, null, 2)} />
       )}
+    </div>
+  )
+}
+
+function TelemetryCard({ event, expanded = false }: { event: LedgerEvent; expanded?: boolean }) {
+  const data = eventTelemetry(event)
+  if (event.kind === 'model_call') {
+    return (
+      <div className="brain-telemetry-card">
+        <div className="brain-telemetry-head">
+          <strong>Model Call</strong>
+          <span>{data.status || event.status || 'ok'}</span>
+        </div>
+        <div className="brain-telemetry-grid">
+          <Field label="TTFT" value={fmtMaybeMs(data.ttft_ms)} />
+          <Field label="Duration" value={fmtMaybeMs(data.duration_ms)} />
+          <Field label="Tok/s" value={fmtMaybeFloat(data.tokens_per_second)} />
+          <Field label="Tool Choice" value={data.tool_choice || '-'} />
+          <Field label="Tools" value={data.tool_count || '0'} />
+          <Field label="Model Load" value={data.model_load || '-'} />
+          <Field label="Prompt Hash" value={data.prompt_hash || '-'} />
+          <Field label="Tool Hash" value={data.tool_schema_hash || '-'} />
+        </div>
+        {expanded && <TextBlock title="Selected Tools" value={splitCSV(data.selected_tools).join('\n') || '-'} />}
+      </div>
+    )
+  }
+  const promptWarn = data.over_20_pct === 'true' || data.over_system_target === 'true' || data.over_tool_target === 'true' || data.over_tool_schema_target === 'true' || event.status === 'warn'
+  return (
+    <div className={`brain-telemetry-card ${promptWarn ? 'warn' : ''}`}>
+      <div className="brain-telemetry-head">
+        <strong>Prompt Budget</strong>
+        <span>{promptWarn ? 'over target' : 'ok'}</span>
+      </div>
+      <div className="brain-telemetry-grid">
+        <Field label="Estimated" value={fmtInt(data.estimated_tokens)} />
+        <Field label="System" value={targetValue(data.system_tokens, data.system_target || data.system_target_tokens)} />
+        <Field label="Tools" value={targetValue(data.tool_schema_tokens, data.tool_schema_target || data.tool_schema_target_tokens)} />
+        <Field label="Conversation" value={fmtInt(data.conversation_tokens)} />
+        <Field label="System+Tools" value={fmtPct(data.system_pct)} />
+        <Field label="Context" value={fmtInt(data.context_window)} />
+        <Field label="Prompt Hash" value={data.prompt_hash || '-'} />
+        <Field label="Tool Hash" value={data.tool_schema_hash || '-'} />
+      </div>
+      {expanded && <TextBlock title="Selected Tools" value={splitCSV(data.selected_tools).join('\n') || '-'} />}
     </div>
   )
 }
@@ -467,6 +551,12 @@ function Field({ label, value }: { label: string; value: string }) {
   )
 }
 
+function targetValue(value?: string, target?: string) {
+  const base = fmtInt(value)
+  const cap = fmtInt(target)
+  return target ? `${base} / ${cap}` : base
+}
+
 function TextBlock({ title, value, tone }: { title: string; value: string; tone?: 'bad' }) {
   return (
     <details className={`brain-text-block ${tone || ''}`} open={['Error', 'Message', 'Detail'].includes(title)}>
@@ -481,6 +571,7 @@ function buildStats(events: LedgerEvent[]) {
   const runIds = new Set<string>()
   let problems = 0
   let modelLoads = 0
+  let modelCalls = 0
   let toolEvents = 0
   let memoryWrites = 0
   for (const event of events) {
@@ -488,6 +579,7 @@ function buildStats(events: LedgerEvent[]) {
     if (event.run_id) runIds.add(event.run_id)
     if (isProblem(event)) problems++
     if (event.kind === 'model_load' || event.kind.startsWith('provider_')) modelLoads++
+    if (event.kind === 'model_call') modelCalls++
     if (event.source === 'tool' || event.kind === 'tool_result') toolEvents++
     if (event.kind === 'memory_write') memoryWrites++
   }
@@ -496,10 +588,31 @@ function buildStats(events: LedgerEvent[]) {
     byKind: sortedByKind,
     maxKindCount: Math.max(1, ...Object.values(byKind)),
     modelLoads,
+    modelCalls,
     memoryWrites,
     problems,
     runs: runIds.size,
     toolEvents,
+  }
+}
+
+function buildTuningSummary(events: LedgerEvent[]): TuningSummary {
+  const modelCalls = events.filter(event => event.kind === 'model_call')
+  const promptBudgets = events.filter(event => event.kind === 'prompt_budget')
+  const ttfts = modelCalls.map(event => num(eventTelemetry(event).ttft_ms)).filter(isFiniteNumber)
+  const tps = modelCalls.map(event => num(eventTelemetry(event).tokens_per_second)).filter(value => isFiniteNumber(value) && value > 0)
+  const promptHashes = new Set(modelCalls.map(event => eventTelemetry(event).prompt_hash).filter(Boolean))
+  const toolHashes = new Set(modelCalls.map(event => eventTelemetry(event).tool_schema_hash).filter(Boolean))
+  return {
+    modelCalls,
+    promptBudgets,
+    avgTtftMs: average(ttfts),
+    avgTokensPerSecond: average(tps),
+    promptWarnings: promptBudgets.filter(event => event.status === 'warn' || eventTelemetry(event).over_20_pct === 'true').length,
+    uniquePromptHashes: promptHashes.size,
+    uniqueToolSchemaHashes: toolHashes.size,
+    latestModelCall: modelCalls[0],
+    latestPromptBudget: promptBudgets[0],
   }
 }
 
@@ -547,7 +660,7 @@ function matchesKindFilter(event: LedgerEvent, filter: KindFilter) {
     case 'problems':
       return isProblem(event)
     case 'model':
-      return event.kind === 'model_load' || event.kind.startsWith('provider_')
+      return event.kind === 'model_load' || event.kind === 'model_call' || event.kind === 'prompt_budget' || event.kind.startsWith('provider_')
     case 'tools':
       return event.source === 'tool' || ['web_research', 'browser_action', 'planner_event', 'tool_result'].includes(event.kind)
     case 'memory':
@@ -557,6 +670,71 @@ function matchesKindFilter(event: LedgerEvent, filter: KindFilter) {
     default:
       return true
   }
+}
+
+function eventListSummary(event: LedgerEvent) {
+  if (event.kind === 'model_call') {
+    const data = eventTelemetry(event)
+    return `TTFT ${fmtMaybeMs(data.ttft_ms)} / ${fmtMaybeFloat(data.tokens_per_second)} tok/s / tools ${data.tool_count || '0'} / ${data.model_load || '-'}`
+  }
+  if (event.kind === 'prompt_budget') {
+    const data = eventTelemetry(event)
+    return `${fmtInt(data.estimated_tokens)} est tok / system+tools ${fmtPct(data.system_pct)} / tools ${fmtInt(data.tool_schema_tokens)}`
+  }
+  return event.error || event.detail || event.output || event.input || '-'
+}
+
+function eventTelemetry(event: LedgerEvent): Record<string, string> {
+  return { ...parseKV(event.detail || ''), ...(event.metadata || {}) }
+}
+
+function parseKV(detail: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const line of detail.split(/\r?\n/)) {
+    const idx = line.indexOf('=')
+    if (idx <= 0) continue
+    out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
+  }
+  return out
+}
+
+function num(value?: string) {
+  if (!value) return NaN
+  const n = Number(value)
+  return Number.isFinite(n) ? n : NaN
+}
+
+function isFiniteNumber(value: number): value is number {
+  return Number.isFinite(value)
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return null
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+function fmtMaybeMs(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? `${Math.round(n)}ms` : '-'
+}
+
+function fmtMaybeFloat(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? n.toFixed(1) : '-'
+}
+
+function fmtInt(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? Math.round(n).toLocaleString() : '-'
+}
+
+function fmtPct(value?: string) {
+  const n = num(value)
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '-'
+}
+
+function splitCSV(value?: string) {
+  return (value || '').split(',').map(item => item.trim()).filter(Boolean)
 }
 
 function eventSearchText(event: LedgerEvent) {

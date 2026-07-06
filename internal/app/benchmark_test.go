@@ -166,7 +166,7 @@ func TestBenchmarkLoadsRequestedContextAndReportsActual(t *testing.T) {
 	)
 
 	if mock.loadCalls != 1 {
-		t.Fatalf("load calls = %d, want 1", mock.loadCalls)
+		t.Fatalf("force load calls = %d, want 1", mock.loadCalls)
 	}
 	if result.ActualCtxTokens != 8192 {
 		t.Fatalf("actual ctx = %d, want 8192", result.ActualCtxTokens)
@@ -182,6 +182,10 @@ type benchmarkLoadMockClient struct {
 }
 
 func (c *benchmarkLoadMockClient) LoadModel(context.Context) error {
+	return nil
+}
+
+func (c *benchmarkLoadMockClient) ForceLoadModel(context.Context) error {
 	c.loadCalls++
 	return nil
 }

@@ -88,9 +88,9 @@ func TestCategorizedToolLedgerEvents(t *testing.T) {
 
 	for _, tc := range []llm.ToolCallDef{
 		{ID: "call-web", Function: llm.FunctionCall{Name: "web_search", Arguments: []byte(`{"query":"x"}`)}},
-		{ID: "call-browser", Function: llm.FunctionCall{Name: "browser_open", Arguments: []byte(`{"url":"https://example.com"}`)}},
-		{ID: "call-todo", Function: llm.FunctionCall{Name: "todo_done", Arguments: []byte(`{"id":"todo-1"}`)}},
-		{ID: "call-sub", Function: llm.FunctionCall{Name: "subagent_review", Arguments: []byte(`{"task":"review"}`)}},
+		{ID: "call-browser", Function: llm.FunctionCall{Name: "browser", Arguments: []byte(`{"action":"open","url":"https://example.com"}`)}},
+		{ID: "call-todo", Function: llm.FunctionCall{Name: "todo_write", Arguments: []byte(`{"action":"done","id":"todo-1"}`)}},
+		{ID: "call-sub", Function: llm.FunctionCall{Name: "task", Arguments: []byte(`{"type":"review","task":"review"}`)}},
 	} {
 		app.recordCategorizedToolLedger("run-1", tc, "done", "ok", 12)
 	}

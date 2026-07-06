@@ -39,8 +39,8 @@ already run `qwen3.6-large-code` at **64k** on the same box, so the VRAM headroo
   bump the profile alone — it must match what the server actually loaded or requests overflow.
 - This is the single biggest lever for "stays sharp through the whole box."
 
-**Optional:** for long exploitation, consider the `qwen3.6-think` profile — reasoning on helps
-multi-step privesc, at some speed cost. `nothink` is faster but plans worse.
+**Optional:** for long exploitation, use `qwen3.6-think` only for a short no-tool planning/review
+pass. Keep the live tool loop on `qwen3.6-nothink` so tool calls stay reliable.
 
 ## Net
 Revert removed the regression I introduced; the memory-pollution fix + prune reclaim ~2k

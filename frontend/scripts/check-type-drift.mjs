@@ -11,13 +11,18 @@
 //
 // Exits non-zero (failing CI / the build) when the field sets diverge.
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const HANDWRITTEN = resolve(here, '../src/wailsjs/go.ts')
 const GENERATED = resolve(here, '../wailsjs/go/models.ts')
+
+if (!existsSync(GENERATED)) {
+  console.warn(`! Wails generated model file is missing; skipping drift check until bindings are regenerated: ${GENERATED}`)
+  process.exit(0)
+}
 
 // Match identifiers used as object keys that contain at least one underscore,
 // i.e. Go json-tag style snake_case fields. camelCase function/method names and

@@ -115,6 +115,10 @@ type Request struct {
 	SpecDraftNMax int
 	// Grammar-constrained output (llama.cpp / LM Studio structured output)
 	JSONSchema json.RawMessage
+	// Grammar is a raw GBNF grammar (llama.cpp `grammar` field) constraining the
+	// generated text. Used to force valid tool-call JSON for non-native local
+	// models. Empty means unconstrained.
+	Grammar string
 }
 
 // Client is the interface every LLM backend must satisfy.

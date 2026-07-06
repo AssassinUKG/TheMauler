@@ -24,7 +24,7 @@ func (t *WebSearch) Name() string      { return "web_search" }
 func (t *WebSearch) Destructive() bool { return false }
 
 func (t *WebSearch) Description() string {
-	return "Search the web and return compact result titles, URLs, and snippets. Supports local SearXNG, DuckDuckGo HTML, and Brave Search when configured."
+	return "Search the web and return compact result titles, URLs, and snippets. Supports local SearXNG, DuckDuckGo HTML, and Brave Search when configured. For current events, CVEs, PoCs, exploit paths, service-version research, or changing facts, include the current year/date in the query, rank official/vendor/GitHub sources above mirrors, then fetch promising sources with fetch_url."
 }
 
 func (t *WebSearch) Schema() json.RawMessage {
@@ -317,7 +317,7 @@ func (t *FetchURL) Name() string      { return "fetch_url" }
 func (t *FetchURL) Destructive() bool { return false }
 
 func (t *FetchURL) Description() string {
-	return "Fetch a URL and return readable text content, truncated to a safe size. Use after web_search when the page itself is needed."
+	return "Fetch a URL and return readable text content, truncated to a safe size. Use after web_search when the page itself is needed; if repeated fetches fail or only mirrors appear, state uncertainty instead of spiraling. Use browser tools for JavaScript-heavy pages, forms, or content that fetch_url cannot inspect."
 }
 
 func (t *FetchURL) Schema() json.RawMessage {

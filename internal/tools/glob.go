@@ -17,7 +17,7 @@ func (t *Glob) Name() string      { return "glob" }
 func (t *Glob) Destructive() bool { return false }
 
 func (t *Glob) Description() string {
-	return "Find files matching a glob pattern. " +
+	return "Find files matching a glob pattern. Prefer this over shell ls/find for repository discovery because it is scoped, sorted, and prompt-safe. " +
 		"Supports ** for recursive matching (e.g. '**/*.go'). " +
 		"Results are sorted and limited to 200 matches."
 }
@@ -119,7 +119,7 @@ func registeredMasterSkillSearchHint(pattern string) string {
 	if err != nil || !strings.Contains(strings.ToLower(string(data)), "source_path:") {
 		return ""
 	}
-	return "Hint: master skill is registered in TheMauler's skill registry as skill `master`. Do not keep searching workspace directories for master_skill.md; call skill_view with {\"name\":\"master\"} or use skills_list with filter \"master\"."
+	return "Hint: master skill is registered in TheMauler's skill registry as skill `master`. Do not keep searching workspace directories for master_skill.md; call skill with {\"mode\":\"view\",\"name\":\"master\"} or use skill with {\"mode\":\"list\",\"filter\":\"master\"}."
 }
 
 // globDoublestar does a simple ** expansion: split on ** and check prefix/suffix.

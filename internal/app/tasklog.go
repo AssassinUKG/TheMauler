@@ -32,8 +32,9 @@ type TaskRun struct {
 	Tools            []TaskToolEvent `json:"tools,omitempty"`
 	Events           []TaskRunEvent  `json:"events,omitempty"`
 
-	startMs int64 // not serialised; used to compute DurationMs
-	ledger  *ledger.Ledger
+	startMs              int64 // not serialised; used to compute DurationMs
+	ledger               *ledger.Ledger
+	memoryConflictEvents map[string]int
 }
 
 type TaskRunEvent struct {
@@ -143,6 +144,29 @@ func (r *TaskRun) addEvent(kind, message, detail string) {
 		ledgerEvent.State = event.Message
 	}
 	r.recordLedger(ledgerEvent)
+}
+
+func (r *TaskRun) addMemoryConflictEvent(message, detail string) {
+	if r == nil {
+		return
+	}
+	key := strings.TrimSpace(detail)
+	if key == "" {
+		key = strings.TrimSpace(message)
+	}
+	if r.memoryConflictEvents == nil {
+		r.memoryConflictEvents = map[string]int{}
+	}
+	if r.memoryConflictEvents[key] > 0 {
+		r.memoryConflictEvents[key]++
+		return
+	}
+	if len(r.memoryConflictEvents) >= 3 {
+		r.memoryConflictEvents[key]++
+		return
+	}
+	r.memoryConflictEvents[key] = 1
+	r.addEvent("memory_conflict", message, detail)
 }
 
 func (r *TaskRun) hasEvent(kind, detailContains string) bool {
@@ -274,6 +298,9 @@ func loadTaskRuns() ([]TaskRun, error) {
 	var runs []TaskRun
 	if err := json.Unmarshal(data, &runs); err != nil {
 		return nil, err
+	}
+	if runs == nil {
+		return []TaskRun{}, nil
 	}
 	return runs, nil
 }

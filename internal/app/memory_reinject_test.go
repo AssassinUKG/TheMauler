@@ -132,3 +132,24 @@ func TestMaybeReinjectMemoryWithholdsConflictingTarget(t *testing.T) {
 		t.Fatalf("expected memory_conflict event, got %#v", run.Events)
 	}
 }
+
+func TestMemoryConflictSummaryCapsExamples(t *testing.T) {
+	conflicts := []string{
+		"target old",
+		"target old",
+		"host stale",
+		"ip mismatch",
+		"workspace mismatch",
+		"tool conflict",
+		"run conflict",
+	}
+	got := memoryConflictSummary(conflicts)
+	for _, want := range []string{"withheld_conflicts=6", "shown_examples=5", "... 1 more withheld conflict omitted"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "\n- ") != 5 {
+		t.Fatalf("summary should show five examples, got:\n%s", got)
+	}
+}

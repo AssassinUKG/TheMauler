@@ -1,0 +1,550 @@
+.right-inspector {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--c-pane);
+  color: var(--text);
+  border-left: 1px solid var(--border);
+}
+
+.inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--c-panel);
+  flex-shrink: 0;
+}
+
+.inspector-state-chip {
+  flex-shrink: 0;
+  max-width: 110px;
+  padding: 3px 7px;
+  border: 1px solid rgba(74, 222, 128, .28);
+  border-radius: 999px;
+  background: rgba(74, 222, 128, .06);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.inspector-head div {
+  min-width: 0;
+}
+
+.inspector-kicker {
+  display: block;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.inspector-head strong {
+  display: block;
+  color: var(--text-bright);
+  font-size: 13px;
+  text-transform: capitalize;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.inspector-head button {
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.inspector-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--c-panel);
+  flex-shrink: 0;
+}
+
+.inspector-tabs button {
+  min-width: 0;
+  height: 27px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: capitalize;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inspector-tabs button:hover {
+  color: var(--text);
+  background: var(--bg3);
+}
+
+.inspector-tabs button.active {
+  color: var(--text-bright);
+  background: var(--bg3);
+  border-color: var(--border);
+}
+
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.inspector-body > .agent-panel {
+  border-left: 0;
+}
+
+.inspector-section {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px;
+  scrollbar-width: thin;
+}
+
+.inspector-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.inspector-summary-grid div,
+.inspector-card,
+.command-card {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--c-card);
+}
+
+.inspector-summary-grid div {
+  min-width: 0;
+  padding: 8px;
+}
+
+.inspector-summary-grid .summary-target {
+  border-color: rgba(74, 222, 128, .38);
+  background: rgba(74, 222, 128, .065);
+}
+
+.inspector-summary-grid .summary-target strong {
+  color: #bbf7d0;
+  font-size: 14px;
+}
+
+.inspector-summary-grid .summary-vpn,
+.inspector-summary-grid .summary-shell {
+  background: rgba(255, 255, 255, .035);
+}
+
+.inspector-summary-grid span,
+.fact-line span {
+  display: block;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.inspector-summary-grid strong,
+.fact-line strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-bright);
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.inspector-card {
+  margin-bottom: 8px;
+  padding: 9px;
+}
+
+.inspector-card-title {
+  color: var(--text-bright);
+  font-size: 12px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.inspector-card-details {
+  padding: 0;
+}
+
+.inspector-card-details .inspector-card-title {
+  margin: 0;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.inspector-card-details .inspector-card-title::marker {
+  color: var(--accent);
+}
+
+.inspector-card-content {
+  padding: 0 12px 12px;
+}
+
+.inspector-list {
+  display: grid;
+  gap: 5px;
+}
+
+.workspace-mini-list {
+  display: grid;
+  gap: 3px;
+}
+
+.workspace-mini-row {
+  min-width: 0;
+  height: 30px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.workspace-mini-row:hover:not(:disabled) {
+  background: var(--bg2);
+  border-color: var(--border);
+}
+
+.workspace-mini-row:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.workspace-mini-row span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--bg2);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+
+.workspace-mini-row.file span {
+  color: var(--accent);
+}
+
+.workspace-mini-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workspace-mini-root {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-row-button,
+.inspector-open-path {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg1);
+  color: var(--text);
+  padding: 7px 8px;
+}
+
+.inspector-row-button span,
+.inspector-open-path span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.inspector-row-button small,
+.inspector-open-path small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.inspector-empty,
+.inspector-note {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.fact-line {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.fact-line:last-child {
+  border-bottom: 0;
+}
+
+.command-card {
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.command-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+.command-card-head > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.command-card-head strong {
+  min-width: 0;
+  color: var(--text-bright);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-card-head span {
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.command-card-actions {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.command-card-actions button {
+  height: 23px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg2);
+  color: var(--text-dim);
+  padding: 0 7px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.command-card-actions button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.command-line,
+.command-result {
+  margin: 0;
+  padding: 8px 9px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.command-line {
+  color: var(--text-bright);
+  background: var(--bg2);
+}
+
+.command-result {
+  color: var(--text);
+  border-top: 1px solid var(--border);
+  background: var(--bg1);
+}
+
+.command-error,
+.command-blocked,
+.command-denied {
+  border-color: var(--red);
+}
+
+.command-running {
+  border-color: var(--green);
+}
+
+/* Bigger right cockpit pass. */
+.right-inspector {
+  background: var(--c-pane);
+}
+
+.inspector-head {
+  min-height: 64px;
+  padding: 12px 14px;
+  background: var(--c-panel);
+}
+
+.inspector-kicker {
+  font-size: 11px;
+}
+
+.inspector-head strong {
+  font-size: 17px;
+}
+
+.inspector-head button {
+  height: 32px;
+  border-radius: 8px;
+  padding: 0 12px;
+}
+
+.inspector-tabs {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  padding: 10px 12px;
+  background: var(--c-panel);
+}
+
+.inspector-tabs button {
+  height: 34px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.inspector-section {
+  padding: 12px;
+}
+
+.inspector-workspace-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inspector-file-browser {
+  min-height: 420px;
+  flex: 1;
+  max-height: none;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--c-card);
+}
+
+.workspace-root-note {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--c-card);
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-file-browser .file-tree {
+  border: 0;
+}
+
+.inspector-file-browser .file-tree-header {
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.inspector-file-browser .lab-status-card {
+  display: none;
+}
+
+.inspector-summary-grid {
+  gap: 8px;
+}
+
+.inspector-summary-grid div,
+.inspector-card,
+.command-card {
+  border-radius: 9px;
+  background: var(--c-card);
+}
+
+.inspector-summary-grid div {
+  padding: 11px;
+}
+
+.inspector-summary-grid strong,
+.fact-line strong {
+  font-size: 13px;
+}
+
+.inspector-card {
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.inspector-card-title {
+  font-size: 13px;
+}
+
+.workspace-mini-row {
+  height: 34px;
+  border-radius: 7px;
+}
+
+.command-card-head {
+  min-height: 40px;
+}

@@ -38,7 +38,7 @@ func TestEscalationProducesRecoveryToolCall(t *testing.T) {
 	if !ok || used != 1 {
 		t.Fatalf("escalation ok=%v used=%d", ok, used)
 	}
-	if len(attempt.ToolCalls) != 1 || attempt.ToolCalls[0].Function.Name != "read_file" {
+	if len(attempt.ToolCalls) != 1 || attempt.ToolCalls[0].Function.Name != "read" {
 		t.Fatalf("bad escalation tool calls: %#v", attempt.ToolCalls)
 	}
 	msgs := app.history.Messages()
@@ -77,7 +77,7 @@ func (c *escalationMockClient) Chat(ctx context.Context, req llm.Request) (<-cha
 				ID:   "esc-1",
 				Type: "function",
 				Function: llm.FunctionCall{
-					Name:      "read_file",
+					Name:      "read",
 					Arguments: args,
 				},
 			}},

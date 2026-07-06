@@ -30,6 +30,10 @@ export function CalibrateSpec(arg1) {
   return window['go']['app']['App']['CalibrateSpec'](arg1);
 }
 
+export function ClearAgentEvalReports() {
+  return window['go']['app']['App']['ClearAgentEvalReports']();
+}
+
 export function ClearBenchmarkRuns() {
   return window['go']['app']['App']['ClearBenchmarkRuns']();
 }
@@ -86,6 +90,14 @@ export function DeleteSkill(arg1) {
   return window['go']['app']['App']['DeleteSkill'](arg1);
 }
 
+export function DeleteTelegramMessage(arg1, arg2) {
+  return window['go']['app']['App']['DeleteTelegramMessage'](arg1, arg2);
+}
+
+export function DispatchChannelMessage(arg1) {
+  return window['go']['app']['App']['DispatchChannelMessage'](arg1);
+}
+
 export function EncodeFileBase64(arg1) {
   return window['go']['app']['App']['EncodeFileBase64'](arg1);
 }
@@ -108,6 +120,10 @@ export function GetAutoAgents() {
 
 export function GetAutonomous() {
   return window['go']['app']['App']['GetAutonomous']();
+}
+
+export function GetChannelBusStatus() {
+  return window['go']['app']['App']['GetChannelBusStatus']();
 }
 
 export function GetFileTree(arg1) {
@@ -140,6 +156,10 @@ export function GetProjectInstructionsSummary() {
 
 export function GetSettings() {
   return window['go']['app']['App']['GetSettings']();
+}
+
+export function GetSharedTerminalState() {
+  return window['go']['app']['App']['GetSharedTerminalState']();
 }
 
 export function GetSkill(arg1) {
@@ -178,8 +198,16 @@ export function KillLocalInferenceServers() {
   return window['go']['app']['App']['KillLocalInferenceServers']();
 }
 
+export function ListAgentSessions() {
+  return window['go']['app']['App']['ListAgentSessions']();
+}
+
 export function ListBenchmarkRuns() {
   return window['go']['app']['App']['ListBenchmarkRuns']();
+}
+
+export function ListChannelWorkQueue() {
+  return window['go']['app']['App']['ListChannelWorkQueue']();
 }
 
 export function ListLearningCandidates(arg1) {
@@ -272,6 +300,10 @@ export function ReadFileContent(arg1) {
 
 export function RecordLearningDecision(arg1, arg2, arg3) {
   return window['go']['app']['App']['RecordLearningDecision'](arg1, arg2, arg3);
+}
+
+export function RecoverSharedTerminal() {
+  return window['go']['app']['App']['RecoverSharedTerminal']();
 }
 
 export function ReindexSessionRecall() {
@@ -368,6 +400,10 @@ export function SelectWorkspaceFolder(arg1) {
 
 export function SendMessage(arg1, arg2, arg3) {
   return window['go']['app']['App']['SendMessage'](arg1, arg2, arg3);
+}
+
+export function SendTelegramMessage(arg1, arg2) {
+  return window['go']['app']['App']['SendTelegramMessage'](arg1, arg2);
 }
 
 export function SetAgentModeOverride(arg1) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,14 @@ type Tool interface {
 // Registry holds all registered tools.
 type Registry struct {
 	tools map[string]Tool
+}
+
+type ToolSpec struct {
+	Name        string
+	Description string
+	Schema      json.RawMessage
+	Destructive bool
+	Metadata    ToolMetadata
 }
 
 // New returns a Registry pre-populated with the default tool set.
@@ -59,17 +68,124 @@ func (r *Registry) All() []Tool {
 	return out
 }
 
+// Spec returns a typed registry record for routers, diagnostics, and UI code.
+// It is additive to the legacy Tool interface so existing tools keep working.
+func (r *Registry) Spec(name string) (ToolSpec, bool) {
+	t, ok := r.Get(name)
+	if !ok {
+		return ToolSpec{}, false
+	}
+	return toolSpecFor(t), true
+}
+
+// Specs returns stable, name-sorted typed records for all registered tools.
+func (r *Registry) Specs() []ToolSpec {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]ToolSpec, 0, len(names))
+	for _, name := range names {
+		out = append(out, toolSpecFor(r.tools[name]))
+	}
+	return out
+}
+
+// SpecsFor returns typed records after applying the same enabled/allowed gates
+// used for LLM tool definitions. This is the Tool Registry v2 read path.
+func (r *Registry) SpecsFor(enabled map[string]bool, allowed map[string]bool) []ToolSpec {
+	specs := make([]ToolSpec, 0, len(r.tools))
+	for _, spec := range r.Specs() {
+		if len(allowed) > 0 && !allowed[spec.Name] {
+			continue
+		}
+		if enabled != nil {
+			if on, ok := enabledState(enabled, spec.Name); ok && !on {
+				continue
+			}
+		}
+		specs = append(specs, spec)
+	}
+	return specs
+}
+
+func toolSpecFor(t Tool) ToolSpec {
+	return ToolSpec{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Schema:      t.Schema(),
+		Destructive: t.Destructive(),
+		Metadata:    MetadataFor(t),
+	}
+}
+
+const maxLLMToolDescriptionRunes = 420
+
+func llmToolFunctionDef(t Tool) llm.ToolFunctionDef {
+	return llm.ToolFunctionDef{
+		Name:        t.Name(),
+		Description: compactToolDescription(t.Description()),
+		Parameters:  compactToolSchema(t.Schema()),
+	}
+}
+
+func compactToolDescription(desc string) string {
+	desc = strings.Join(strings.Fields(desc), " ")
+	return truncateToolRunes(desc, maxLLMToolDescriptionRunes)
+}
+
+func compactToolSchema(schema json.RawMessage) json.RawMessage {
+	if len(schema) == 0 {
+		return schema
+	}
+	var value any
+	if err := json.Unmarshal(schema, &value); err != nil {
+		return schema
+	}
+	compactSchemaValue(value)
+	out, err := json.Marshal(value)
+	if err != nil {
+		return schema
+	}
+	return json.RawMessage(out)
+}
+
+func compactSchemaValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		delete(typed, "description")
+		delete(typed, "title")
+		delete(typed, "examples")
+		delete(typed, "default")
+		for _, child := range typed {
+			compactSchemaValue(child)
+		}
+	case []any:
+		for _, child := range typed {
+			compactSchemaValue(child)
+		}
+	}
+}
+
+func truncateToolRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "... [truncated]"
+}
+
 // ToToolDefs converts the registry to the slice format the LLM API expects.
 func (r *Registry) ToToolDefs() []llm.ToolDef {
 	defs := make([]llm.ToolDef, 0, len(r.tools))
 	for _, t := range r.tools {
 		defs = append(defs, llm.ToolDef{
-			Type: "function",
-			Function: llm.ToolFunctionDef{
-				Name:        t.Name(),
-				Description: t.Description(),
-				Parameters:  t.Schema(),
-			},
+			Type:     "function",
+			Function: llmToolFunctionDef(t),
 		})
 	}
 	return defs
@@ -86,28 +202,47 @@ func (r *Registry) ToEnabledToolDefs(enabled map[string]bool) []llm.ToolDef {
 			}
 		}
 		defs = append(defs, llm.ToolDef{
-			Type: "function",
-			Function: llm.ToolFunctionDef{
-				Name:        name,
-				Description: t.Description(),
-				Parameters:  t.Schema(),
-			},
+			Type:     "function",
+			Function: llmToolFunctionDef(t),
+		})
+	}
+	return defs
+}
+
+// ToEnabledToolDefsFor converts only enabled tools included in allowed. A nil or
+// empty allowed map means "all enabled tools", matching ToEnabledToolDefs.
+func (r *Registry) ToEnabledToolDefsFor(enabled map[string]bool, allowed map[string]bool) []llm.ToolDef {
+	if len(allowed) == 0 {
+		return r.ToEnabledToolDefs(enabled)
+	}
+	defs := make([]llm.ToolDef, 0, len(r.tools))
+	for _, t := range r.tools {
+		name := t.Name()
+		if !allowed[name] {
+			continue
+		}
+		if enabled != nil {
+			if on, ok := enabledState(enabled, name); ok && !on {
+				continue
+			}
+		}
+		defs = append(defs, llm.ToolDef{
+			Type:     "function",
+			Function: llmToolFunctionDef(t),
 		})
 	}
 	return defs
 }
 
 func enabledState(enabled map[string]bool, name string) (bool, bool) {
-	if name == "bash" {
-		if on, ok := enabled["shell"]; ok {
-			return on, true
-		}
-		if on, ok := enabled["bash"]; ok {
-			return on, true
-		}
+	if enabled == nil {
+		return true, false
 	}
 	on, ok := enabled[name]
-	return on, ok
+	if !ok {
+		return false, true
+	}
+	return on, true
 }
 
 // Run dispatches a tool call by name and returns the result string.
@@ -128,38 +263,19 @@ func (r *Registry) Run(ctx context.Context, call llm.ToolCallDef) (string, error
 // defaults returns the built-in tool instances.
 func defaults() []Tool {
 	return []Tool{
-		&ReadFile{},
-		&ReadMany{},
-		&FileOutline{},
-		&ReadChunks{},
-		&ReadPDF{},
-		&WriteFile{},
-		&EditFile{},
+		&Read{},
+		&Write{},
+		&Edit{},
 		&Shell{TimeoutSecs: 120},
-		&Bash{TimeoutSecs: 120},
 		&Glob{},
 		&Grep{},
 		&SessionSearch{},
-		&SQLiteSchema{},
-		&SQLiteQuery{},
-		&TodoCreate{},
-		&TodoUpdate{},
-		&TodoDone{},
-		&TodoBlocked{},
-		&TodoList{},
-		&TodoClear{},
+		&SQLite{},
+		&TodoWrite{},
 		&WebSearch{},
 		&FetchURL{},
-		&BrowserOpen{},
-		&BrowserSnapshot{},
-		&BrowserClick{},
-		&BrowserType{},
-		&BrowserExtract{},
-		&BrowserScreenshot{},
-		&BrowserClose{},
-		&BrowserAgent{TimeoutSecs: 300},
-		&SkillsList{},
-		&SkillView{},
+		&Browser{},
+		&Skill{},
 	}
 }
 

@@ -84,7 +84,7 @@ The loop lives in `runAgent` (`internal/app/app.go`, `agentLoop:` at L2173). Wha
 - **Persist-before-loss nudge**: first time context is dropped, injects a system message telling the model to write findings to a file/memory *now* (L2265–2271). This is a genuinely novel mitigation for the "dumb zone" data-loss problem.
 
 **Local-model thinking control**
-- After `NoThinkAfterToolCalls` (default 3) tool calls, or after any no-tool continue, it **forces thinking off** (`forceNoThink`, L2287–2292). The comment is precise: *"Qwen3 tends to place tool calls inside the `<think>` block when thinking is on and context is heavy, which causes grammar-triggered early termination."* This directly targets llama.cpp issue #20837. ✅ Principle L.
+- Tool-enabled turns now force thinking off from the first tool turn, and `NoThinkAfterToolCalls` defaults to 2 as a fallback. Qwen3 tends to place tool calls inside the `<think>` block when thinking is on and context is heavy with prior tool results, which causes grammar-triggered early termination. This directly targets llama.cpp issue #20837. ✅ Principle L.
 
 **Backend-failure resilience (pre-output)**
 - Up to **15 retries with exponential backoff** (1→2→4→8→15s cap) for recoverable inference failures *before any output* — explicitly to ride out a managed llama-server restart / 27B reload (`maxPreOutputInferenceRetries=15`, L2304–2338, 7098–7126). ✅ This is beyond what generic frameworks do; it's tuned to your InferenceBridge reality.

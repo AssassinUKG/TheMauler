@@ -42,6 +42,7 @@ export interface Settings {
     toolsets: Record<string, string[]>
     enabled_tools: Record<string, boolean>
     safe_rules: ToolSafeRule[]
+    tool_grammar_constraint: boolean
   }
   agents: {
     mode_override: string
@@ -55,6 +56,7 @@ export interface Settings {
       reasoning_effort: string
       presets: Record<string, AgentModePreset>
     }
+  environment: EnvironmentConfig
   context: {
     auto_inject_file: boolean
     auto_inject_cursor: boolean
@@ -66,6 +68,8 @@ export interface Settings {
     workspace_dir: string
     open_folders: WorkspaceFolder[]
     lab: LabContext
+    active_lab_profile: string
+    lab_profiles: LabProfile[]
   }
   memory: {
     enabled: boolean
@@ -105,6 +109,7 @@ export interface Settings {
     max_display_width: number
     wsl_path_translate: boolean
   }
+  telegram: TelegramConfig
   logging: {
     enabled: boolean
     log_tool_inputs: boolean
@@ -113,6 +118,23 @@ export interface Settings {
     max_runs: number
   }
   log_level: string
+}
+
+export interface TelegramConfig {
+  enabled: boolean
+  token: string
+  bot_username: string
+  require_mention: boolean
+  allow_from: string[]
+  default_project: string
+  default_profile: string
+  default_mode: string
+  default_toolset: string
+  send_progress: boolean
+  progress_interval_s: number
+  voice_replies: string
+  transcription_mode: string
+  transcription_url: string
 }
 
 export interface AgentModePreset {
@@ -140,24 +162,69 @@ export interface WorkspaceFolder {
 }
 
 export interface LabContext {
+  id: string
+  name: string
   target: string
+  hostname: string
   vpn_interface: string
   latest_artifact: string
   ops_profile: string
+  evidence_policy: string
+  access_preference: string
+  notes: string
+}
+
+export interface LabProfile {
+  id: string
+  name: string
+  workspace_dir: string
+  target: string
+  hostname: string
+  vpn_interface: string
+  latest_artifact: string
+  ops_profile: string
+  evidence_policy: string
+  access_preference: string
+  notes: string
+}
+
+export interface EnvironmentConfig {
+  main_os: string
+  ai_shell_backend: string
+  ai_shell_distro: string
+  ai_shell_user: string
+  target_work_backend: string
+  listener_backend: string
+  listener_command: string
+  lhost_source: string
+  manual_lhost: string
+  prefer_terminal_tools: boolean
+  reverse_shell_guidance: string
+  user_correction_policy: string
 }
 
 export interface LabStatus {
   agent_root: string
+  lab_id: string
+  lab_name: string
   shell_backend: string
   shell_distro: string
   shell_user: string
   target: string
+  hostname: string
   vpn_interface: string
   vpn_ip: string
   vpn_cidr: string
   vpn_kind: string
   latest_artifact: string
   ops_profile: string
+  evidence_policy: string
+  access_preference: string
+  notes: string
+  listener_backend: string
+  listener_command: string
+  lhost_source: string
+  manual_lhost: string
   open_folders: WorkspaceFolder[]
 }
 
@@ -222,6 +289,7 @@ export interface HistoryStats {
   rollback_len: number
   window: number
   reserve: number
+  configured_window?: number
 }
 
 export interface SessionChatMessage {
@@ -338,14 +406,78 @@ export interface TaskRun {
   events?: TaskRunEvent[]
 }
 
+export interface ChannelAttachment {
+  kind: string
+  file_id?: string
+  file_name?: string
+  content_type?: string
+  path?: string
+  text?: string
+}
+
+export interface ChannelEnvelope {
+  id: string
+  source: string
+  session_id: string
+  user_id?: string
+  username?: string
+  text: string
+  attachments?: ChannelAttachment[]
+  metadata?: Record<string, string>
+  created_at?: string
+}
+
+export interface ChannelRoute {
+  lane: string
+  command?: string
+  argument?: string
+  policy?: string
+  read_only: boolean
+  reason?: string
+  project?: string
+  mode?: string
+  toolset?: string
+  from_voice?: boolean
+}
+
+export interface ChannelResponse {
+  lane: string
+  status: string
+  message: string
+  queued?: boolean
+  queue_id?: string
+  run_started?: boolean
+  data?: Record<string, string>
+}
+
+export interface ChannelWorkItem {
+  id: string
+  envelope: ChannelEnvelope
+  route: ChannelRoute
+  status: string
+  created_at: string
+}
+
 export interface AgentEvalResult {
   name: string
   pass: boolean
+  artifact_pass: boolean
+  hygiene_pass: boolean
+  status_pass: boolean
   status: string
   tool_calls: number
+  tool_success_rate: number
   auto_continues: number
   truncations: number
   tool_errors: number
+  repeated_tool_inputs: number
+  repeated_skips: number
+  repeat_tool_rate: number
+  verifier_prompts: number
+  max_routed_tools: number
+  prompt_warnings: number
+  stability_score: number
+  false_done: boolean
   duration_ms: number
   fail_reason?: string
 }
@@ -355,6 +487,8 @@ export interface AgentEvalReport {
   pass_count: number
   total: number
   profile: string
+  id?: string
+  created_at?: string
 }
 
 export interface GrammarToolArgsProbeResult {
@@ -585,6 +719,21 @@ export const ExportTaskRunsJSON = (): Promise<string> =>
 export const ImportTaskRunsJSON = (raw: string): Promise<number> =>
   call('app.App.ImportTaskRunsJSON', raw)
 
+export const DispatchChannelMessage = (env: ChannelEnvelope): Promise<ChannelResponse> =>
+  call('app.App.DispatchChannelMessage', env)
+
+export const ListChannelWorkQueue = (): Promise<ChannelWorkItem[]> =>
+  call('app.App.ListChannelWorkQueue')
+
+export const GetChannelBusStatus = (): Promise<Record<string, string>> =>
+  call('app.App.GetChannelBusStatus')
+
+export const SendTelegramMessage = (chatID: string, text: string): Promise<string> =>
+  call('app.App.SendTelegramMessage', chatID, text)
+
+export const DeleteTelegramMessage = (chatID: string, messageID: string): Promise<void> =>
+  call('app.App.DeleteTelegramMessage', chatID, messageID)
+
 export const ListLedgerEvents = (limit: number): Promise<LedgerEvent[]> =>
   call('app.App.ListLedgerEvents', limit)
 
@@ -715,6 +864,19 @@ export const ListWSLDistros = (): Promise<string[]> =>
   call('app.App.ListWSLDistros')
 
 export interface MaintenanceResult {
+  summary: string
+  lines: string[]
+}
+
+export interface TerminalRecoveryResult {
+  status: string
+  summary: string
+  lines: string[]
+}
+
+export interface TerminalStateSnapshot {
+  session: string
+  state: string
   summary: string
   lines: string[]
 }
@@ -866,3 +1028,9 @@ export const ShellResize = (id: string, cols: number, rows: number): Promise<voi
 
 export const ShellClose = (id: string): Promise<void> =>
   call('app.App.ShellClose', id)
+
+export const RecoverSharedTerminal = (): Promise<TerminalRecoveryResult> =>
+  call('app.App.RecoverSharedTerminal')
+
+export const GetSharedTerminalState = (): Promise<TerminalStateSnapshot> =>
+  call('app.App.GetSharedTerminalState')

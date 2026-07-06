@@ -152,7 +152,7 @@ func toolResultPreview(full, handle string, previewChars int) string {
 	head := string(runes[:half])
 	tail := string(runes[len(runes)-half:])
 	omitted := len(runes) - (half * 2)
-	return fmt.Sprintf("%s\n\n[tool result offloaded: %d chars omitted, result_id=%s. Call read_tool_result with this result_id, offset, and limit to inspect the full output.]\n\n%s",
+	return fmt.Sprintf("%s\n\n[tool result offloaded: %d chars omitted (the MIDDLE). result_id=%s. Do NOT re-run the command to see more — call read_tool_result with this result_id (and offset/limit) to read the omitted middle, where scan findings usually are.]\n\n%s",
 		head, omitted, handle, tail)
 }
 

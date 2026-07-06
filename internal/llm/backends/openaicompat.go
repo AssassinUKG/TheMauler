@@ -93,11 +93,22 @@ func (c *OpenAICompat) Name() string { return c.clientName }
 // LoadModel asks backends that support model management to load the configured
 // model with profile load-time settings.
 func (c *OpenAICompat) LoadModel(ctx context.Context) error {
+	return c.loadModel(ctx, false)
+}
+
+// ForceLoadModel asks backends that support model management to reload even
+// when the same model is already loaded. Benchmarks use this to verify exact
+// requested context sizes instead of reusing a larger loaded context.
+func (c *OpenAICompat) ForceLoadModel(ctx context.Context) error {
+	return c.loadModel(ctx, true)
+}
+
+func (c *OpenAICompat) loadModel(ctx context.Context, force bool) error {
 	if c.modelID == "" || c.contextTokens <= 0 {
 		return nil
 	}
 	if c.clientName == "llamacpp" {
-		return c.loadLlamaCppModel(ctx)
+		return c.loadLlamaCppModel(ctx, force)
 	}
 	if c.clientName != "lmstudio" {
 		return nil
@@ -107,7 +118,7 @@ func (c *OpenAICompat) LoadModel(ctx context.Context) error {
 	// Unload any other loaded models first so we never run two large models
 	// simultaneously — LM Studio will happily load both if not told otherwise.
 	models, err := c.listLMStudioModels(ctx, nativeBase)
-	if err == nil && c.hasUsableLMStudioTarget(models) {
+	if !force && err == nil && c.hasUsableLMStudioTarget(models) {
 		return nil
 	}
 	if err == nil {
@@ -139,11 +150,14 @@ func (c *OpenAICompat) LoadModel(ctx context.Context) error {
 	return nil
 }
 
-func (c *OpenAICompat) loadLlamaCppModel(ctx context.Context) error {
+func (c *OpenAICompat) loadLlamaCppModel(ctx context.Context, force bool) error {
 	body := map[string]interface{}{
 		"model":            c.modelID,
 		"context_size":     c.contextTokens,
 		"echo_load_config": true,
+	}
+	if force {
+		body["force_reload"] = true
 	}
 	if c.loadKwargsJSON != "" {
 		body["chat_template_kwargs_json"] = c.loadKwargsJSON
@@ -623,6 +637,9 @@ type chatReqBody struct {
 	ChatTemplateKwargs *chatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
 	// Structured output
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	// Raw GBNF grammar (llama.cpp) constraining generated text — used to force
+	// valid tool-call JSON for non-native local models.
+	Grammar string `json:"grammar,omitempty"`
 }
 
 type streamOptions struct {
@@ -720,6 +737,9 @@ func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
 			Type:       "json_schema",
 			JSONSchema: &jsonSchemaSpec{Schema: req.JSONSchema},
 		}
+	}
+	if strings.TrimSpace(req.Grammar) != "" {
+		body.Grammar = req.Grammar
 	}
 
 	return json.Marshal(body)

@@ -19,7 +19,7 @@ func (t *Grep) Name() string      { return "grep" }
 func (t *Grep) Destructive() bool { return false }
 
 func (t *Grep) Description() string {
-	return "Search for a regex pattern across files. " +
+	return "Search for a regex pattern across files. Prefer this over shell grep for codebase inspection and saved artifacts because it returns bounded file:line evidence. " +
 		"Returns matching lines with file path and line number. " +
 		"Limited to 100 matches."
 }

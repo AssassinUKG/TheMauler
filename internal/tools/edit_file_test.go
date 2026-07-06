@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"mauler/internal/settings"
 )
@@ -131,7 +132,7 @@ func TestEditFileReportsLineCounts(t *testing.T) {
 
 func TestEditFileNotFoundOnDisk(t *testing.T) {
 	_, err := runEditFile(t, map[string]any{
-		"path":       "/nonexistent/path/file.txt",
+		"path":       filepath.Join(t.TempDir(), "missing", "file.txt"),
 		"old_string": "x",
 		"new_string": "y",
 	})
@@ -171,12 +172,19 @@ func TestEditFileWSLAbsolutePathRoutesToWSL(t *testing.T) {
 	name := "mauler_edit_file_test_" + strings.ReplaceAll(filepath.Base(t.TempDir()), "\\", "_") + ".txt"
 	wslPath := "/tmp/" + name
 	seed := "alpha\nold block\nomega\n"
-	createCmd := exec.Command("wsl.exe", "--", "bash", "-lc", "printf '%s' "+shellQuote(seed)+" > "+shellQuote(wslPath))
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer setupCancel()
+	createCmd := exec.CommandContext(setupCtx, "wsl.exe", "--", "bash", "-lc", "printf '%s' "+shellQuote(seed)+" > "+shellQuote(wslPath))
 	if out, err := createCmd.CombinedOutput(); err != nil {
+		if setupCtx.Err() != nil {
+			t.Skipf("WSL not usable for test setup: %v", setupCtx.Err())
+		}
 		t.Skipf("WSL not usable for test setup: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	t.Cleanup(func() {
-		_ = exec.Command("wsl.exe", "--", "bash", "-lc", "rm -f -- "+shellQuote(wslPath)).Run()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cleanupCancel()
+		_ = exec.CommandContext(cleanupCtx, "wsl.exe", "--", "bash", "-lc", "rm -f -- "+shellQuote(wslPath)).Run()
 	})
 
 	out, err := runEditFile(t, map[string]any{

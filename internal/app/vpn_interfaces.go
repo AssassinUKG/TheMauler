@@ -27,7 +27,36 @@ func (a *App) ListVPNInterfaces() ([]VPNInterfaceInfo, error) {
 	a.mu.Lock()
 	cfg := *a.cfg
 	a.mu.Unlock()
-	return listVPNInterfacesForConfig(cfg), nil
+	return a.cachedVPNInterfaces(cfg), nil
+}
+
+func (a *App) cachedVPNInterfaces(cfg settings.Settings) []VPNInterfaceInfo {
+	key := vpnProbeCacheKey(cfg)
+	now := time.Now()
+	a.vpnMu.Lock()
+	if key == a.vpnCacheKey && now.Sub(a.vpnCacheAt) < 5*time.Second {
+		cached := append([]VPNInterfaceInfo(nil), a.vpnCacheList...)
+		a.vpnMu.Unlock()
+		return cached
+	}
+	a.vpnMu.Unlock()
+
+	items := listVPNInterfacesForConfig(cfg)
+	a.vpnMu.Lock()
+	a.vpnCacheKey = key
+	a.vpnCacheAt = now
+	a.vpnCacheList = append([]VPNInterfaceInfo(nil), items...)
+	a.vpnMu.Unlock()
+	return items
+}
+
+func vpnProbeCacheKey(cfg settings.Settings) string {
+	return strings.Join([]string{
+		runtime.GOOS,
+		strings.TrimSpace(cfg.Tools.ShellBackend),
+		strings.TrimSpace(cfg.Tools.ShellDistro),
+		strings.TrimSpace(cfg.Tools.ShellUser),
+	}, "\x00")
 }
 
 func listVPNInterfacesForConfig(cfg settings.Settings) []VPNInterfaceInfo {
@@ -42,11 +71,15 @@ func listVPNInterfacesForConfig(cfg settings.Settings) []VPNInterfaceInfo {
 }
 
 func selectedVPNInfo(cfg settings.Settings) (VPNInterfaceInfo, bool) {
+	return selectedVPNInfoFromList(cfg, listVPNInterfacesForConfig(cfg))
+}
+
+func selectedVPNInfoFromList(cfg settings.Settings, items []VPNInterfaceInfo) (VPNInterfaceInfo, bool) {
 	want := strings.TrimSpace(cfg.Context.Lab.VPNInterface)
 	if want == "" {
 		return VPNInterfaceInfo{}, false
 	}
-	for _, item := range listVPNInterfacesForConfig(cfg) {
+	for _, item := range items {
 		if item.Name == want || item.CIDR == want || item.IP == want || item.Label == want {
 			return item, true
 		}
@@ -94,7 +127,9 @@ func wslIPv4Interfaces(distro, user string) []VPNInterfaceInfo {
 	args = append(args, "--", "ip", "-o", "-4", "addr", "show")
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "wsl.exe", args...).Output()
+	cmd := exec.CommandContext(ctx, "wsl.exe", args...)
+	hideShellWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return nil
 	}

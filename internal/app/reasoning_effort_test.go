@@ -37,6 +37,17 @@ func TestEffortToThinkingMapping(t *testing.T) {
 	}
 }
 
+func TestEffortToThinkingDoesNotEnableDisabledProfileThinking(t *testing.T) {
+	profile := settings.Profile{
+		Thinking: false,
+		NoThink:  settings.GenerationParams{MaxTokens: 2048},
+	}
+	got := effortToThinking("high", profile)
+	if got.enableThinking {
+		t.Fatalf("high effort must not force thinking on for a no-thinking profile: %#v", got)
+	}
+}
+
 func TestBuildChatRequestAppliesMinimalEffortAndForceNoThinkFloor(t *testing.T) {
 	profile := settings.Profile{
 		Thinking:      true,

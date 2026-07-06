@@ -25,7 +25,7 @@ func TestRunCheckpointRoundTrip(t *testing.T) {
 	}
 	app.history.Append(llm.NewTextMessage(llm.RoleUser, "hello checkpoint"))
 	run := startTaskRun("hello checkpoint", "Builder", "mock", "mock-model")
-	run.Tools = []TaskToolEvent{{Name: "read_file", Status: "done"}}
+	run.Tools = []TaskToolEvent{{Name: "read", Status: "done"}}
 
 	app.saveRunCheckpoint(run, cfg)
 
@@ -60,9 +60,9 @@ func TestMaybeCheckpointThrottles(t *testing.T) {
 	}
 	run := startTaskRun("prompt", "Builder", "mock", "mock-model")
 	run.Tools = []TaskToolEvent{
-		{Name: "read_file", Status: "done"},
+		{Name: "read", Status: "done"},
 		{Name: "grep", Status: "done"},
-		{Name: "read_file", Status: "done"},
+		{Name: "read", Status: "done"},
 	}
 
 	app.maybeCheckpoint(run, cfg, 4)
@@ -70,7 +70,7 @@ func TestMaybeCheckpointThrottles(t *testing.T) {
 		t.Fatalf("checkpoint before throttle boundary = %#v err=%v", checkpoints, err)
 	}
 
-	run.Tools = append(run.Tools, TaskToolEvent{Name: "edit_file", Status: "done"})
+	run.Tools = append(run.Tools, TaskToolEvent{Name: "edit", Status: "done"})
 	app.maybeCheckpoint(run, cfg, 4)
 	checkpoints, err := app.ListResumableRuns()
 	if err != nil {

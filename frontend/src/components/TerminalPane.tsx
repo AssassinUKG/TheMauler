@@ -1,17 +1,40 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, type Dispatch, type RefObject, type SetStateAction } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { EventsOn } from '../wailsjs/runtime'
-import { OpenShell, ShellInput, ShellResize, ShellClose } from '../wailsjs/go'
+import { OpenShell, ShellInput, ShellResize, ShellClose, RecoverSharedTerminal, GetSharedTerminalState, type TerminalRecoveryResult, type TerminalStateSnapshot } from '../wailsjs/go'
 import './TerminalPane.css'
 
 interface Props {
   visible: boolean
 }
 
-// Decode a base64 PTY chunk into raw bytes for xterm.js (preserves colours,
-// cursor moves and UTF-8 — never round-trips through a lossy string).
+interface TerminalTab {
+  localId: string
+  title: string
+  sessionId: string | null
+}
+
+interface AICommandEvent {
+  id: string
+  command: string
+  tool: string
+  status: 'running' | 'done' | 'error' | 'live'
+  session?: string
+  timeout?: string
+  exitCode?: string
+  durationMs?: number
+  result?: string
+  startedAt: string
+  endedAt?: string
+}
+
+interface GroupedAICommandEvent extends AICommandEvent {
+  count: number
+  ids: string[]
+}
+
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64)
   const bytes = new Uint8Array(bin.length)
@@ -27,25 +50,250 @@ const TERM_THEME = {
 }
 
 export function TerminalPane({ visible }: Props) {
-  const [sessionId, setSessionId] = useState<string | null>(null)
+	const [tabs, setTabs] = useState<TerminalTab[]>(() => [newTab(1)])
+	const [activeId, setActiveId] = useState(tabs[0].localId)
+	const [aiCommands, setAICommands] = useState<AICommandEvent[]>([])
+	const [showAICommands, setShowAICommands] = useState(() => loadAICommandsVisible())
+	const [aiCommandsWidth, setAICommandsWidth] = useState(() => loadAICommandsWidth())
+	const seq = useRef(1)
+	const stackRef = useRef<HTMLDivElement>(null)
+
+	const setAICommandsVisible = useCallback((visible: boolean | ((value: boolean) => boolean)) => {
+		setShowAICommands(prev => {
+			const next = typeof visible === 'function' ? visible(prev) : visible
+			localStorage.setItem('mauler.aiCommandsVisible', next ? '1' : '0')
+			return next
+		})
+	}, [])
+
+  const addTab = useCallback(() => {
+    seq.current += 1
+    const tab = newTab(seq.current)
+    setTabs(prev => [...prev, tab])
+    setActiveId(tab.localId)
+  }, [])
+
+  const closeTab = useCallback((localId: string) => {
+    setTabs(prev => {
+      const tab = prev.find(item => item.localId === localId)
+      if (tab?.sessionId) void ShellClose(tab.sessionId).catch(() => null)
+      const next = prev.filter(item => item.localId !== localId)
+      if (next.length === 0) {
+        const fresh = newTab(++seq.current)
+        setActiveId(fresh.localId)
+        return [fresh]
+      }
+      if (activeId === localId) setActiveId(next[Math.max(0, prev.findIndex(item => item.localId === localId) - 1)]?.localId ?? next[0].localId)
+      return next
+    })
+  }, [activeId])
+
+  const updateTab = useCallback((localId: string, patch: Partial<TerminalTab>) => {
+    setTabs(prev => prev.map(tab => tab.localId === localId ? { ...tab, ...patch } : tab))
+  }, [])
+
+  useEffect(() => {
+    const offStart = EventsOn('mauler:terminal_command_start', (...args: unknown[]) => {
+      const msg = args[0] as { id?: string; session?: string; command?: string; timeout?: string; tool?: string }
+      const id = msg.id || `cmd-${Date.now()}`
+      const event: AICommandEvent = {
+        id,
+        session: msg.session,
+        command: msg.command || '',
+        timeout: msg.timeout,
+        tool: msg.tool || 'shell',
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      }
+      setAICommands(prev => [
+        event,
+        ...prev.filter(item => item.id !== id),
+      ].slice(0, 80))
+    })
+    const offDone = EventsOn('mauler:terminal_command_done', (...args: unknown[]) => {
+      const msg = args[0] as { id?: string; session?: string; exit_code?: string; duration_ms?: string; tool?: string; result?: string }
+      const id = msg.id || `cmd-${Date.now()}`
+      setAICommands(prev => {
+        const existing = prev.find(item => item.id === id)
+        const exitCode = msg.exit_code || ''
+        const status = terminalCommandStatus(msg.tool || existing?.tool, exitCode)
+        const next: AICommandEvent = {
+          id,
+          session: msg.session || existing?.session,
+          command: existing?.command || (msg.tool === 'terminal_read' ? 'terminal_read' : ''),
+          timeout: existing?.timeout,
+          tool: msg.tool || existing?.tool || 'shell',
+          status,
+          exitCode,
+          durationMs: Number(msg.duration_ms || 0) || existing?.durationMs,
+          result: msg.result || existing?.result,
+          startedAt: existing?.startedAt || new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+        }
+        return [next, ...prev.filter(item => item.id !== id)].slice(0, 80)
+      })
+    })
+    return () => { offStart(); offDone() }
+  }, [])
+
+  useEffect(() => {
+    const offToolCall = EventsOn('mauler:tool_call', (...args: unknown[]) => {
+      const msg = args[0] as { id?: string; name?: string; input?: string; timeout?: string }
+      if (!isCommandLikeTool(msg.name)) return
+      if (isTerminalTool(msg.name)) return
+      const id = msg.id || `tool-${Date.now()}`
+      const event: AICommandEvent = {
+        id,
+        command: commandTextFromToolInput(msg.name, msg.input),
+        timeout: msg.timeout,
+        tool: msg.name || 'tool',
+        status: 'running',
+        startedAt: new Date().toISOString(),
+      }
+      setAICommands(prev => [event, ...prev.filter(item => item.id !== id)].slice(0, 80))
+    })
+    const offToolResult = EventsOn('mauler:tool_result', (...args: unknown[]) => {
+      const msg = args[0] as { id?: string; name?: string; result?: string }
+      if (!isCommandLikeTool(msg.name)) return
+      if (isTerminalTool(msg.name)) return
+      const id = msg.id || `tool-${Date.now()}`
+      setAICommands(prev => {
+        const existing = prev.find(item => item.id === id)
+        const exitCode = exitCodeFromToolResult(msg.result || '')
+        const status: AICommandEvent['status'] = exitCode && exitCode !== '0' ? 'error' : 'done'
+        const next: AICommandEvent = {
+          id,
+          session: existing?.session,
+          command: existing?.command || commandTextFromToolInput(msg.name, ''),
+          timeout: existing?.timeout,
+          tool: msg.name || existing?.tool || 'tool',
+          status,
+          exitCode,
+          result: msg.result || existing?.result,
+          startedAt: existing?.startedAt || new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+        }
+        return [next, ...prev.filter(item => item.id !== id)].slice(0, 80)
+      })
+    })
+    return () => { offToolCall(); offToolResult() }
+  }, [])
+
+  return (
+    <div className="terminal-pane" style={{ display: visible ? 'flex' : 'none' }}>
+      <div className="terminal-tabs">
+        <div className="terminal-tab-list">
+          {tabs.map((tab, index) => (
+            <button
+              key={tab.localId}
+              className={`terminal-tab${tab.localId === activeId ? ' active' : ''}`}
+              onClick={() => setActiveId(tab.localId)}
+              title={tab.sessionId || 'Starting shell'}
+            >
+              <span>{tab.title || `Term ${index + 1}`}</span>
+              {tabs.length > 1 && (
+                <i
+                  role="button"
+                  tabIndex={0}
+                  onClick={event => { event.stopPropagation(); closeTab(tab.localId) }}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      closeTab(tab.localId)
+                    }
+                  }}
+                  aria-label={`Close ${tab.title}`}
+                >x</i>
+              )}
+            </button>
+          ))}
+          <button className="terminal-tab add" onClick={addTab} title="New terminal">+</button>
+        </div>
+        <span className="terminal-agent-hint">Term 1 is the agent/shared terminal</span>
+      </div>
+
+			<div ref={stackRef} className={`terminal-stack ${showAICommands ? 'with-ai-commands' : ''}`}>
+        {tabs.map((tab, index) => (
+          <TerminalSession
+            key={tab.localId}
+            tab={tab}
+            visible={visible && tab.localId === activeId}
+            isAgentTerminal={index === 0}
+            onUpdate={patch => updateTab(tab.localId, patch)}
+            showAICommands={showAICommands}
+            onToggleAICommands={() => setAICommandsVisible(v => !v)}
+          />
+        ))}
+				{showAICommands && (
+					<>
+						<AICommandResizeHandle
+							stackRef={stackRef}
+							width={aiCommandsWidth}
+							onResize={setAICommandsWidth}
+						/>
+							<AICommandHistory
+							commands={aiCommands}
+							width={aiCommandsWidth}
+							onClear={() => setAICommands([])}
+							onCollapse={() => setAICommandsVisible(false)}
+							onRecover={() => void recoverSharedTerminalFromHistory(setAICommands)}
+						/>
+					</>
+				)}
+			</div>
+    </div>
+  )
+}
+
+function TerminalSession({
+  tab,
+  visible,
+  isAgentTerminal,
+  onUpdate,
+  showAICommands,
+  onToggleAICommands,
+}: {
+  tab: TerminalTab
+  visible: boolean
+  isAgentTerminal: boolean
+  onUpdate: (patch: Partial<TerminalTab>) => void
+  showAICommands: boolean
+  onToggleAICommands: () => void
+}) {
   const [starting, setStarting] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
-
+  const [startError, setStartError] = useState<string | null>(null)
+  const [terminalState, setTerminalState] = useState<TerminalStateSnapshot | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
-  const sessionRef = useRef<string | null>(null)
+  const sessionRef = useRef<string | null>(tab.sessionId)
   const hasAutoStarted = useRef(false)
   const visibleRef = useRef(visible)
   const fitRafRef = useRef<number | null>(null)
   const lastFitRef = useRef({ cols: 0, rows: 0 })
 
-  // Mirror sessionId into a ref so the long-lived xterm onData / event handlers
-  // always see the current session without being re-bound.
-  useEffect(() => { sessionRef.current = sessionId }, [sessionId])
+  useEffect(() => { sessionRef.current = tab.sessionId }, [tab.sessionId])
   useEffect(() => { visibleRef.current = visible }, [visible])
 
-  // Create the xterm.js instance once, mounted into the container div.
+  const refreshTerminalState = useCallback(async () => {
+    if (!isAgentTerminal) return
+    try {
+      const state = await GetSharedTerminalState()
+      setTerminalState(state)
+    } catch {
+      setTerminalState(null)
+    }
+  }, [isAgentTerminal])
+
+  useEffect(() => {
+    if (!visible || !isAgentTerminal) return
+    void refreshTerminalState()
+    const timer = window.setInterval(() => void refreshTerminalState(), 2000)
+    return () => window.clearInterval(timer)
+  }, [visible, isAgentTerminal, refreshTerminalState])
+
   useEffect(() => {
     if (!containerRef.current || termRef.current) return
     const term = new Terminal({
@@ -70,7 +318,6 @@ export function TerminalPane({ visible }: Props) {
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(containerRef.current)
-    // Forward every keystroke / paste straight to the PTY.
     term.onData(data => {
       const id = sessionRef.current
       if (id) void ShellInput(id, data).catch(() => null)
@@ -78,6 +325,8 @@ export function TerminalPane({ visible }: Props) {
     termRef.current = term
     fitRef.current = fit
     return () => {
+      const id = sessionRef.current
+      if (id) void ShellClose(id).catch(() => null)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -88,16 +337,11 @@ export function TerminalPane({ visible }: Props) {
     const term = termRef.current
     const fit = fitRef.current
     const el = containerRef.current
-    // Never fit while hidden or before layout: a zero-sized container makes
-    // FitAddon propose 1×1, which would SIGWINCH the PTY down to a sliver and
-    // leave bash repainting its prompt into blank rows on the way back up.
     if (!term || !fit || !el) return
     if (!visibleRef.current || el.offsetWidth === 0 || el.offsetHeight === 0) return
     let dims: { cols: number; rows: number } | undefined
     try { dims = fit.proposeDimensions() } catch { return }
     if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows) || dims.cols <= 0 || dims.rows <= 0) return
-    // Skip no-op resizes so a drag that doesn't cross a cell boundary doesn't
-    // spam the PTY with identical SIGWINCHes.
     if (dims.cols === lastFitRef.current.cols && dims.rows === lastFitRef.current.rows) return
     try { fit.fit() } catch { return }
     lastFitRef.current = { cols: term.cols, rows: term.rows }
@@ -105,8 +349,6 @@ export function TerminalPane({ visible }: Props) {
     if (id) void ShellResize(id, term.cols, term.rows).catch(() => null)
   }, [])
 
-  // Coalesce bursts of resize callbacks (a drag fires dozens/sec) into one fit
-  // per animation frame.
   const scheduleFit = useCallback(() => {
     if (fitRafRef.current != null) return
     fitRafRef.current = requestAnimationFrame(() => {
@@ -115,7 +357,6 @@ export function TerminalPane({ visible }: Props) {
     })
   }, [fitAndResize])
 
-  // Refit when the pane resizes or becomes visible (xterm needs real layout).
   useEffect(() => {
     if (!containerRef.current) return
     const observer = new ResizeObserver(() => scheduleFit())
@@ -127,102 +368,128 @@ export function TerminalPane({ visible }: Props) {
   }, [scheduleFit])
 
   useEffect(() => {
-    if (visible) {
-      // The pane is kept mounted with display:none while hidden, so on the frame it
-      // flips back to display:flex the container has no measured size yet. A single
-      // rAF can fire before layout flushes, leaving xterm at its narrow default cols
-      // (the right-side dead zone). Fit across a couple of frames + a short timeout so
-      // we re-fit once the real pane width is known; xterm reflows the backlog to it.
-      lastFitRef.current = { cols: 0, rows: 0 } // force a real fit on re-show
-      requestAnimationFrame(() => {
-        fitAndResize()
-        requestAnimationFrame(fitAndResize)
-        termRef.current?.focus()
-      })
-      const t = setTimeout(fitAndResize, 120)
-      return () => clearTimeout(t)
-    }
+    if (!visible) return
+    lastFitRef.current = { cols: 0, rows: 0 }
+    requestAnimationFrame(() => {
+      fitAndResize()
+      requestAnimationFrame(fitAndResize)
+      termRef.current?.focus()
+    })
+    const t = setTimeout(fitAndResize, 120)
+    return () => clearTimeout(t)
   }, [visible, fitAndResize])
 
   const startShell = useCallback(async () => {
     setStarting(true)
+    setStartError(null)
     try {
       const id = await OpenShell()
-      setSessionId(id)
+      onUpdate({ sessionId: id })
       sessionRef.current = id
+      void refreshTerminalState()
       requestAnimationFrame(fitAndResize)
     } catch (e) {
-      termRef.current?.writeln(`\x1b[31m[error starting shell: ${e}]\x1b[0m`)
+      const message = formatShellStartError(e)
+      setStartError(message)
+      termRef.current?.writeln(`\x1b[31m[error starting shell]\x1b[0m ${message}`)
     } finally {
       setStarting(false)
     }
-  }, [fitAndResize])
+  }, [fitAndResize, onUpdate, refreshTerminalState])
 
-  // Auto-start the first time the panel is shown.
   useEffect(() => {
-    if (visible && !hasAutoStarted.current && !sessionId) {
+    if (visible && !hasAutoStarted.current && !tab.sessionId) {
       hasAutoStarted.current = true
       void startShell()
     }
-  }, [visible, sessionId, startShell])
+  }, [visible, tab.sessionId, startShell])
 
-  // Backend events.
   useEffect(() => {
     const offs = [
       EventsOn('mauler:shell_output', (...args: unknown[]) => {
         const msg = args[0] as { id: string; data: string }
+        if (msg.id !== sessionRef.current) return
         termRef.current?.write(b64ToBytes(msg.data))
+        if (visibleRef.current) scheduleFit()
+        if (isAgentTerminal) void refreshTerminalState()
       }),
       EventsOn('mauler:shell_exit', (...args: unknown[]) => {
         const msg = args[0] as { id: string }
-        setSessionId(prev => (prev === msg.id ? null : prev))
+        if (msg.id !== sessionRef.current) return
+        onUpdate({ sessionId: null })
+        sessionRef.current = null
+        if (isAgentTerminal) void refreshTerminalState()
         termRef.current?.writeln('\r\n\x1b[90m[shell exited]\x1b[0m')
       }),
       EventsOn('mauler:terminal_command_start', (...args: unknown[]) => {
+        if (!isAgentTerminal) return
         const msg = args[0] as { command: string; timeout: string }
         termRef.current?.writeln(`\r\n\x1b[36m[AI running ${msg.timeout}s]\x1b[0m ${msg.command}`)
+        void refreshTerminalState()
       }),
       EventsOn('mauler:terminal_command_done', (...args: unknown[]) => {
+        if (!isAgentTerminal) return
         const msg = args[0] as { exit_code: string }
         termRef.current?.writeln(`\x1b[36m[AI command finished: exit ${msg.exit_code}]\x1b[0m`)
+        void refreshTerminalState()
       }),
     ]
     return () => offs.forEach(off => off())
-  }, [])
+  }, [isAgentTerminal, onUpdate, refreshTerminalState, scheduleFit])
 
   const killShell = useCallback(async () => {
     const id = sessionRef.current
     if (!id) return
     await ShellClose(id).catch(() => null)
-    setSessionId(null)
+    onUpdate({ sessionId: null })
+    sessionRef.current = null
+    setStartError(null)
+    void refreshTerminalState()
     termRef.current?.writeln('\r\n\x1b[90m[shell killed]\x1b[0m')
-  }, [])
+  }, [onUpdate])
 
   const restartShell = useCallback(async () => {
     const id = sessionRef.current
     if (id) await ShellClose(id).catch(() => null)
+    onUpdate({ sessionId: null })
+    sessionRef.current = null
+    setStartError(null)
     termRef.current?.clear()
     await startShell()
-  }, [startShell])
+    void refreshTerminalState()
+  }, [onUpdate, startShell])
+
+  const recoverShell = useCallback(async () => {
+    try {
+      const res = await RecoverSharedTerminal()
+      termRef.current?.writeln(`\r\n\x1b[36m[terminal recover: ${res.status}]\x1b[0m ${res.summary}`)
+      if (res.lines?.length) termRef.current?.writeln(ansiSafePreview(res.lines.join('\n'), 3000))
+      void refreshTerminalState()
+    } catch (e) {
+      termRef.current?.writeln(`\r\n\x1b[31m[terminal recover failed]\x1b[0m ${String(e)}`)
+      void refreshTerminalState()
+    }
+  }, [refreshTerminalState])
 
   const copyOutput = useCallback(async () => {
     const term = termRef.current
     if (!term) return
     const sel = term.getSelection()
-    if (sel) await navigator.clipboard.writeText(sel).catch(() => null)
+    await navigator.clipboard.writeText(sel || visibleTerminalText(term)).catch(() => null)
   }, [])
 
-  // Keep mounted so the terminal buffer and session survive panel toggles;
-  // visibility is driven by display so xterm keeps its scrollback.
   return (
-    <div className="terminal-pane" style={{ display: visible ? 'flex' : 'none' }}>
+    <section className="terminal-session" style={{ display: visible ? 'flex' : 'none' }}>
       <div className="terminal-header">
-        <span className="terminal-title">Terminal</span>
+        <div className="terminal-title-wrap">
+          <span className="terminal-title">{tab.title}{isAgentTerminal ? ' / agent' : ''}</span>
+          {isAgentTerminal && <TerminalStateBadge snapshot={terminalState} />}
+        </div>
         <div className="terminal-header-actions">
-          {!sessionId ? (
+          {!tab.sessionId ? (
             <>
               <button className="terminal-btn" onClick={() => void startShell()} disabled={starting}>
-                {starting ? 'Starting...' : 'Start shell'}
+                {starting ? 'Starting...' : startError ? 'Retry shell' : 'Start shell'}
               </button>
               <button className="terminal-btn" onClick={() => setShowHelp(v => !v)}>Help</button>
             </>
@@ -230,6 +497,8 @@ export function TerminalPane({ visible }: Props) {
             <>
               <button className="terminal-btn" onClick={() => termRef.current?.clear()}>Clear</button>
               <button className="terminal-btn" onClick={() => void copyOutput()}>Copy</button>
+              {isAgentTerminal && <button className="terminal-btn" onClick={onToggleAICommands}>{showAICommands ? 'Hide AI Commands' : 'Show AI Commands'}</button>}
+              {isAgentTerminal && <button className="terminal-btn terminal-btn-warn" onClick={() => void recoverShell()}>Recover</button>}
               <button className="terminal-btn" onClick={() => void restartShell()}>Restart</button>
               <button className="terminal-btn" onClick={() => setShowHelp(v => !v)}>Help</button>
               <button className="terminal-btn terminal-btn-danger" onClick={() => void killShell()}>Kill</button>
@@ -237,9 +506,335 @@ export function TerminalPane({ visible }: Props) {
           )}
         </div>
       </div>
-
+      {startError && <TerminalError message={startError} onRetry={() => void startShell()} />}
       {showHelp && <TerminalHelp />}
       <div ref={containerRef} className="terminal-xterm" />
+    </section>
+  )
+}
+
+function AICommandHistory({
+	commands,
+	width,
+	onClear,
+	onCollapse,
+	onRecover,
+}: {
+	commands: AICommandEvent[]
+	width: number
+	onClear: () => void
+	onCollapse: () => void
+	onRecover: () => void
+}) {
+	const groupedCommands = groupAICommands(commands)
+	return (
+		<aside className="terminal-ai-history" style={{ width }}>
+      <div className="terminal-ai-history-head">
+        <div>
+          <strong>AI Commands</strong>
+          <span>{groupedCommands.length} rows / {commands.length} recent</span>
+        </div>
+        <button className="terminal-btn terminal-btn-warn" onClick={onRecover}>Recover</button>
+        <button className="terminal-btn" onClick={onClear} disabled={commands.length === 0}>Clear</button>
+        <button className="terminal-btn" onClick={onCollapse}>Hide</button>
+      </div>
+      <div className="terminal-ai-command-list">
+        {commands.length === 0 ? (
+          <div className="terminal-ai-empty">AI terminal commands and result previews will appear here.</div>
+        ) : groupedCommands.map(command => (
+          <details key={command.ids.join(':')} className={`terminal-ai-command ${command.status} ${command.count > 1 ? 'repeated' : ''}`} open={command.status === 'running' || command.status === 'error'}>
+            <summary>
+              <span className={`terminal-ai-status ${command.status}`}>{command.status}</span>
+              <strong>{command.tool}</strong>
+              <code>{command.command || command.id}</code>
+              {command.count > 1 && <span className="terminal-ai-repeat" title={`${command.count} consecutive similar commands`}>x{command.count}</span>}
+              <time>{formatCommandTime(command)}</time>
+            </summary>
+            <div className="terminal-ai-command-meta">
+              {command.count > 1 && <span>grouped: {command.count}</span>}
+              {command.exitCode && <span>exit: {command.exitCode}</span>}
+              {command.durationMs != null && <span>{formatDuration(command.durationMs)}</span>}
+              {command.timeout && <span>wait/timeout: {command.timeout}s</span>}
+              {command.session && <span>{command.session}</span>}
+              <button onClick={() => void navigator.clipboard.writeText(command.command)}>Copy cmd</button>
+              {command.result && <button onClick={() => void navigator.clipboard.writeText(command.result || '')}>Copy result</button>}
+            </div>
+            {command.result && <pre>{trimResult(command.result)}</pre>}
+          </details>
+        ))}
+      </div>
+    </aside>
+	)
+}
+
+function groupAICommands(commands: AICommandEvent[]): GroupedAICommandEvent[] {
+  const groups: GroupedAICommandEvent[] = []
+  for (const command of commands) {
+    const last = groups[groups.length - 1]
+    if (last && commandGroupKey(last) === commandGroupKey(command)) {
+      last.count += 1
+      last.ids.push(command.id)
+      if (!last.result && command.result) last.result = command.result
+      if (!last.exitCode && command.exitCode) last.exitCode = command.exitCode
+      if (last.durationMs == null && command.durationMs != null) last.durationMs = command.durationMs
+      continue
+    }
+    groups.push({
+      ...command,
+      count: 1,
+      ids: [command.id],
+    })
+  }
+  return groups
+}
+
+function commandGroupKey(command: AICommandEvent): string {
+  return [
+    command.status,
+    command.tool,
+    normalizeCommandForGrouping(command.command || command.id),
+    command.exitCode || '',
+  ].join('\u0000')
+}
+
+function normalizeCommandForGrouping(command: string): string {
+  return command
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/--max-time\s+\d+/gi, '--max-time #')
+    .replace(/\|\s*head\s+-\d+/gi, '| head #')
+}
+
+function TerminalStateBadge({ snapshot }: { snapshot: TerminalStateSnapshot | null }) {
+  if (!snapshot) return <span className="terminal-state-badge unknown" title="Terminal state unknown">unknown</span>
+  const label = terminalStateLabel(snapshot.state)
+  return <span className={`terminal-state-badge ${snapshot.state || 'unknown'}`} title={snapshot.summary || label}>{label}</span>
+}
+
+function terminalStateLabel(state: string) {
+  switch (state) {
+    case 'ready':
+      return 'ready'
+    case 'running':
+      return 'running'
+    case 'listener':
+      return 'listener'
+    case 'connected':
+      return 'connected'
+    case 'interactive_prompt':
+      return 'prompt'
+    case 'busy':
+      return 'busy'
+    case 'closed':
+      return 'closed'
+    case 'missing':
+      return 'missing'
+    default:
+      return state || 'unknown'
+  }
+}
+
+async function recoverSharedTerminalFromHistory(setAICommands: Dispatch<SetStateAction<AICommandEvent[]>>) {
+  const startedAt = new Date().toISOString()
+  const id = `recover-${Date.now()}`
+  const runningEvent: AICommandEvent = {
+    id,
+    command: 'Recover shared terminal',
+    tool: 'terminal_recover',
+    status: 'running',
+    startedAt,
+  }
+  setAICommands(prev => [runningEvent, ...prev].slice(0, 80))
+  try {
+    const res = await RecoverSharedTerminal()
+    const doneEvent: AICommandEvent = {
+      id,
+      command: 'Recover shared terminal',
+      tool: 'terminal_recover',
+      status: res.status === 'ready' ? 'done' : 'error',
+      exitCode: res.status,
+      result: formatTerminalRecoveryResult(res),
+      startedAt,
+      endedAt: new Date().toISOString(),
+    }
+    setAICommands(prev => [doneEvent, ...prev.filter(item => item.id !== id)].slice(0, 80))
+  } catch (e) {
+    const errorEvent: AICommandEvent = {
+      id,
+      command: 'Recover shared terminal',
+      tool: 'terminal_recover',
+      status: 'error',
+      result: String(e),
+      startedAt,
+      endedAt: new Date().toISOString(),
+    }
+    setAICommands(prev => [errorEvent, ...prev.filter(item => item.id !== id)].slice(0, 80))
+  }
+}
+
+function formatTerminalRecoveryResult(res: TerminalRecoveryResult) {
+  const lines = res.lines?.length ? `\n${res.lines.join('\n')}` : ''
+  return `[terminal_recover status=${res.status}]\n${res.summary}${lines}`
+}
+
+function AICommandResizeHandle({
+	stackRef,
+	width,
+	onResize,
+}: {
+	stackRef: RefObject<HTMLDivElement | null>
+	width: number
+	onResize: (width: number) => void
+}) {
+	const widthRef = useRef(width)
+	useEffect(() => { widthRef.current = width }, [width])
+	const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+		event.preventDefault()
+		const stack = stackRef.current
+		if (!stack) return
+		const rect = stack.getBoundingClientRect()
+		const pointerId = event.pointerId
+		const target = event.currentTarget
+		target.setPointerCapture(pointerId)
+		const onMove = (move: PointerEvent) => {
+			const raw = rect.right - move.clientX
+			const max = Math.max(260, Math.floor(rect.width * 0.65))
+			const next = Math.min(max, Math.max(220, raw))
+			widthRef.current = next
+			onResize(next)
+		}
+		const onUp = () => {
+			localStorage.setItem('mauler.aiCommandsWidth', String(widthRef.current))
+			target.releasePointerCapture(pointerId)
+			window.removeEventListener('pointermove', onMove)
+			window.removeEventListener('pointerup', onUp)
+		}
+		window.addEventListener('pointermove', onMove)
+		window.addEventListener('pointerup', onUp)
+	}, [onResize, stackRef])
+	return <div className="terminal-ai-resize" onPointerDown={startResize} title="Drag to resize AI Commands" />
+}
+
+function loadAICommandsWidth() {
+	const raw = Number(localStorage.getItem('mauler.aiCommandsWidth') || '')
+	if (Number.isFinite(raw) && raw >= 220 && raw <= 900) return raw
+	return 420
+}
+
+function loadAICommandsVisible() {
+	const raw = localStorage.getItem('mauler.aiCommandsVisible')
+	if (raw === '0') return false
+	return true
+}
+
+function trimResult(result: string) {
+  const text = result.trim()
+  if (text.length <= 6000) return text
+  return `${text.slice(0, 2500)}\n\n... trimmed ...\n\n${text.slice(-2500)}`
+}
+
+function isCommandLikeTool(name?: string) {
+	return ['shell', 'terminal_send', 'terminal_read', 'start_listener', 'http_probe', 'run_script'].includes(name || '')
+}
+
+function isTerminalTool(name?: string) {
+  return name === 'terminal_send' || name === 'terminal_read'
+}
+
+function terminalCommandStatus(tool?: string, exitCode?: string): AICommandEvent['status'] {
+  const code = (exitCode || '').trim()
+  if (!code || code === '0' || code === 'sent') return 'done'
+  if (code === 'live' || code === 'running') return 'live'
+  if (tool === 'terminal_read') {
+    if (['prompt_or_idle', 'output_ready', 'ready', 'connected', 'listener', 'interactive_prompt', 'no_output_yet'].includes(code)) {
+      return code === 'running' || code === 'no_output_yet' ? 'live' : 'done'
+    }
+  }
+  return 'error'
+}
+
+function commandTextFromToolInput(name?: string, input?: string) {
+  const text = input || ''
+  if (!text.trim()) return name || 'tool'
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>
+    const command = typeof parsed.command === 'string' ? parsed.command : ''
+    const keys = typeof parsed.keys === 'string' ? parsed.keys : ''
+    const url = typeof parsed.url === 'string' ? parsed.url : ''
+    const code = typeof parsed.code === 'string' ? parsed.code : ''
+    if (command) return command
+    if (keys) return keys
+    if (url) return url
+    if (code) return code.split(/\r?\n/).find(line => line.trim()) || 'run_script'
+  } catch {
+    // Fall through to raw input preview.
+  }
+  return text.trim()
+}
+
+function exitCodeFromToolResult(result: string) {
+  const shared = result.match(/\[(?:shared_terminal\/)?[^\]\r\n]*?\bexit\s+(-?\d+)/i)
+  if (shared) return shared[1]
+  const plain = result.match(/\bexit code\s+(-?\d+)/i)
+  if (plain) return plain[1]
+  return ''
+}
+
+function ansiSafePreview(result: string, maxChars: number) {
+	const text = trimResult(result).replace(/\r?\n/g, '\r\n')
+	if (text.length <= maxChars) return text
+	return `${text.slice(0, maxChars)}\r\n... trimmed ...`
+}
+
+function formatCommandTime(command: AICommandEvent) {
+  const ts = command.endedAt || command.startedAt
+  const d = new Date(ts)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString()
+}
+
+function formatDuration(ms: number) {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
+}
+
+function newTab(n: number): TerminalTab {
+  return { localId: `term-${Date.now()}-${n}`, title: `Term ${n}`, sessionId: null }
+}
+
+function visibleTerminalText(term: Terminal): string {
+  const buffer = term.buffer.active
+  const start = Math.max(0, buffer.baseY)
+  const end = buffer.baseY + term.rows
+  const lines: string[] = []
+  for (let i = start; i < end; i++) {
+    const line = buffer.getLine(i)
+    if (!line) continue
+    lines.push(line.translateToString(true))
+  }
+  return lines.join('\n').trimEnd()
+}
+
+function formatShellStartError(error: unknown): string {
+  const raw = String(error ?? 'unknown error')
+  const lower = raw.toLowerCase()
+  if (lower.includes('wsl/service/e_unexpected') || lower.includes('catastrophic failure')) {
+    return `${raw}\n\nWSL appears to be wedged. Use Restart WSL in the Agent panel, or run wsl --shutdown in PowerShell, then press Retry shell.`
+  }
+  if (lower.includes('wsl')) {
+    return `${raw}\n\nCheck the configured WSL distro/user and try Restart WSL if the terminal will not start.`
+  }
+  return raw
+}
+
+function TerminalError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="terminal-error">
+      <div className="terminal-error-title">Terminal failed to start</div>
+      <pre>{message}</pre>
+      <div className="terminal-error-actions">
+        <button className="terminal-btn" onClick={onRetry}>Retry shell</button>
+      </div>
     </div>
   )
 }
@@ -248,10 +843,9 @@ function TerminalHelp() {
   return (
     <div className="terminal-help">
       <div className="terminal-help-title">Terminal Help</div>
-      <div>This is a real terminal — type, use arrows/Tab completion, run TUIs like vim or htop. Ctrl+C interrupts.</div>
-      <div><strong>Kill</strong> stops the shell. <strong>Restart</strong> starts clean. <strong>Copy</strong> copies the selection.</div>
-      <div>AI shell calls appear inline when shared-terminal mode is on. Use chat Stop to interrupt an AI run.</div>
-      <div>Switch Settings &gt; Tools &gt; AI shell mode between shared terminal and isolated one-shot.</div>
+      <div>Use <strong>+</strong> for another terminal while the agent is busy. Term 1 is the shared agent terminal.</div>
+      <div>This is a real terminal: arrows, Tab completion, Ctrl+C, vim, htop, nc/ncat, and prompt-driven sessions work here.</div>
+      <div><strong>Kill</strong> stops only this tab. <strong>Restart</strong> starts this tab clean. <strong>Copy</strong> copies the selection or visible screen.</div>
     </div>
   )
 }

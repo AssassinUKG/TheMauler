@@ -61,6 +61,13 @@
   gap: 2px;
 }
 
+.titlebar-session-group {
+  padding: 2px;
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 9px;
+  background: rgba(255,255,255,.025);
+}
+
 .titlebar-sep {
   width: 1px;
   height: 18px;
@@ -77,6 +84,10 @@
   border-radius: 7px;
   font-size: 12px;
   height: 28px;
+}
+
+.titlebar-session-group button {
+  padding-inline: 8px;
 }
 .titlebar-actions button:hover {
   color: var(--text);
@@ -97,6 +108,18 @@
 .titlebar-actions button.titlebar-clear-session:hover {
   color: #fee2e2;
   border-color: rgba(244, 71, 71, 0.55);
+}
+
+.titlebar-actions button.titlebar-doctor {
+  color: #fef3c7;
+  background: rgba(250, 204, 21, 0.06);
+  border-color: rgba(250, 204, 21, 0.24);
+}
+
+.titlebar-actions button.titlebar-doctor:hover {
+  color: #fff7ed;
+  background: rgba(250, 204, 21, 0.12);
+  border-color: rgba(250, 204, 21, 0.48);
 }
 
 /* Panel toggles read as on/off switches, distinct from the view tabs below */
@@ -123,7 +146,7 @@
 
 .session-select {
   height: 28px;
-  max-width: 160px;
+  max-width: 145px;
   background: var(--bg2);
   color: var(--text);
   border: 1px solid var(--border);
@@ -217,6 +240,11 @@
   overflow: hidden;
   background: var(--c-terminal);
   border-top: 1px solid var(--border);
+}
+
+.terminal-panel-live {
+  border-top-color: rgba(74, 222, 128, .36);
+  box-shadow: inset 0 1px 0 rgba(74, 222, 128, .10);
 }
 
 .bottom-panel-tabs {
@@ -424,4 +452,120 @@
 @media (max-width: 1100px) {
   .titlebar-name { display: none; }
   .titlebar-actions button { padding: 4px 6px; }
+}
+
+/* Hermes-style shell pass: make the workbench read as a console cockpit, not a tiny tabbed IDE. */
+.titlebar {
+  height: 52px;
+  padding: 0 18px;
+  background: var(--c-panel);
+}
+
+.titlebar-name {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.titlebar-actions {
+  gap: 7px;
+}
+
+.titlebar-actions button,
+.session-select {
+  height: 32px;
+  border-radius: 8px;
+}
+
+.workspace {
+  background: var(--c-app);
+}
+
+.pane-slot {
+  background: var(--c-pane);
+}
+
+.resize-handle {
+  min-width: 5px;
+  background: var(--border);
+}
+
+.center-pane {
+  background: var(--c-pane);
+}
+
+.center-tabs {
+  height: 58px;
+  gap: 8px;
+  padding: 9px 14px;
+  background: var(--c-panel);
+}
+
+.center-tabs button {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.center-tabs button.active,
+.center-file-tab.active {
+  background: var(--c-card-hover);
+  border-color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.center-content {
+  background: var(--c-pane);
+}
+
+.terminal-panel {
+  min-height: 140px;
+  background: var(--c-terminal);
+}
+
+.bottom-panel-tabs {
+  height: 36px;
+  background: var(--c-panel);
+}
+
+.bottom-panel-tabs button {
+  height: 28px;
+  border-radius: 7px;
+}
+
+/* Strong Hermes-style layout override. Keep this at the end so theme selectors cannot soften it. */
+[data-theme="mauler-ops"] .app-shell,
+.app-shell {
+  background: var(--c-app);
+}
+
+[data-theme="mauler-ops"] .workspace,
+.workspace {
+  background: var(--c-app);
+}
+
+[data-theme="mauler-ops"] .center-pane,
+.center-pane {
+  display: flex;
+  background: var(--c-pane);
+}
+
+[data-theme="mauler-ops"] .center-tabs,
+.center-tabs {
+  display: none;
+}
+
+[data-theme="mauler-ops"] .center-content,
+.center-content {
+  background: var(--c-pane);
+  min-width: 0;
+}
+
+.pane-slot:first-child {
+  box-shadow: inset -1px 0 0 var(--border);
+}
+
+.pane-slot:last-child {
+  box-shadow: inset 1px 0 0 var(--border);
 }

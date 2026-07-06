@@ -7,11 +7,11 @@ import (
 	"mauler/internal/settings"
 )
 
-func TestSubagentSpecsExposeExpectedTools(t *testing.T) {
+func TestTaskToolExposesExpectedSubagentTypes(t *testing.T) {
 	specs := subagentSpecs()
 	got := map[string]bool{}
 	for _, spec := range specs {
-		got[spec.ToolName] = true
+		got[subagentTypeName(spec.ToolName)] = true
 		if spec.TimeoutSecs <= 0 || spec.MaxTurns <= 0 || spec.MaxOutput <= 0 || spec.ContextBudget <= 0 {
 			t.Fatalf("subagent spec has invalid bounds: %#v", spec)
 		}
@@ -19,9 +19,9 @@ func TestSubagentSpecsExposeExpectedTools(t *testing.T) {
 			t.Fatalf("subagent spec missing toolset/contract: %#v", spec)
 		}
 	}
-	for _, name := range []string{"subagent_explore", "subagent_research", "subagent_review", "subagent_testfix", "subagent_summarize"} {
+	for _, name := range []string{"explore", "research", "review", "testfix", "summarize"} {
 		if !got[name] {
-			t.Fatalf("missing subagent tool %q in %#v", name, got)
+			t.Fatalf("missing task type %q in %#v", name, got)
 		}
 	}
 }
@@ -31,12 +31,12 @@ func TestSubagentExploreReadOnlyToolset(t *testing.T) {
 	cfg.ActiveToolset = "explore"
 	effective := settings.EffectiveEnabledTools(cfg)
 
-	for _, name := range []string{"read_file", "read_many", "glob", "grep"} {
+	for _, name := range []string{"read", "glob", "grep"} {
 		if !effective[name] {
 			t.Fatalf("explore toolset should include %s: %#v", name, effective)
 		}
 	}
-	for _, name := range []string{"write_file", "edit_file", "shell", "bash", "web_search", "fetch_url"} {
+	for _, name := range []string{"write", "edit", "shell", "web_search", "fetch_url"} {
 		if effective[name] {
 			t.Fatalf("explore toolset should exclude %s: %#v", name, effective)
 		}

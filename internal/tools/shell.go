@@ -34,8 +34,11 @@ func (t *Shell) Description() string {
 		}
 	}
 	return fmt.Sprintf("Run a shell command in the current working directory using the %s backend. "+
-		"On Windows auto uses PowerShell; on Linux/WSL auto uses bash. If the backend is WSL, commands run inside the configured WSL distro. Use platform-native paths for the active backend. "+
+		"Use for short deterministic one-shot commands where exact output/exit code matters, including exact curl/wget flags, pipelines, scans, and local scripts. Use http_probe for repeatable HTTP/webshell probes when it can express the request. Prefer terminal_send/terminal_read only for interactive, prompt-driven, listener, REPL, SSH, msfconsole, connected-shell, or live-watched work. "+
+		"On Windows auto uses PowerShell; on Linux/WSL auto uses bash. If the backend is WSL, commands run inside the configured WSL distro with its /etc/hosts, VPN routing, and Kali tools. Use platform-native paths for the active backend. "+
 		"Write commands as plain text with literal operators (&, >, <, |, \"); never HTML-escape them (do not write &amp;, &gt;, &lt;, &quot;). "+
+		"For HTB/CTF enumeration, use realistic timeouts (120-300s) for nmap/gobuster/ffuf/hydra, save scan output with -oA/-oN/-oG or tee, then grep/read the saved file instead of rerunning. "+
+		"Do not pipe long scans through head because it can terminate the scan early and hide the real exit status. "+
 		"For long-running work (full nmap -p- scans, gobuster, hashcat) set background=true: the command runs detached and returns a job id immediately. "+
 		"Then call this tool again with job=\"<id>\" (and no command) to see its running/done state and latest output, instead of blocking on a timeout. "+
 		"Background job polling uses backoff: wait about 1s, 2s, 3s, 5s, 8s, 13s, then 30s between polls. "+
@@ -58,6 +61,10 @@ func (t *Shell) Schema() json.RawMessage {
 
 type shellParams struct {
 	Command    string `json:"command"`
+	Bash       string `json:"bash"`
+	Cmd        string `json:"cmd"`
+	PowerShell string `json:"powershell"`
+	Input      string `json:"input"`
 	Timeout    int    `json:"timeout"`
 	Background bool   `json:"background"`
 	Job        string `json:"job"`
@@ -69,35 +76,22 @@ func (t *Shell) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("shell: bad params: %w", err)
 	}
-	if out, handled, err := runShellBackground(p); handled {
-		return out, err
-	}
-	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "", p.Verbose)
-}
-
-// Bash is a compatibility alias for older prompts/models that call bash.
-type Bash struct {
-	TimeoutSecs int
-}
-
-func (t *Bash) Name() string      { return "bash" }
-func (t *Bash) Destructive() bool { return true }
-
-func (t *Bash) Description() string {
-	return "Compatibility alias for shell. Runs through the configured shell backend rather than assuming /bin/bash."
-}
-
-func (t *Bash) Schema() json.RawMessage { return (&Shell{}).Schema() }
-
-func (t *Bash) Run(ctx context.Context, raw json.RawMessage) (string, error) {
-	var p shellParams
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", fmt.Errorf("bash: bad params: %w", err)
+	if strings.TrimSpace(p.Command) == "" {
+		p.Command = firstNonEmptyShellArg(p.Bash, p.Cmd, p.PowerShell, p.Input)
 	}
 	if out, handled, err := runShellBackground(p); handled {
 		return out, err
 	}
 	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "", p.Verbose)
+}
+
+func firstNonEmptyShellArg(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func runShell(ctx context.Context, command string, requestedTimeout, defaultTimeout int, forcedBackend string, verbose bool) (string, error) {
@@ -162,14 +156,14 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 
 	var sb strings.Builder
 	if stdout.Len() > 0 {
-		sb.WriteString(decodeCommandOutput(stdout.Bytes()))
+		sb.WriteString(CleanCommandOutput(decodeCommandOutput(stdout.Bytes())))
 	}
 	if stderr.Len() > 0 {
 		if sb.Len() > 0 {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("[stderr]\n")
-		sb.WriteString(decodeCommandOutput(stderr.Bytes()))
+		sb.WriteString(CleanCommandOutput(decodeCommandOutput(stderr.Bytes())))
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -177,6 +171,7 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 		if result != "" {
 			result += "\n"
 		}
+		result = shellResultContract("shell", backend, "timeout", -1, wd, "", fmt.Sprintf("retry with larger timeout or background=true"), result)
 		result += fmt.Sprintf("[%s timed out after %ds, %s]", backend, timeoutSecs, elapsed)
 		result += "\nRecovery: this command hit Mauler's shell timeout, not a task failure. Retry with a larger timeout (120-300 seconds for nmap/gobuster/ffuf/hydra), narrow the scan, or write long-running output to a file and continue from partial results."
 		return result, fmt.Errorf("shell: timed out after %ds", timeoutSecs)
@@ -186,6 +181,7 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 		if result != "" {
 			result += "\n"
 		}
+		result = shellResultContract("shell", backend, "cancelled", -1, wd, "", "stop and summarize", result)
 		result += fmt.Sprintf("[%s cancelled after %s]", backend, elapsed)
 		result += "\nRecovery: the user interrupted this command. Stop tool use now, summarize current progress, and wait for the next instruction."
 		return result, fmt.Errorf("shell: cancelled")
@@ -204,6 +200,13 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 	if result != "" {
 		result += "\n"
 	}
+	state := "done"
+	nextTool := "proceed"
+	if exitCode != 0 {
+		state = "error"
+		nextTool = "inspect error, change command, or use saved evidence"
+	}
+	result = shellResultContract("shell", backend, state, exitCode, wd, "", nextTool, result)
 	result += fmt.Sprintf("[%s exit %d, %s]", backend, exitCode, elapsed)
 	if verbose {
 		result += fmt.Sprintf("\n[verbose] cwd=%s timeout=%ds command=%q", wd, timeoutSecs, command)
@@ -228,10 +231,57 @@ func PrepareShellCommand(command string) (string, error) {
 	if command == "" {
 		return "", fmt.Errorf("command is required")
 	}
+	if HasResidualShellHTMLEntity(command) {
+		return "", fmt.Errorf("command still contains malformed HTML-escaped shell operators after decoding; retry with literal operators like &, >, <, |, and \"")
+	}
 	if err := rejectProtectedShellMutation(command); err != nil {
 		return "", err
 	}
+	// Quiet noisy scan tools (ffuf -s) so the model gets findings, not banners
+	// and progress spam. Idempotent; only touches recognised tools.
+	command = ApplyScanToolHygiene(command)
 	return command, nil
+}
+
+func shellResultContract(tool, backend, state string, exitCode int, cwd, resultID, nextTool, body string) string {
+	if strings.TrimSpace(tool) == "" {
+		tool = "shell"
+	}
+	if strings.TrimSpace(backend) == "" {
+		backend = "unknown"
+	}
+	if strings.TrimSpace(state) == "" {
+		state = "done"
+	}
+	exit := "unknown"
+	if exitCode >= 0 {
+		exit = fmt.Sprintf("%d", exitCode)
+	}
+	if strings.TrimSpace(cwd) == "" {
+		cwd = "unknown"
+	}
+	if strings.TrimSpace(resultID) == "" {
+		resultID = "-"
+	}
+	if strings.TrimSpace(nextTool) == "" {
+		nextTool = "proceed"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[%s_result state=%s backend=%s]\n", tool, state, backend)
+	sb.WriteString("contract:\n")
+	fmt.Fprintf(&sb, "  state: %s\n", state)
+	fmt.Fprintf(&sb, "  backend: %s\n", backend)
+	fmt.Fprintf(&sb, "  exit: %s\n", exit)
+	fmt.Fprintf(&sb, "  cwd: %s\n", cwd)
+	fmt.Fprintf(&sb, "  result_id: %s\n", resultID)
+	fmt.Fprintf(&sb, "  next_tool: %s\n", nextTool)
+	sb.WriteString("  do_not_repeat: do not rerun the same command if this output already answered the check; use saved files/read_tool_result/search instead\n")
+	body = strings.TrimRight(body, "\n\r ")
+	if body != "" {
+		sb.WriteString(body)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 func NormalizeShellCommandText(command string) string {
@@ -239,6 +289,11 @@ func NormalizeShellCommandText(command string) string {
 }
 
 var htmlEntityRE = regexp.MustCompile(`&(amp|gt|lt|quot|#x?[0-9]+);`)
+var residualHTMLEntityRE = regexp.MustCompile(`(?i)&(?:a+m+p+|g+t+|l+t+|q+u+o+t+)(?:[;:&\s]|$)`)
+
+func HasResidualShellHTMLEntity(command string) bool {
+	return residualHTMLEntityRE.MatchString(command)
+}
 
 func cleanShellCommand(command string) string {
 	command = strings.TrimSpace(command)
@@ -448,10 +503,10 @@ func shellFailureHint(backend, command string) string {
 			return "hint: sudo was run in non-interactive mode so Mauler cannot hang waiting for a password. If sudo credentials are needed, authenticate in Kali first with sudo -v, or configure a narrow NOPASSWD rule for the specific lab command."
 		}
 		if looksNestedWSLCommand(command) {
-			return "hint: active shell backend is already WSL/Kali. Do not prefix commands with wsl, wsl.exe, or wsl sudo. Run the Linux command directly, for example: printf '%s\\n' '10.129.12.172 connected.htb' | sudo tee -a /etc/hosts"
+			return "hint: active shell backend is already WSL/Kali. Do not prefix commands with wsl, wsl.exe, or wsl sudo. Run the Linux command directly, for example: printf '%s\\n' '10.129.12.172 boxname.htb' | sudo tee -a /etc/hosts"
 		}
 		if looksFragileSudoBashCommand(command) {
-			return "hint: active shell backend is WSL/Kali. Avoid nested sudo bash -c quoting for simple file edits. Prefer: printf '%s\\n' '10.129.12.172 connected.htb' | sudo tee -a /etc/hosts"
+			return "hint: active shell backend is WSL/Kali. Avoid nested sudo bash -c quoting for simple file edits. Prefer: printf '%s\\n' '10.129.12.172 boxname.htb' | sudo tee -a /etc/hosts"
 		}
 		return ""
 	}

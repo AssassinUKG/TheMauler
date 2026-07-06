@@ -78,6 +78,10 @@ func normaliseSettings(s *Settings) {
 	}
 	if s.Tools.ToolResultAggregateChars <= 0 {
 		s.Tools.ToolResultAggregateChars = defaults.Tools.ToolResultAggregateChars
+	} else if s.Tools.ToolResultAggregateChars == 200000 {
+		// Migrate the old full-detail default. Keeping 200k chars of tool output
+		// in one model turn crowds a 40k context and hurts agent reliability.
+		s.Tools.ToolResultAggregateChars = defaults.Tools.ToolResultAggregateChars
 	}
 	if s.Tools.BashTimeout <= 0 {
 		s.Tools.BashTimeout = defaults.Tools.BashTimeout
@@ -93,6 +97,7 @@ func normaliseSettings(s *Settings) {
 	if s.Tools.Toolsets == nil {
 		s.Tools.Toolsets = defaults.Tools.Toolsets
 	} else {
+		s.Tools.Toolsets = normaliseToolsetNames(s.Tools.Toolsets)
 		for name, tools := range defaults.Tools.Toolsets {
 			if existing, ok := s.Tools.Toolsets[name]; ok {
 				s.Tools.Toolsets[name] = mergeToolset(existing, tools)
@@ -113,6 +118,9 @@ func normaliseSettings(s *Settings) {
 		s.Agents.DefaultAutonomy = defaults.Agents.DefaultAutonomy
 	}
 	s.Agents.ReasoningEffort = normaliseReasoningEffortSetting(s.Agents.ReasoningEffort, defaults.Agents.ReasoningEffort)
+	if s.Agents.NoThinkAfterToolCalls <= 0 || s.Agents.NoThinkAfterToolCalls == 1 || s.Agents.NoThinkAfterToolCalls == 3 {
+		s.Agents.NoThinkAfterToolCalls = defaults.Agents.NoThinkAfterToolCalls
+	}
 	if s.Agents.MaxToolCalls <= 0 || s.Agents.MaxToolCalls == 40 || s.Agents.MaxToolCalls == 100 {
 		s.Agents.MaxToolCalls = defaults.Agents.MaxToolCalls
 	}
@@ -128,7 +136,9 @@ func normaliseSettings(s *Settings) {
 			}
 		}
 		migrateOpsPreset(s.Agents.Presets, defaults.Agents.Presets)
+		normaliseAgentPresetPermissions(s.Agents.Presets)
 	}
+	normaliseEnvironment(&s.Environment, defaults.Environment)
 	if s.Context.CompactionAt <= 0 {
 		s.Context.CompactionAt = defaults.Context.CompactionAt
 	}
@@ -145,9 +155,11 @@ func normaliseSettings(s *Settings) {
 	}
 	s.Context.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(s.Context.WorkspaceDir))
 	s.Context.OpenFolders = normaliseWorkspaceFolders(s.Context.OpenFolders, s.Context.WorkspaceDir)
-	s.Context.Lab.Target = strings.TrimSpace(s.Context.Lab.Target)
-	s.Context.Lab.VPNInterface = strings.TrimSpace(s.Context.Lab.VPNInterface)
-	s.Context.Lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(s.Context.Lab.LatestArtifact))
+	s.Context.Lab = normaliseLabContext(s.Context.Lab, defaults.Context.Lab)
+	s.Context.LabProfiles = normaliseLabProfiles(s.Context.LabProfiles, s.Context.Lab, s.Context.WorkspaceDir)
+	if strings.TrimSpace(s.Context.ActiveLabProfile) == "" {
+		s.Context.ActiveLabProfile = s.Context.Lab.ID
+	}
 	if s.Memory.MaxEntries <= 0 {
 		s.Memory = defaults.Memory
 	} else {
@@ -158,9 +170,11 @@ func normaliseSettings(s *Settings) {
 			s.Memory.MaxEntryChars = defaults.Memory.MaxEntryChars
 		}
 	}
+	normaliseTelegram(&s.Telegram, defaults.Telegram)
 	if s.Tools.EnabledTools == nil {
 		s.Tools.EnabledTools = defaults.Tools.EnabledTools
 	} else {
+		s.Tools.EnabledTools = normaliseEnabledToolNames(s.Tools.EnabledTools)
 		for name, enabled := range defaults.Tools.EnabledTools {
 			if _, ok := s.Tools.EnabledTools[name]; !ok {
 				s.Tools.EnabledTools[name] = enabled
@@ -187,6 +201,184 @@ func normaliseSettings(s *Settings) {
 	}
 }
 
+func normaliseTelegram(cfg *TelegramConfig, defaults TelegramConfig) {
+	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.BotUsername = strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@")
+	cfg.DefaultProject = filepath.ToSlash(strings.TrimSpace(cfg.DefaultProject))
+	cfg.DefaultProfile = strings.TrimSpace(cfg.DefaultProfile)
+	cfg.DefaultMode = strings.TrimSpace(cfg.DefaultMode)
+	if cfg.DefaultMode == "" {
+		cfg.DefaultMode = defaults.DefaultMode
+	}
+	cfg.DefaultToolset = strings.TrimSpace(cfg.DefaultToolset)
+	if cfg.DefaultToolset == "" {
+		cfg.DefaultToolset = defaults.DefaultToolset
+	}
+	if cfg.ProgressIntervalS <= 0 {
+		cfg.ProgressIntervalS = defaults.ProgressIntervalS
+	}
+	cfg.VoiceReplies = strings.ToLower(strings.TrimSpace(cfg.VoiceReplies))
+	if cfg.VoiceReplies == "" {
+		cfg.VoiceReplies = defaults.VoiceReplies
+	}
+	switch cfg.VoiceReplies {
+	case "off", "on_voice", "always":
+	default:
+		cfg.VoiceReplies = defaults.VoiceReplies
+	}
+	cfg.TranscriptionMode = strings.ToLower(strings.TrimSpace(cfg.TranscriptionMode))
+	if cfg.TranscriptionMode == "" {
+		cfg.TranscriptionMode = defaults.TranscriptionMode
+	}
+	switch cfg.TranscriptionMode {
+	case "disabled", "local", "openai_compatible":
+	default:
+		cfg.TranscriptionMode = defaults.TranscriptionMode
+	}
+	cfg.TranscriptionURL = strings.TrimSpace(cfg.TranscriptionURL)
+	cfg.AllowFrom = mergeStringList(cfg.AllowFrom, nil)
+}
+
+func normaliseEnvironment(env *EnvironmentConfig, defaults EnvironmentConfig) {
+	if strings.TrimSpace(env.MainOS) == "" {
+		env.MainOS = defaults.MainOS
+	}
+	if strings.TrimSpace(env.AIShellBackend) == "" {
+		env.AIShellBackend = defaults.AIShellBackend
+	}
+	if strings.TrimSpace(env.AIShellDistro) == "" {
+		env.AIShellDistro = defaults.AIShellDistro
+	}
+	if strings.TrimSpace(env.AIShellUser) == "" {
+		env.AIShellUser = defaults.AIShellUser
+	}
+	if strings.TrimSpace(env.TargetWorkBackend) == "" {
+		env.TargetWorkBackend = defaults.TargetWorkBackend
+	}
+	if strings.TrimSpace(env.ListenerBackend) == "" {
+		env.ListenerBackend = defaults.ListenerBackend
+	}
+	if strings.TrimSpace(env.ListenerCommand) == "" {
+		env.ListenerCommand = defaults.ListenerCommand
+	}
+	if strings.TrimSpace(env.LHOSTSource) == "" {
+		env.LHOSTSource = defaults.LHOSTSource
+	}
+	if strings.TrimSpace(env.UserCorrectionPolicy) == "" {
+		env.UserCorrectionPolicy = defaults.UserCorrectionPolicy
+	}
+	if strings.TrimSpace(env.ReverseShellGuidance) == "" {
+		env.ReverseShellGuidance = defaults.ReverseShellGuidance
+	}
+	env.MainOS = strings.TrimSpace(env.MainOS)
+	env.AIShellBackend = strings.TrimSpace(env.AIShellBackend)
+	env.AIShellDistro = strings.TrimSpace(env.AIShellDistro)
+	env.AIShellUser = strings.TrimSpace(env.AIShellUser)
+	env.TargetWorkBackend = strings.TrimSpace(env.TargetWorkBackend)
+	env.ListenerBackend = strings.TrimSpace(env.ListenerBackend)
+	env.ListenerCommand = strings.TrimSpace(env.ListenerCommand)
+	env.LHOSTSource = strings.TrimSpace(env.LHOSTSource)
+	env.ManualLHOST = strings.TrimSpace(env.ManualLHOST)
+	env.UserCorrectionPolicy = strings.TrimSpace(env.UserCorrectionPolicy)
+}
+
+func normaliseLabContext(lab LabContext, defaults LabContext) LabContext {
+	lab.ID = strings.TrimSpace(lab.ID)
+	if lab.ID == "" {
+		lab.ID = defaults.ID
+	}
+	lab.Name = strings.TrimSpace(lab.Name)
+	if lab.Name == "" {
+		lab.Name = defaults.Name
+	}
+	lab.Target = strings.TrimSpace(lab.Target)
+	lab.Hostname = strings.TrimSpace(lab.Hostname)
+	lab.VPNInterface = strings.TrimSpace(lab.VPNInterface)
+	lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(lab.LatestArtifact))
+	lab.OpsProfile = strings.TrimSpace(lab.OpsProfile)
+	if lab.OpsProfile == "" {
+		lab.OpsProfile = defaults.OpsProfile
+	}
+	lab.EvidencePolicy = normaliseEvidencePolicy(lab.EvidencePolicy, lab.OpsProfile)
+	lab.AccessPreference = strings.TrimSpace(lab.AccessPreference)
+	if lab.AccessPreference == "" {
+		lab.AccessPreference = defaults.AccessPreference
+	}
+	lab.Notes = strings.TrimSpace(lab.Notes)
+	return lab
+}
+
+func normaliseLabProfiles(profiles []LabProfile, active LabContext, workspaceDir string) []LabProfile {
+	out := make([]LabProfile, 0, len(profiles)+1)
+	seen := map[string]bool{}
+	for _, profile := range profiles {
+		profile.ID = strings.TrimSpace(profile.ID)
+		if profile.ID == "" {
+			continue
+		}
+		if seen[profile.ID] {
+			continue
+		}
+		profile.Name = strings.TrimSpace(profile.Name)
+		if profile.Name == "" {
+			profile.Name = profile.ID
+		}
+		profile.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(profile.WorkspaceDir))
+		profile.Target = strings.TrimSpace(profile.Target)
+		profile.Hostname = strings.TrimSpace(profile.Hostname)
+		profile.VPNInterface = strings.TrimSpace(profile.VPNInterface)
+		profile.LatestArtifact = filepath.ToSlash(strings.TrimSpace(profile.LatestArtifact))
+		profile.OpsProfile = strings.TrimSpace(profile.OpsProfile)
+		if profile.OpsProfile == "" {
+			profile.OpsProfile = "pentesting"
+		}
+		profile.EvidencePolicy = normaliseEvidencePolicy(profile.EvidencePolicy, profile.OpsProfile)
+		profile.AccessPreference = strings.TrimSpace(profile.AccessPreference)
+		if profile.AccessPreference == "" {
+			profile.AccessPreference = "auto"
+		}
+		profile.Notes = strings.TrimSpace(profile.Notes)
+		out = append(out, profile)
+		seen[profile.ID] = true
+	}
+	if !seen[active.ID] {
+		out = append([]LabProfile{{
+			ID:               active.ID,
+			Name:             active.Name,
+			WorkspaceDir:     filepath.ToSlash(strings.TrimSpace(workspaceDir)),
+			Target:           active.Target,
+			Hostname:         active.Hostname,
+			VPNInterface:     active.VPNInterface,
+			LatestArtifact:   active.LatestArtifact,
+			OpsProfile:       active.OpsProfile,
+			EvidencePolicy:   active.EvidencePolicy,
+			AccessPreference: active.AccessPreference,
+			Notes:            active.Notes,
+		}}, out...)
+	}
+	return out
+}
+
+func normaliseEvidencePolicy(policy, opsProfile string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "discovery-first", "discovery_first", "discovery":
+		return "discovery_first"
+	case "research-assisted", "research_assisted", "research":
+		return "research_assisted"
+	case "reference-allowed", "reference_allowed", "reference":
+		return "reference_allowed"
+	case "fastest-path", "fastest_path", "fast":
+		return "fastest_path"
+	default:
+		switch strings.ToLower(strings.TrimSpace(opsProfile)) {
+		case "htb", "ctf":
+			return "discovery_first"
+		default:
+			return "research_assisted"
+		}
+	}
+}
+
 func migrateOpsPreset(presets, defaults map[string]AgentModePreset) {
 	if presets == nil || defaults == nil {
 		return
@@ -201,6 +393,16 @@ func migrateOpsPreset(presets, defaults map[string]AgentModePreset) {
 		!current.ToolPermissions["web_search"] &&
 		!current.ToolPermissions["fetch_url"] {
 		presets["Ops"] = next
+	}
+}
+
+func normaliseAgentPresetPermissions(presets map[string]AgentModePreset) {
+	for name, preset := range presets {
+		preset.Toolset = strings.TrimSpace(preset.Toolset)
+		preset.Profile = strings.TrimSpace(preset.Profile)
+		preset.Autonomy = strings.TrimSpace(preset.Autonomy)
+		preset.ToolPermissions = normaliseEnabledToolNames(preset.ToolPermissions)
+		presets[name] = preset
 	}
 }
 
@@ -288,6 +490,8 @@ func EffectiveEnabledTools(cfg ToolsConfig) map[string]bool {
 	toolsets := cfg.Toolsets
 	if toolsets == nil {
 		toolsets = defaults.Toolsets
+	} else {
+		toolsets = normaliseToolsetNames(toolsets)
 	}
 	active := strings.TrimSpace(cfg.ActiveToolset)
 	if active == "" {
@@ -299,24 +503,106 @@ func EffectiveEnabledTools(cfg ToolsConfig) map[string]bool {
 	}
 	allowed := map[string]bool{}
 	for _, name := range allowedList {
+		name = canonicalToolName(name)
+		if name == "" {
+			continue
+		}
 		allowed[name] = true
 	}
 	out := map[string]bool{}
 	for name := range defaults.EnabledTools {
 		out[name] = allowed[name]
 	}
-	for name, enabled := range cfg.EnabledTools {
+	for name, enabled := range normaliseEnabledToolNames(cfg.EnabledTools) {
 		if !allowed[name] {
 			out[name] = false
 			continue
 		}
 		out[name] = enabled
 	}
-	if out["shell"] {
-		out["bash"] = true
+	return out
+}
+
+var legacyToolNameMap = map[string]string{
+	"read_file":          "read",
+	"read_many":          "read",
+	"read_chunks":        "read",
+	"file_outline":       "read",
+	"read_pdf":           "read",
+	"write_file":         "write",
+	"edit_file":          "edit",
+	"bash":               "shell",
+	"terminal_run":       "terminal_send",
+	"sqlite_schema":      "sqlite",
+	"sqlite_query":       "sqlite",
+	"skills_list":        "skill",
+	"skill_view":         "skill",
+	"todo_create":        "todo_write",
+	"todo_update":        "todo_write",
+	"todo_done":          "todo_write",
+	"todo_blocked":       "todo_write",
+	"todo_list":          "todo_write",
+	"todo_clear":         "todo_write",
+	"browser_open":       "browser",
+	"browser_snapshot":   "browser",
+	"browser_click":      "browser",
+	"browser_type":       "browser",
+	"browser_extract":    "browser",
+	"browser_screenshot": "browser",
+	"browser_close":      "browser",
+	"browser_agent":      "browser",
+	"subagent_explore":   "task",
+	"subagent_research":  "task",
+	"subagent_review":    "task",
+	"subagent_testfix":   "task",
+	"subagent_summarize": "task",
+}
+
+func canonicalToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
 	}
-	if !out["shell"] {
-		out["bash"] = false
+	if next, ok := legacyToolNameMap[name]; ok {
+		return next
+	}
+	return name
+}
+
+func normaliseEnabledToolNames(in map[string]bool) map[string]bool {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for name, enabled := range in {
+		canonical := canonicalToolName(name)
+		if canonical == "" {
+			continue
+		}
+		if existing, ok := out[canonical]; ok {
+			out[canonical] = existing || enabled
+		} else {
+			out[canonical] = enabled
+		}
+	}
+	return out
+}
+
+func normaliseToolsetNames(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for set, names := range in {
+		seen := map[string]bool{}
+		for _, name := range names {
+			canonical := canonicalToolName(name)
+			if canonical == "" || seen[canonical] {
+				continue
+			}
+			seen[canonical] = true
+			out[set] = append(out[set], canonical)
+		}
 	}
 	return out
 }
@@ -325,7 +611,7 @@ func mergeToolset(existing, defaults []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(existing)+len(defaults))
 	for _, name := range existing {
-		name = strings.TrimSpace(name)
+		name = canonicalToolName(name)
 		if name == "" || seen[name] {
 			continue
 		}
@@ -333,7 +619,7 @@ func mergeToolset(existing, defaults []string) []string {
 		out = append(out, name)
 	}
 	for _, name := range defaults {
-		name = strings.TrimSpace(name)
+		name = canonicalToolName(name)
 		if name == "" || seen[name] {
 			continue
 		}

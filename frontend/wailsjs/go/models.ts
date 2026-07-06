@@ -3,11 +3,23 @@ export namespace app {
 	export class AgentEvalResult {
 	    name: string;
 	    pass: boolean;
+	    artifact_pass: boolean;
+	    hygiene_pass: boolean;
+	    status_pass: boolean;
 	    status: string;
 	    tool_calls: number;
+	    tool_success_rate: number;
 	    auto_continues: number;
 	    truncations: number;
 	    tool_errors: number;
+	    repeated_tool_inputs: number;
+	    repeated_skips: number;
+	    repeat_tool_rate: number;
+	    verifier_prompts: number;
+	    max_routed_tools: number;
+	    prompt_warnings: number;
+	    stability_score: number;
+	    false_done: boolean;
 	    duration_ms: number;
 	    fail_reason?: string;
 	
@@ -19,11 +31,23 @@ export namespace app {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
 	        this.pass = source["pass"];
+	        this.artifact_pass = source["artifact_pass"];
+	        this.hygiene_pass = source["hygiene_pass"];
+	        this.status_pass = source["status_pass"];
 	        this.status = source["status"];
 	        this.tool_calls = source["tool_calls"];
+	        this.tool_success_rate = source["tool_success_rate"];
 	        this.auto_continues = source["auto_continues"];
 	        this.truncations = source["truncations"];
 	        this.tool_errors = source["tool_errors"];
+	        this.repeated_tool_inputs = source["repeated_tool_inputs"];
+	        this.repeated_skips = source["repeated_skips"];
+	        this.repeat_tool_rate = source["repeat_tool_rate"];
+	        this.verifier_prompts = source["verifier_prompts"];
+	        this.max_routed_tools = source["max_routed_tools"];
+	        this.prompt_warnings = source["prompt_warnings"];
+	        this.stability_score = source["stability_score"];
+	        this.false_done = source["false_done"];
 	        this.duration_ms = source["duration_ms"];
 	        this.fail_reason = source["fail_reason"];
 	    }
@@ -33,6 +57,8 @@ export namespace app {
 	    pass_count: number;
 	    total: number;
 	    profile: string;
+	    id?: string;
+	    created_at?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AgentEvalReport(source);
@@ -44,6 +70,8 @@ export namespace app {
 	        this.pass_count = source["pass_count"];
 	        this.total = source["total"];
 	        this.profile = source["profile"];
+	        this.id = source["id"];
+	        this.created_at = source["created_at"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -65,6 +93,40 @@ export namespace app {
 		}
 	}
 	
+	export class AgentSession {
+	    id: string;
+	    kind: string;
+	    state: string;
+	    port?: number;
+	    lhost?: string;
+	    command?: string;
+	    user?: string;
+	    hostname?: string;
+	    started_at?: string;
+	    updated_at?: string;
+	    last_evidence?: string;
+	    terminal_session?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AgentSession(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.state = source["state"];
+	        this.port = source["port"];
+	        this.lhost = source["lhost"];
+	        this.command = source["command"];
+	        this.user = source["user"];
+	        this.hostname = source["hostname"];
+	        this.started_at = source["started_at"];
+	        this.updated_at = source["updated_at"];
+	        this.last_evidence = source["last_evidence"];
+	        this.terminal_session = source["terminal_session"];
+	    }
+	}
 	export class BenchmarkCase {
 	    name: string;
 	    status: string;
@@ -294,6 +356,7 @@ export namespace app {
 	    rollback_len: number;
 	    window: number;
 	    reserve: number;
+	    configured_window?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new HistoryStats(source);
@@ -307,20 +370,31 @@ export namespace app {
 	        this.rollback_len = source["rollback_len"];
 	        this.window = source["window"];
 	        this.reserve = source["reserve"];
+	        this.configured_window = source["configured_window"];
 	    }
 	}
 	export class LabStatus {
 	    agent_root: string;
+	    lab_id: string;
+	    lab_name: string;
 	    shell_backend: string;
 	    shell_distro: string;
 	    shell_user: string;
 	    target: string;
+	    hostname: string;
 	    vpn_interface: string;
 	    vpn_ip: string;
 	    vpn_cidr: string;
 	    vpn_kind: string;
 	    latest_artifact: string;
 	    ops_profile: string;
+	    evidence_policy: string;
+	    access_preference: string;
+	    notes: string;
+	    listener_backend: string;
+	    listener_command: string;
+	    lhost_source: string;
+	    manual_lhost: string;
 	    open_folders: settings.WorkspaceFolder[];
 	
 	    static createFrom(source: any = {}) {
@@ -330,16 +404,26 @@ export namespace app {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.agent_root = source["agent_root"];
+	        this.lab_id = source["lab_id"];
+	        this.lab_name = source["lab_name"];
 	        this.shell_backend = source["shell_backend"];
 	        this.shell_distro = source["shell_distro"];
 	        this.shell_user = source["shell_user"];
 	        this.target = source["target"];
+	        this.hostname = source["hostname"];
 	        this.vpn_interface = source["vpn_interface"];
 	        this.vpn_ip = source["vpn_ip"];
 	        this.vpn_cidr = source["vpn_cidr"];
 	        this.vpn_kind = source["vpn_kind"];
 	        this.latest_artifact = source["latest_artifact"];
 	        this.ops_profile = source["ops_profile"];
+	        this.evidence_policy = source["evidence_policy"];
+	        this.access_preference = source["access_preference"];
+	        this.notes = source["notes"];
+	        this.listener_backend = source["listener_backend"];
+	        this.listener_command = source["listener_command"];
+	        this.lhost_source = source["lhost_source"];
+	        this.manual_lhost = source["manual_lhost"];
 	        this.open_folders = this.convertValues(source["open_folders"], settings.WorkspaceFolder);
 	    }
 	
@@ -827,6 +911,40 @@ export namespace app {
 	
 	
 	
+	export class TerminalRecoveryResult {
+	    status: string;
+	    summary: string;
+	    lines: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new TerminalRecoveryResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = source["status"];
+	        this.summary = source["summary"];
+	        this.lines = source["lines"];
+	    }
+	}
+	export class TerminalStateSnapshot {
+	    session: string;
+	    state: string;
+	    summary: string;
+	    lines: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new TerminalStateSnapshot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.session = source["session"];
+	        this.state = source["state"];
+	        this.summary = source["summary"];
+	        this.lines = source["lines"];
+	    }
+	}
 	export class VPNInterfaceInfo {
 	    name: string;
 	    ip: string;
@@ -848,6 +966,171 @@ export namespace app {
 	        this.likely_vpn = source["likely_vpn"];
 	        this.label = source["label"];
 	    }
+	}
+
+}
+
+export namespace channelbus {
+	
+	export class Attachment {
+	    kind: string;
+	    file_id?: string;
+	    file_name?: string;
+	    content_type?: string;
+	    path?: string;
+	    text?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Attachment(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.file_id = source["file_id"];
+	        this.file_name = source["file_name"];
+	        this.content_type = source["content_type"];
+	        this.path = source["path"];
+	        this.text = source["text"];
+	    }
+	}
+	export class Envelope {
+	    id: string;
+	    source: string;
+	    session_id: string;
+	    user_id?: string;
+	    username?: string;
+	    text: string;
+	    attachments?: Attachment[];
+	    metadata?: Record<string, string>;
+	    created_at?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Envelope(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.source = source["source"];
+	        this.session_id = source["session_id"];
+	        this.user_id = source["user_id"];
+	        this.username = source["username"];
+	        this.text = source["text"];
+	        this.attachments = this.convertValues(source["attachments"], Attachment);
+	        this.metadata = source["metadata"];
+	        this.created_at = source["created_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Response {
+	    lane: string;
+	    status: string;
+	    message: string;
+	    queued?: boolean;
+	    queue_id?: string;
+	    run_started?: boolean;
+	    data?: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new Response(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lane = source["lane"];
+	        this.status = source["status"];
+	        this.message = source["message"];
+	        this.queued = source["queued"];
+	        this.queue_id = source["queue_id"];
+	        this.run_started = source["run_started"];
+	        this.data = source["data"];
+	    }
+	}
+	export class Route {
+	    lane: string;
+	    command?: string;
+	    argument?: string;
+	    policy?: string;
+	    read_only: boolean;
+	    reason?: string;
+	    project?: string;
+	    mode?: string;
+	    toolset?: string;
+	    from_voice?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new Route(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lane = source["lane"];
+	        this.command = source["command"];
+	        this.argument = source["argument"];
+	        this.policy = source["policy"];
+	        this.read_only = source["read_only"];
+	        this.reason = source["reason"];
+	        this.project = source["project"];
+	        this.mode = source["mode"];
+	        this.toolset = source["toolset"];
+	        this.from_voice = source["from_voice"];
+	    }
+	}
+	export class WorkItem {
+	    id: string;
+	    envelope: Envelope;
+	    route: Route;
+	    status: string;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new WorkItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.envelope = this.convertValues(source["envelope"], Envelope);
+	        this.route = this.convertValues(source["route"], Route);
+	        this.status = source["status"];
+	        this.created_at = source["created_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -1097,11 +1380,49 @@ export namespace settings {
 		    return a;
 		}
 	}
-	export class LabContext {
+	export class LabProfile {
+	    id: string;
+	    name: string;
+	    workspace_dir: string;
 	    target: string;
+	    hostname: string;
 	    vpn_interface: string;
 	    latest_artifact: string;
 	    ops_profile: string;
+	    evidence_policy: string;
+	    access_preference: string;
+	    notes: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LabProfile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.workspace_dir = source["workspace_dir"];
+	        this.target = source["target"];
+	        this.hostname = source["hostname"];
+	        this.vpn_interface = source["vpn_interface"];
+	        this.latest_artifact = source["latest_artifact"];
+	        this.ops_profile = source["ops_profile"];
+	        this.evidence_policy = source["evidence_policy"];
+	        this.access_preference = source["access_preference"];
+	        this.notes = source["notes"];
+	    }
+	}
+	export class LabContext {
+	    id: string;
+	    name: string;
+	    target: string;
+	    hostname: string;
+	    vpn_interface: string;
+	    latest_artifact: string;
+	    ops_profile: string;
+	    evidence_policy: string;
+	    access_preference: string;
+	    notes: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new LabContext(source);
@@ -1109,10 +1430,16 @@ export namespace settings {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
 	        this.target = source["target"];
+	        this.hostname = source["hostname"];
 	        this.vpn_interface = source["vpn_interface"];
 	        this.latest_artifact = source["latest_artifact"];
 	        this.ops_profile = source["ops_profile"];
+	        this.evidence_policy = source["evidence_policy"];
+	        this.access_preference = source["access_preference"];
+	        this.notes = source["notes"];
 	    }
 	}
 	export class WorkspaceFolder {
@@ -1142,6 +1469,8 @@ export namespace settings {
 	    workspace_dir: string;
 	    open_folders: WorkspaceFolder[];
 	    lab: LabContext;
+	    active_lab_profile: string;
+	    lab_profiles: LabProfile[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ContextConfig(source);
@@ -1159,6 +1488,8 @@ export namespace settings {
 	        this.workspace_dir = source["workspace_dir"];
 	        this.open_folders = this.convertValues(source["open_folders"], WorkspaceFolder);
 	        this.lab = this.convertValues(source["lab"], LabContext);
+	        this.active_lab_profile = source["active_lab_profile"];
+	        this.lab_profiles = this.convertValues(source["lab_profiles"], LabProfile);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1178,6 +1509,40 @@ export namespace settings {
 		    }
 		    return a;
 		}
+	}
+	export class EnvironmentConfig {
+	    main_os: string;
+	    ai_shell_backend: string;
+	    ai_shell_distro: string;
+	    ai_shell_user: string;
+	    target_work_backend: string;
+	    listener_backend: string;
+	    listener_command: string;
+	    lhost_source: string;
+	    manual_lhost: string;
+	    prefer_terminal_tools: boolean;
+	    reverse_shell_guidance: string;
+	    user_correction_policy: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new EnvironmentConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.main_os = source["main_os"];
+	        this.ai_shell_backend = source["ai_shell_backend"];
+	        this.ai_shell_distro = source["ai_shell_distro"];
+	        this.ai_shell_user = source["ai_shell_user"];
+	        this.target_work_backend = source["target_work_backend"];
+	        this.listener_backend = source["listener_backend"];
+	        this.listener_command = source["listener_command"];
+	        this.lhost_source = source["lhost_source"];
+	        this.manual_lhost = source["manual_lhost"];
+	        this.prefer_terminal_tools = source["prefer_terminal_tools"];
+	        this.reverse_shell_guidance = source["reverse_shell_guidance"];
+	        this.user_correction_policy = source["user_correction_policy"];
+	    }
 	}
 	export class GenerationParams {
 	    temperature: number;
@@ -1223,6 +1588,7 @@ export namespace settings {
 	        this.wsl_path_translate = source["wsl_path_translate"];
 	    }
 	}
+	
 	
 	export class LoggingConfig {
 	    enabled: boolean;
@@ -1417,6 +1783,44 @@ export namespace settings {
 	        this.artifact_width = source["artifact_width"];
 	    }
 	}
+	export class TelegramConfig {
+	    enabled: boolean;
+	    token: string;
+	    bot_username: string;
+	    require_mention: boolean;
+	    allow_from: string[];
+	    default_project: string;
+	    default_profile: string;
+	    default_mode: string;
+	    default_toolset: string;
+	    send_progress: boolean;
+	    progress_interval_s: number;
+	    voice_replies: string;
+	    transcription_mode: string;
+	    transcription_url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TelegramConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.token = source["token"];
+	        this.bot_username = source["bot_username"];
+	        this.require_mention = source["require_mention"];
+	        this.allow_from = source["allow_from"];
+	        this.default_project = source["default_project"];
+	        this.default_profile = source["default_profile"];
+	        this.default_mode = source["default_mode"];
+	        this.default_toolset = source["default_toolset"];
+	        this.send_progress = source["send_progress"];
+	        this.progress_interval_s = source["progress_interval_s"];
+	        this.voice_replies = source["voice_replies"];
+	        this.transcription_mode = source["transcription_mode"];
+	        this.transcription_url = source["transcription_url"];
+	    }
+	}
 	export class SkillsConfig {
 	    enabled: boolean;
 	    auto_inject: boolean;
@@ -1483,6 +1887,7 @@ export namespace settings {
 	    toolsets: Record<string, Array<string>>;
 	    enabled_tools: Record<string, boolean>;
 	    safe_rules: ToolSafeRule[];
+	    tool_grammar_constraint: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ToolsConfig(source);
@@ -1517,6 +1922,7 @@ export namespace settings {
 	        this.toolsets = source["toolsets"];
 	        this.enabled_tools = source["enabled_tools"];
 	        this.safe_rules = this.convertValues(source["safe_rules"], ToolSafeRule);
+	        this.tool_grammar_constraint = source["tool_grammar_constraint"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1541,10 +1947,12 @@ export namespace settings {
 	    active_profile: string;
 	    tools: ToolsConfig;
 	    agents: AgentsConfig;
+	    environment: EnvironmentConfig;
 	    context: ContextConfig;
 	    memory: MemoryConfig;
 	    skills: SkillsConfig;
 	    image: ImageConfig;
+	    telegram: TelegramConfig;
 	    ui: UIConfig;
 	    logging: LoggingConfig;
 	    log_level: string;
@@ -1558,10 +1966,12 @@ export namespace settings {
 	        this.active_profile = source["active_profile"];
 	        this.tools = this.convertValues(source["tools"], ToolsConfig);
 	        this.agents = this.convertValues(source["agents"], AgentsConfig);
+	        this.environment = this.convertValues(source["environment"], EnvironmentConfig);
 	        this.context = this.convertValues(source["context"], ContextConfig);
 	        this.memory = this.convertValues(source["memory"], MemoryConfig);
 	        this.skills = this.convertValues(source["skills"], SkillsConfig);
 	        this.image = this.convertValues(source["image"], ImageConfig);
+	        this.telegram = this.convertValues(source["telegram"], TelegramConfig);
 	        this.ui = this.convertValues(source["ui"], UIConfig);
 	        this.logging = this.convertValues(source["logging"], LoggingConfig);
 	        this.log_level = source["log_level"];
@@ -1585,6 +1995,7 @@ export namespace settings {
 		    return a;
 		}
 	}
+	
 	
 	
 	

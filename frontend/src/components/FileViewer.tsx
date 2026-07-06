@@ -15,14 +15,29 @@ export interface OpenFile {
 
 interface Props {
   file: OpenFile | null
+  openFiles?: OpenFile[]
+  activeIndex?: number
   artifactOutput?: string
   artifactRunning?: boolean
   onArtifactOutputClear?: () => void
+  onClose?: () => void
+  onSwitchFile?: (index: number) => void
+  onCloseFile?: (index: number) => void
 }
 
 const RUNNABLE = new Set(['bash', 'sh', 'shell', 'python', 'python3', 'py', 'javascript', 'js', 'node', 'typescript', 'ts', 'powershell', 'pwsh', 'ps1'])
 
-export function FileViewer({ file, artifactOutput = '', artifactRunning = false, onArtifactOutputClear }: Props) {
+export function FileViewer({
+  file,
+  openFiles = [],
+  activeIndex = 0,
+  artifactOutput = '',
+  artifactRunning = false,
+  onArtifactOutputClear,
+  onClose,
+  onSwitchFile,
+  onCloseFile,
+}: Props) {
   const [content, setContent] = useState('')
   const [language, setLanguage] = useState('plaintext')
   const [dirty, setDirty] = useState(false)
@@ -114,12 +129,49 @@ export function FileViewer({ file, artifactOutput = '', artifactRunning = false,
   return (
     <div className="file-viewer">
       <div className="file-viewer-header">
-        <div className="file-viewer-title">
-          <span>{file.name}</span>
-          {dirty && <span className="file-viewer-dirty">modified</span>}
-          {status && <span className="file-viewer-status">{status}</span>}
+        <div className="file-viewer-left">
+          <div className="open-file-strip">
+            {(openFiles.length > 0 ? openFiles : [file]).map((openFile, index) => (
+              <button
+                key={`${openFile.path || openFile.name}-${index}`}
+                className={`open-file-pill ${index === activeIndex ? 'active' : ''}`}
+                onClick={() => onSwitchFile?.(index)}
+                title={openFile.path || openFile.name}
+              >
+                <span>{openFile.name}</span>
+                {onCloseFile && (
+                  <i
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Close ${openFile.name}`}
+                    onClick={event => {
+                      event.stopPropagation()
+                      onCloseFile(index)
+                    }}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        onCloseFile(index)
+                      }
+                    }}
+                  >x</i>
+                )}
+              </button>
+            ))}
+          </div>
+          <div className="file-viewer-title">
+            <span>{file.name}</span>
+            {dirty && <span className="file-viewer-dirty">modified</span>}
+            {status && <span className="file-viewer-status">{status}</span>}
+          </div>
         </div>
         <div className="file-viewer-actions">
+          {onClose && (
+            <button className="file-close-btn" onClick={onClose} title="Close file">
+              Close
+            </button>
+          )}
           <select value={language} onChange={e => setLanguage(e.target.value)} title="Syntax language">
             {languages.map(lang => <option key={lang} value={lang}>{lang}</option>)}
           </select>

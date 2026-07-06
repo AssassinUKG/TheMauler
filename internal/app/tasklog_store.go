@@ -48,7 +48,10 @@ func (a *App) listTaskRuns() ([]TaskRun, error) {
 
 func (a *App) clearTaskRuns() error {
 	if a != nil && a.db != nil {
-		return clearTaskRunsDB(a.db)
+		if err := clearTaskRunsDB(a.db); err != nil {
+			return err
+		}
+		return saveTaskRuns([]TaskRun{})
 	}
 	return saveTaskRuns([]TaskRun{})
 }
@@ -211,6 +214,9 @@ order by started_at desc`)
 		runs[i].Tools = tools
 		runs[i].Events = events
 	}
+	if runs == nil {
+		return []TaskRun{}, nil
+	}
 	return runs, nil
 }
 
@@ -228,7 +234,13 @@ func loadTaskRunToolsDB(db *sql.DB, runID string) ([]TaskToolEvent, error) {
 		}
 		tools = append(tools, tool)
 	}
-	return tools, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if tools == nil {
+		return []TaskToolEvent{}, nil
+	}
+	return tools, nil
 }
 
 func loadTaskRunEventsDB(db *sql.DB, runID string) ([]TaskRunEvent, error) {
@@ -245,7 +257,13 @@ func loadTaskRunEventsDB(db *sql.DB, runID string) ([]TaskRunEvent, error) {
 		}
 		events = append(events, event)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if events == nil {
+		return []TaskRunEvent{}, nil
+	}
+	return events, nil
 }
 
 func clearTaskRunsDB(db *sql.DB) error {

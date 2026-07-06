@@ -64,47 +64,25 @@ interface Props {
 }
 
 const toolLabels: Record<string, string> = {
-  read_file: 'Read files',
-  read_many: 'Read many files',
-  file_outline: 'File outlines',
-  read_chunks: 'Read chunks',
-  read_pdf: 'Read PDFs',
-  write_file: 'Write files',
-  edit_file: 'Edit files',
-  shell: 'Shell / Bash',
+  read: 'Read',
+  write: 'Write',
+  edit: 'Edit',
+  shell: 'Shell',
   terminal_send: 'Terminal send',
   terminal_read: 'Terminal read',
   glob: 'Glob',
   grep: 'Grep',
   session_search: 'Session search',
   file_changes: 'File changes',
-  sqlite_schema: 'SQLite schema',
-  sqlite_query: 'SQLite query',
+  sqlite: 'SQLite',
   web_search: 'Web search',
   fetch_url: 'Fetch URL',
-  browser_open: 'Browser open',
-  browser_snapshot: 'Browser snapshot',
-  browser_click: 'Browser click',
-  browser_type: 'Browser type',
-  browser_extract: 'Browser extract',
-  browser_screenshot: 'Browser screenshot',
-  browser_close: 'Browser close',
-  browser_agent: 'Browser agent',
-  todo_create: 'Create plan',
-  todo_update: 'Update plan',
-  todo_done: 'Complete plan item',
-  todo_blocked: 'Block plan item',
-  todo_list: 'List plan',
-  todo_clear: 'Clear plan',
-  skills_list: 'List skills',
-  skill_view: 'View skill',
+  browser: 'Browser',
+  todo_write: 'Plan',
+  skill: 'Skill',
   http_probe: 'HTTP probe',
   evidence_bundle: 'Evidence bundle',
-  subagent_explore: 'Subagent explore',
-  subagent_research: 'Subagent research',
-  subagent_review: 'Subagent review',
-  subagent_testfix: 'Subagent test/fix',
-  subagent_summarize: 'Subagent summarize',
+  task: 'Task',
 }
 
 type ToolRisk = 'low' | 'medium' | 'high'
@@ -118,62 +96,32 @@ const toolRiskLabels: Record<ToolRisk, string> = {
 const onlineTools = new Set([
   'web_search',
   'fetch_url',
-  'browser_open',
-  'browser_snapshot',
-  'browser_click',
-  'browser_type',
-  'browser_extract',
-  'browser_screenshot',
-  'browser_close',
-  'browser_agent',
-  'subagent_research',
+  'browser',
 ])
 
 const preferredOnlineToolset = (name: string) =>
-  name.startsWith('browser_') || name === 'browser_agent' ? 'browser' : 'web-research'
+  name === 'browser' ? 'browser' : 'web-research'
 
 const toolRisk: Record<string, ToolRisk> = {
-  read_file: 'low',
-  read_many: 'low',
-  file_outline: 'low',
-  read_chunks: 'low',
-  read_pdf: 'low',
+  read: 'low',
   glob: 'low',
   grep: 'low',
   session_search: 'low',
   file_changes: 'low',
-  sqlite_schema: 'low',
-  sqlite_query: 'low',
+  sqlite: 'low',
   fetch_url: 'medium',
   http_probe: 'medium',
   evidence_bundle: 'medium',
   web_search: 'medium',
-  browser_open: 'medium',
-  browser_snapshot: 'medium',
-  browser_extract: 'medium',
-  browser_screenshot: 'medium',
-  write_file: 'high',
-  edit_file: 'high',
+  browser: 'high',
+  write: 'high',
+  edit: 'high',
   shell: 'high',
-  bash: 'high',
   terminal_send: 'high',
   terminal_read: 'low',
-  browser_click: 'high',
-  browser_type: 'high',
-  browser_agent: 'high',
-  todo_create: 'low',
-  todo_update: 'low',
-  todo_done: 'low',
-  todo_blocked: 'low',
-  todo_list: 'low',
-  todo_clear: 'low',
-  skills_list: 'low',
-  skill_view: 'low',
-  subagent_research: 'medium',
-  subagent_explore: 'low',
-  subagent_review: 'low',
-  subagent_testfix: 'high',
-  subagent_summarize: 'low',
+  todo_write: 'low',
+  skill: 'low',
+  task: 'medium',
 }
 
 type AgentTab = 'agent' | 'plan' | 'activity' | 'tools' | 'browser' | 'memory' | 'skills' | 'logs'
@@ -239,10 +187,10 @@ export function AgentPanel({
     setSettings(s)
     setProjectSkillPath('')
     setProjectInstructionSummary(instructionSummary)
-    setMemory(mem)
-    setRuns(taskRuns)
-    setTodos(todoItems)
-    setSkills(skillItems)
+    setMemory(Array.isArray(mem) ? mem : [])
+    setRuns(Array.isArray(taskRuns) ? taskRuns : [])
+    setTodos(Array.isArray(todoItems) ? todoItems : [])
+    setSkills(Array.isArray(skillItems) ? skillItems : [])
     setUserProfile(profileText)
     void GetSpecPlan().then(setSpecPlan).catch(() => {})
   }
@@ -321,7 +269,7 @@ export function AgentPanel({
       const next = await UseProjectInstructionFile(path.trim())
       setSettings(next)
       const skillItems = await ListSkills().catch(() => [] as Skill[])
-      setSkills(skillItems)
+      setSkills(Array.isArray(skillItems) ? skillItems : [])
       setProjectSkillPath('')
       await refreshProjectInstructionSummary()
       onSettingsChanged()
@@ -416,9 +364,6 @@ export function AgentPanel({
       ...(settings.tools.enabled_tools ?? {}),
       [name]: enabled,
     }
-    if (name === 'shell') {
-      nextEnabled.bash = enabled
-    }
     const currentToolset = settings.tools.active_toolset || 'balanced'
     const toolsetTools = settings.tools.toolsets?.[currentToolset] ?? []
     const needsOnlineToolset = enabled && onlineTools.has(name) && !toolsetTools.includes(name)
@@ -498,7 +443,8 @@ export function AgentPanel({
     if (!q) return
     setRecallStatus('searching')
     try {
-      const results = await SearchSessionRecall(q, 10)
+      const loaded = await SearchSessionRecall(q, 10)
+      const results = Array.isArray(loaded) ? loaded : []
       setRecallResults(results)
       setRecallStatus(results.length === 0 ? 'no matches' : `${results.length} match${results.length === 1 ? '' : 'es'}`)
     } catch (e) {
@@ -654,7 +600,7 @@ export function AgentPanel({
 
             <div className="agent-section-head">Mode override</div>
             <div className="mode-pills" title={!autoAgents ? 'Enable Auto Agents to use mode override' : undefined}>
-              {['Auto', 'Manual', 'Ops', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+              {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
                 <button
                   key={mode}
                   className={`mode-pill${modeOverride === mode ? ' active' : ''}`}
@@ -1616,7 +1562,7 @@ function skillViewerText(skill: Skill): string {
     return [
       'External master skill source is registered for lazy use.',
       '',
-      'Use skill_view with name "master" and an optional focused query to read only the needed sections.',
+      'Use skill mode=view with name "master" and an optional focused query to read only the needed sections.',
       '',
       'The local source path is stored internally and hidden from this view.',
     ].join('\n')

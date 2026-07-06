@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,7 +47,7 @@ func (a *App) RunDoctor() DoctorResult {
 	var checks []DoctorCheck
 	add := func(c DoctorCheck) { checks = append(checks, c) }
 
-	// ── 1. Active provider reachability ──────────────────────────────────────
+	// â”€â”€ 1. Active provider reachability â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	activeProfile := profiles.Profiles[cfg.ActiveProfile]
 	if strings.TrimSpace(cfg.ActiveProfile) == "" {
 		add(DoctorCheck{
@@ -108,7 +112,7 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// ── 2. llama.cpp version ─────────────────────────────────────────────────
+	// â”€â”€ 2. llama.cpp version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if hasProvider && provider.Backend == "llamacpp" {
 		versionOK, versionMsg, versionDetail := checkLlamacppVersion(provider.BaseURL)
 		add(DoctorCheck{
@@ -117,11 +121,13 @@ func (a *App) RunDoctor() DoctorResult {
 			Message: versionMsg,
 			Detail:  versionDetail,
 		})
+		addInferenceBridgeProgressCheck(add, provider.BaseURL)
+		addInferenceBridgeAgentEndpointCheck(add, provider)
 	} else if hasProvider && provider.Backend == "lmstudio" {
 		add(DoctorCheck{
 			Name:    "llama.cpp version",
 			Status:  "info",
-			Message: "Using LM Studio — llama.cpp version check not applicable",
+			Message: "Using LM Studio â€” llama.cpp version check not applicable",
 		})
 	}
 
@@ -220,7 +226,7 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// ── 3. Context window match ───────────────────────────────────────────────
+	// â”€â”€ 3. Context window match â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if hasProvider && activeProfile.CtxTokens > 0 {
 		if hasProvider && provider.Backend == "llamacpp" {
 			actualCtx, err := fetchLlamacppContext(provider.BaseURL)
@@ -234,16 +240,16 @@ func (a *App) RunDoctor() DoctorResult {
 			} else if actualCtx > 0 && actualCtx < activeProfile.CtxTokens {
 				add(DoctorCheck{
 					Name:    "Context window",
-					Status:  "warn",
-					Message: fmt.Sprintf("Profile requests %d tokens but server reports %d — compaction threshold may fire too early", activeProfile.CtxTokens, actualCtx),
-					Detail:  "Lower ctx_tokens in the profile or restart llama.cpp with a larger --ctx-size",
+					Status:  "fail",
+					Message: fmt.Sprintf("Profile requests %d tokens but backend actually loaded %d", activeProfile.CtxTokens, actualCtx),
+					Detail:  "The agent run will be blocked until InferenceBridge/llama.cpp reloads this model with the profile context. TheMauler no longer silently shrinks to the smaller backend window.",
 				})
 			} else if actualCtx > activeProfile.CtxTokens*2 {
 				add(DoctorCheck{
 					Name:    "Context window",
-					Status:  "warn",
+					Status:  "info",
 					Message: fmt.Sprintf("Profile is %d tokens but server is running %d tokens", activeProfile.CtxTokens, actualCtx),
-					Detail:  "InferenceBridge/llama.cpp appears to have launched model-default context. On a 24 GB RTX 3090, restart the backend with an explicit 32768 ctx to avoid excessive KV cache use.",
+					Detail:  "Backend context is larger than requested. This is allowed; TheMauler will keep the profile as the working budget unless you choose a larger profile.",
 				})
 			} else {
 				add(DoctorCheck{
@@ -297,7 +303,9 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// ── 4. Thinking mode + no-think threshold ────────────────────────────────
+	addGPUVRAMDoctorCheck(add, activeProfile)
+
+	// â”€â”€ 4. Thinking mode + no-think threshold â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	addRuntimeProfileChecks(add, activeProfile)
 	addProfileIdentityChecks(add, cfg.ActiveProfile, activeProfile)
 	addAgentPresetBudgetChecks(add, cfg, activeProfile)
@@ -305,24 +313,25 @@ func (a *App) RunDoctor() DoctorResult {
 	addProfileSanityChecks(add, activeProfile)
 	addModelTierCheck(add, activeProfile)
 	if hasProvider && provider.Backend == "llamacpp" {
+		addLlamacppLaunchAssertions(add, provider.BaseURL, activeProfile)
 		addLlamacppAgentFlagAdvisory(add)
 	}
 
 	if activeProfile.Thinking {
 		threshold := cfg.Agents.NoThinkAfterToolCalls
 		if threshold <= 0 {
-			threshold = 3
+			threshold = 2
 		}
 		add(DoctorCheck{
 			Name:    "Thinking mode",
 			Status:  "ok",
-			Message: fmt.Sprintf("Enabled — thinking disabled automatically after %d tool calls per turn (Qwen3 tool-call collision fix)", threshold),
+			Message: fmt.Sprintf("Enabled â€” thinking disabled automatically after %d tool calls per turn (Qwen3 tool-call collision fix)", threshold),
 		})
 		if hasProvider && provider.Backend != "llamacpp" {
 			add(DoctorCheck{
 				Name:    "Thinking mode backend",
 				Status:  "warn",
-				Message: "Thinking mode is on but the active backend is not llama.cpp — chat_template_kwargs will be silently ignored",
+				Message: "Thinking mode is on but the active backend is not llama.cpp â€” chat_template_kwargs will be silently ignored",
 				Detail:  "Switch to a llamacpp provider or disable thinking for this profile",
 			})
 		}
@@ -330,26 +339,26 @@ func (a *App) RunDoctor() DoctorResult {
 		add(DoctorCheck{
 			Name:    "Thinking mode",
 			Status:  "info",
-			Message: "Disabled for active profile — tool calling will be most reliable in this mode",
+			Message: "Disabled for active profile â€” tool calling will be most reliable in this mode",
 		})
 	}
 
-	// ── 5. MTP speculative decoding ───────────────────────────────────────────
+	// â”€â”€ 5. MTP speculative decoding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if activeProfile.SpecType != "" {
 		add(DoctorCheck{
 			Name:    "MTP speculative decoding",
 			Status:  "ok",
-			Message: fmt.Sprintf("Enabled: spec_type=%s draft_n_max=%d — expect 1.4–2.2× faster generation", activeProfile.SpecType, activeProfile.SpecDraftNMax),
+			Message: fmt.Sprintf("Enabled: spec_type=%s draft_n_max=%d â€” expect 1.4â€“2.2Ã— faster generation", activeProfile.SpecType, activeProfile.SpecDraftNMax),
 		})
 	} else {
 		add(DoctorCheck{
 			Name:    "MTP speculative decoding",
 			Status:  "info",
-			Message: "Disabled — set spec_type=draft-mtp in the profile for 1.4–2.2× faster generation (llama.cpp b9180+ only)",
+			Message: "Disabled â€” set spec_type=draft-mtp in the profile for 1.4â€“2.2Ã— faster generation (llama.cpp b9180+ only)",
 		})
 	}
 
-	// ── 6. Shell backend ─────────────────────────────────────────────────────
+	// â”€â”€ 6. Shell backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	addRuntimeLockChecks(add)
 
 	shellBackend := cfg.Tools.ShellBackend
@@ -361,7 +370,7 @@ func (a *App) RunDoctor() DoctorResult {
 			add(DoctorCheck{
 				Name:    "Shell backend",
 				Status:  "warn",
-				Message: "Shell backend is set to 'bash' on Windows — this will fail unless Git Bash or WSL is in PATH",
+				Message: "Shell backend is set to 'bash' on Windows â€” this will fail unless Git Bash or WSL is in PATH",
 				Detail:  "Change to 'auto' (PowerShell) or 'wsl' for WSL bash",
 			})
 		} else {
@@ -379,6 +388,8 @@ func (a *App) RunDoctor() DoctorResult {
 		})
 	}
 	addShellNetworkBoundaryCheck(add, cfg, shellBackend)
+	addSharedTerminalDoctorCheck(add, a.GetSharedTerminalState())
+	addToolingSmokeChecks(add)
 
 	if cfg.Agents.OfflineOnly {
 		add(DoctorCheck{
@@ -396,7 +407,7 @@ func (a *App) RunDoctor() DoctorResult {
 	}
 	addToolAccessChecks(add, cfg)
 
-	// ── 7. Memory DB ─────────────────────────────────────────────────────────
+	// â”€â”€ 7. Memory DB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if entries, err := loadMemory(); err != nil {
 		add(DoctorCheck{Name: "Memory DB", Status: "warn", Message: "SQLite memory store could not be read", Detail: err.Error()})
 	} else {
@@ -408,45 +419,46 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// ── 8. Session recall DB ─────────────────────────────────────────────────
+	// â”€â”€ 8. Session recall DB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	cfgDir, err := settings.ConfigDir()
 	if err != nil {
 		add(DoctorCheck{Name: "Session recall DB", Status: "fail", Message: err.Error()})
 	} else {
 		dbPath := filepath.Join(cfgDir, "state.db")
 		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-			add(DoctorCheck{Name: "Session recall DB", Status: "info", Message: "state.db does not exist yet — created on first session save"})
+			add(DoctorCheck{Name: "Session recall DB", Status: "info", Message: "state.db does not exist yet â€” created on first session save"})
 		} else {
 			add(DoctorCheck{Name: "Session recall DB", Status: "ok", Message: dbPath})
 		}
 	}
 
-	// ── 9. Skills directory ──────────────────────────────────────────────────
+	// â”€â”€ 9. Skills directory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if dir, err := skillsDir(); err != nil {
 		add(DoctorCheck{Name: "Skills dir", Status: "fail", Message: err.Error()})
 	} else if _, err := os.Stat(dir); os.IsNotExist(err) {
-		add(DoctorCheck{Name: "Skills dir", Status: "info", Message: "No skills yet — skills dir will be created when you save the first skill"})
+		add(DoctorCheck{Name: "Skills dir", Status: "info", Message: "No skills yet â€” skills dir will be created when you save the first skill"})
 	} else {
 		skillList, _ := loadSkills()
 		add(DoctorCheck{Name: "Skills dir", Status: "ok", Message: fmt.Sprintf("%d skills in %s", len(skillList), dir)})
 	}
+	addMasterSkillDoctorChecks(add)
 
-	// ── 10. USER.md ──────────────────────────────────────────────────────────
+	// â”€â”€ 10. USER.md â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	if up := loadUserProfile(); up == "" {
 		add(DoctorCheck{
 			Name:    "User profile",
 			Status:  "info",
-			Message: "USER.md not set — create one in the Memory tab so the agent learns your preferences",
+			Message: "USER.md not set â€” create one in the Memory tab so the agent learns your preferences",
 		})
 	} else {
 		words := len(strings.Fields(up))
 		add(DoctorCheck{Name: "User profile", Status: "ok", Message: fmt.Sprintf("USER.md: %d words", words)})
 	}
 
-	// ── 11. Web search ───────────────────────────────────────────────────────
+	// â”€â”€ 11. Web search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	addWebEngineChecks(add, cfg)
 
-	// ── Score ────────────────────────────────────────────────────────────────
+	// â”€â”€ Score â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 	ok, warns, fails := 0, 0, 0
 	for _, c := range checks {
 		switch c.Status {
@@ -473,6 +485,186 @@ func (a *App) RunDoctor() DoctorResult {
 	return DoctorResult{Checks: checks, Score: score, Grade: grade}
 }
 
+func addMasterSkillDoctorChecks(add func(DoctorCheck)) {
+	skill, err := loadSkill("master")
+	if err != nil {
+		if os.IsNotExist(err) {
+			add(DoctorCheck{
+				Name:    "Master skill",
+				Status:  "info",
+				Message: "No master skill registered",
+				Detail:  "Register one only if you want TheMauler to use a larger methodology/reference library through skill mode=view.",
+			})
+			return
+		}
+		add(DoctorCheck{Name: "Master skill", Status: "warn", Message: "Could not read registered master skill", Detail: err.Error()})
+		return
+	}
+	if strings.TrimSpace(skill.SourcePath) == "" {
+		add(DoctorCheck{
+			Name:    "Master skill",
+			Status:  "warn",
+			Message: "Master skill has no source_path, so skill mode=view cannot lazy-load the external methodology",
+			Detail:  "Re-register the master source or add source_path to the master skill frontmatter.",
+		})
+		return
+	}
+	source := tools.NormalizeHostPath(strings.TrimSpace(skill.SourcePath))
+	info, err := os.Stat(source)
+	if err != nil {
+		add(DoctorCheck{
+			Name:    "Master skill source",
+			Status:  "warn",
+			Message: "Registered master skill source path is not reachable",
+			Detail:  err.Error(),
+		})
+		return
+	}
+	if !masterSkillWrapperHasAdapter(skill.Body) {
+		add(DoctorCheck{
+			Name:    "Master skill adapter",
+			Status:  "warn",
+			Message: "Master wrapper is missing TheMauler/local-LLM adapter guidance",
+			Detail:  "Re-register the master source or update master.md so local models use focused skill mode=view queries instead of treating the source as a replacement system prompt.",
+		})
+	} else {
+		add(DoctorCheck{
+			Name:    "Master skill adapter",
+			Status:  "ok",
+			Message: "TheMauler/local-LLM adapter guidance is present",
+		})
+	}
+	stats := scanMasterSkillSource(source, info)
+	if stats.markdownFiles == 0 {
+		add(DoctorCheck{
+			Name:    "Master skill source",
+			Status:  "warn",
+			Message: "Registered master source contains no markdown files",
+			Detail:  source,
+		})
+		return
+	}
+	status := "ok"
+	message := fmt.Sprintf("%d markdown files, %s total, lazy skill mode=view outline/query mode available", stats.markdownFiles, humanBytes(stats.totalBytes))
+	if stats.totalBytes > 2*1024*1024 || stats.markdownFiles > 50 {
+		status = "info"
+		message = fmt.Sprintf("Large master source: %d markdown files, %s total; use focused skill mode=view queries", stats.markdownFiles, humanBytes(stats.totalBytes))
+	}
+	add(DoctorCheck{
+		Name:    "Master skill source",
+		Status:  status,
+		Message: message,
+		Detail:  "Default skill mode=view returns an outline; focused queries rank methodology sections first.",
+	})
+	if len(stats.loadAllWarnings) > 0 {
+		add(DoctorCheck{
+			Name:    "Master skill load-all language",
+			Status:  "warn",
+			Message: "External source contains instructions that may encourage broad loading",
+			Detail:  strings.Join(stats.loadAllWarnings, "\n"),
+		})
+	}
+}
+
+func masterSkillWrapperHasAdapter(body string) bool {
+	lower := strings.ToLower(body)
+	for _, phrase := range []string{
+		"themauler's system prompt",
+		"focused query",
+		"terminal_send",
+		"evidence policy",
+	} {
+		if !strings.Contains(lower, strings.ToLower(phrase)) {
+			return false
+		}
+	}
+	return true
+}
+
+type masterSkillSourceStats struct {
+	markdownFiles   int
+	totalBytes      int64
+	loadAllWarnings []string
+}
+
+func scanMasterSkillSource(source string, info os.FileInfo) masterSkillSourceStats {
+	var stats masterSkillSourceStats
+	scanFile := func(path string, fileInfo os.FileInfo) {
+		if fileInfo == nil || fileInfo.IsDir() || !strings.EqualFold(filepath.Ext(path), ".md") {
+			return
+		}
+		stats.markdownFiles++
+		stats.totalBytes += fileInfo.Size()
+		if len(stats.loadAllWarnings) >= 5 || fileInfo.Size() > 512*1024 {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		if phrase := firstMasterLoadAllPhrase(string(data)); phrase != "" {
+			label := filepath.Base(path)
+			if rel, err := filepath.Rel(source, path); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+				label = filepath.ToSlash(rel)
+			}
+			stats.loadAllWarnings = append(stats.loadAllWarnings, label+": "+phrase)
+		}
+	}
+	if !info.IsDir() {
+		scanFile(source, info)
+		return stats
+	}
+	_ = filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != source && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		fileInfo, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		scanFile(path, fileInfo)
+		return nil
+	})
+	return stats
+}
+
+func firstMasterLoadAllPhrase(content string) string {
+	lower := strings.ToLower(content)
+	for _, phrase := range []string{
+		"read this whole document",
+		"read the whole document",
+		"loaded at boot",
+		"load unconditionally",
+		"always load",
+		"must load",
+		"direct load",
+	} {
+		if strings.Contains(lower, phrase) {
+			return phrase
+		}
+	}
+	return ""
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 // checkLlamacppVersion probes /health or /props to guess the server version.
 func checkLlamacppVersion(baseURL string) (status, message, detail string) {
 	base := strings.TrimSuffix(baseURL, "/v1")
@@ -483,21 +675,225 @@ func checkLlamacppVersion(baseURL string) (status, message, detail string) {
 		// Fallback: just check /health
 		resp2, err2 := client.Get(base + "/health")
 		if err2 != nil {
-			return "warn", "Cannot reach llama.cpp /health — is the server running?", err2.Error()
+			return "warn", "Cannot reach llama.cpp /health â€” is the server running?", err2.Error()
 		}
 		defer resp2.Body.Close()
-		return "info", "llama.cpp is running (version unknown — /props not available)", ""
+		return "info", "llama.cpp is running (version unknown â€” /props not available)", ""
 	}
 	defer resp.Body.Close()
 	// We can't parse the full response without JSON parsing, but getting a 200 is enough.
-	return "ok", "llama.cpp is running (/props available — likely b9180+ for MTP support)", ""
+	return "ok", "llama.cpp is running (/props available â€” likely b9180+ for MTP support)", ""
 }
 
-// fetchLlamacppContext reads the active llama.cpp context size from /props,
-// falling back to InferenceBridge's /v1/health KV cache metadata.
+func severeContextUndersize(requested, actual int) bool {
+	if requested <= 0 || actual <= 0 {
+		return false
+	}
+	return actual < requested/2 || (requested >= 32000 && actual <= 8192)
+}
+
+type gpuVRAMInfo struct {
+	Name     string
+	TotalMiB int
+}
+
+func addGPUVRAMDoctorCheck(add func(DoctorCheck), profile settings.Profile) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		add(DoctorCheck{
+			Name:    "GPU VRAM",
+			Status:  "info",
+			Message: "Could not read NVIDIA VRAM from nvidia-smi",
+			Detail:  err.Error(),
+		})
+		return
+	}
+	gpus := parseNvidiaSMIVRAM(string(out))
+	if len(gpus) == 0 {
+		add(DoctorCheck{
+			Name:    "GPU VRAM",
+			Status:  "info",
+			Message: "nvidia-smi did not report GPU VRAM",
+		})
+		return
+	}
+	var total int
+	var parts []string
+	for _, gpu := range gpus {
+		total += gpu.TotalMiB
+		parts = append(parts, fmt.Sprintf("%s: %d MiB", gpu.Name, gpu.TotalMiB))
+	}
+	estimate, ok := estimateProfileVRAMMiB(profile)
+	status := "ok"
+	message := fmt.Sprintf("Detected %d MiB total NVIDIA VRAM", total)
+	if ok {
+		message = fmt.Sprintf("Detected %d MiB VRAM; active profile estimate is %d MiB", total, estimate)
+		parts = append(parts, fmt.Sprintf("active profile estimate: %d MiB (%s @ %d ctx)", estimate, profile.ModelID, profile.CtxTokens))
+		if estimate > total {
+			status = "warn"
+			message = fmt.Sprintf("Active profile may not fit detected VRAM: estimate %d MiB > %d MiB", estimate, total)
+		} else if total-estimate < 2048 {
+			status = "warn"
+			message = fmt.Sprintf("Active profile has tight VRAM headroom: estimate %d MiB of %d MiB", estimate, total)
+		}
+	}
+	add(DoctorCheck{
+		Name:    "GPU VRAM",
+		Status:  status,
+		Message: message,
+		Detail:  strings.Join(parts, "\n"),
+	})
+}
+
+func parseNvidiaSMIVRAM(out string) []gpuVRAMInfo {
+	var gpus []gpuVRAMInfo
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		memText := strings.TrimSpace(parts[1])
+		memText = strings.TrimSuffix(strings.TrimSpace(memText), "MiB")
+		total, err := strconv.Atoi(strings.TrimSpace(memText))
+		if err != nil || total <= 0 {
+			continue
+		}
+		gpus = append(gpus, gpuVRAMInfo{Name: name, TotalMiB: total})
+	}
+	return gpus
+}
+
+func estimateProfileVRAMMiB(profile settings.Profile) (int, bool) {
+	paramsB, ok := modelParamsB(profile.ModelID)
+	if !ok || profile.CtxTokens <= 0 {
+		return 0, false
+	}
+	quantBytes := 0.60
+	switch modelQuantTag(profile.ModelID) {
+	case "q2_k", "ud-q2_k_xl":
+		quantBytes = 0.36
+	case "q3_k_s", "q3_k_m", "q3_k_l":
+		quantBytes = 0.48
+	case "q4_0", "q4_1", "q4_k_s", "q4_k_m", "ud-q4_k_xl":
+		quantBytes = 0.58
+	case "q5_0", "q5_1", "q5_k_s", "q5_k_m":
+		quantBytes = 0.70
+	case "q6_k":
+		quantBytes = 0.82
+	case "q8_0":
+		quantBytes = 1.05
+	}
+	modelMiB := paramsB * 1000 * quantBytes
+	kvPerTokenMiB := 0.11
+	if paramsB < 15 {
+		kvPerTokenMiB = 0.06
+	} else if paramsB < 25 {
+		kvPerTokenMiB = 0.08
+	}
+	kvMiB := float64(profile.CtxTokens) * kvPerTokenMiB
+	const overheadMiB = 1536
+	return int(modelMiB + kvMiB + overheadMiB), true
+}
+
+func modelParamsB(modelID string) (float64, bool) {
+	re := regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*b`)
+	match := re.FindStringSubmatch(modelID)
+	if len(match) != 2 {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(match[1], 64)
+	if err != nil || v <= 0 {
+		return 0, false
+	}
+	return v, true
+}
+
+func addSharedTerminalDoctorCheck(add func(DoctorCheck), state TerminalStateSnapshot) {
+	status := "ok"
+	detail := strings.Join(state.Lines, "\n")
+	switch strings.TrimSpace(state.State) {
+	case "", "missing", "closed":
+		status = "info"
+	case "ready":
+		status = "ok"
+	case "listener", "running", "interactive_prompt", "busy":
+		status = "warn"
+		if detail != "" {
+			detail += "\n"
+		}
+		detail += "Use Terminal Recover for stale busy state, terminal_read/terminal_send for intentional listeners/prompts, or start long jobs with background=true."
+	default:
+		status = "info"
+	}
+	message := state.Summary
+	if strings.TrimSpace(message) == "" {
+		message = "Shared terminal state: " + firstNonEmpty(state.State, "unknown")
+	}
+	add(DoctorCheck{
+		Name:    "Shared terminal state",
+		Status:  status,
+		Message: message,
+		Detail:  detail,
+	})
+}
+
+func addToolingSmokeChecks(add func(DoctorCheck)) {
+	var failures []string
+
+	sess := &shellSession{scroll: newTerminalScrollback(20), screen: newTerminalScreen(80, 10)}
+	updateShellSessionOSCState(sess, []byte("\x1b]133;D;0\x07\x1b]133;P;cwd=/tmp/mauler\x07\x1b]133;A\x07"))
+	if !terminalSessionPromptReady(sess) || terminalExitLabel(sess) != "0" || terminalCWDLabel(sess) != "/tmp/mauler" {
+		failures = append(failures, "OSC-133 prompt/exit/cwd parser did not update terminal session state")
+	}
+
+	sess.scroll.append("22/tcp open ssh")
+	sess.scroll.append("80/tcp open http Apache")
+	search, matches := formatTerminalSearchView(sess, 10, "history", "Apache")
+	if matches != 1 || !strings.Contains(search, "80/tcp") {
+		failures = append(failures, "terminal history grep did not return expected match")
+	}
+
+	shellResult := formatSharedTerminalResult([]terminalOutput{{stream: "stdout", data: "ok"}}, "wsl", 0, time.Millisecond)
+	if !strings.Contains(shellResult, "[shell_result state=done") || !strings.Contains(shellResult, "exit: 0") {
+		failures = append(failures, "shared shell result contract missing state/exit")
+	}
+
+	runScript := formatRunScriptResult("done", 1, "read", "", "", "ok", "", "", 5, 10)
+	if !strings.Contains(runScript, "[run_script_result state=done]") || !strings.Contains(runScript, "inner_tool_calls: 1") {
+		failures = append(failures, "run_script result contract missing state/inner_tool_calls")
+	}
+
+	if len(failures) > 0 {
+		add(DoctorCheck{
+			Name:    "Tooling smoke tests",
+			Status:  "fail",
+			Message: fmt.Sprintf("%d tooling reliability checks failed", len(failures)),
+			Detail:  strings.Join(failures, "\n"),
+		})
+		return
+	}
+	add(DoctorCheck{
+		Name:    "Tooling smoke tests",
+		Status:  "ok",
+		Message: "Terminal markers, terminal grep, shell contracts, and run_script contracts parse correctly",
+	})
+}
+
+// fetchLlamacppContext reads the active llama.cpp context size from /slots,
+// /props, InferenceBridge's /v1/models/stats, then /v1/health KV cache metadata.
 func fetchLlamacppContext(baseURL string) (int, error) {
 	base := strings.TrimSuffix(baseURL, "/v1")
 	client := &http.Client{Timeout: 3 * time.Second}
+	if ctx, err := fetchLlamacppSlotsContextWithClient(base, client); err == nil && ctx > 0 {
+		return ctx, nil
+	}
 	resp, err := client.Get(base + "/props")
 	if err != nil {
 		return 0, err
@@ -514,6 +910,9 @@ func fetchLlamacppContext(baseURL string) (int, error) {
 	if props.DefaultGenerationSettings.NCtx > 0 {
 		return props.DefaultGenerationSettings.NCtx, nil
 	}
+	if ctx, err := fetchInferenceBridgeStatsContextWithClient(base, client); err == nil && ctx > 0 {
+		return ctx, nil
+	}
 	resp, err = client.Get(base + "/v1/health")
 	if err != nil {
 		return 0, err
@@ -528,6 +927,338 @@ func fetchLlamacppContext(baseURL string) (int, error) {
 		return 0, err
 	}
 	return health.KVCache.TotalTokens, nil
+}
+
+func fetchLlamacppSlotsContextWithClient(base string, client *http.Client) (int, error) {
+	resp, err := client.Get(base + "/slots")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("slots HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	type llamaSlot struct {
+		NCtx int `json:"n_ctx"`
+	}
+	var slots []llamaSlot
+	if err := json.Unmarshal(data, &slots); err == nil {
+		for _, slot := range slots {
+			if slot.NCtx > 0 {
+				return slot.NCtx, nil
+			}
+		}
+	}
+	var wrapped struct {
+		Value []llamaSlot `json:"value"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return 0, err
+	}
+	for _, slot := range wrapped.Value {
+		if slot.NCtx > 0 {
+			return slot.NCtx, nil
+		}
+	}
+	return 0, nil
+}
+
+func fetchInferenceBridgeStatsContextWithClient(base string, client *http.Client) (int, error) {
+	resp, err := client.Get(base + "/v1/models/stats")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("stats HTTP %d", resp.StatusCode)
+	}
+	var stats any
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return 0, err
+	}
+	for _, key := range []string{"actual_ctx_tokens", "actual_ctx", "context_size", "ctx_tokens", "ctx_size", "n_ctx", "num_ctx"} {
+		if value := findNumericJSONKey(stats, key); value > 0 {
+			return value, nil
+		}
+	}
+	return 0, nil
+}
+
+type inferenceBridgeProgress struct {
+	State string
+	Stage string
+	Ready bool
+	Raw   string
+}
+
+func addInferenceBridgeProgressCheck(add func(DoctorCheck), baseURL string) {
+	base := strings.TrimSuffix(baseURL, "/v1")
+	progress, err := fetchInferenceBridgeProgressWithClient(base, &http.Client{Timeout: 3 * time.Second})
+	if err != nil {
+		add(DoctorCheck{
+			Name:    "InferenceBridge progress state",
+			Status:  "info",
+			Message: "Could not read /v1/models/stats progress state",
+			Detail:  err.Error(),
+		})
+		return
+	}
+	state := strings.ToLower(strings.TrimSpace(progress.State))
+	stage := strings.ToLower(strings.TrimSpace(progress.Stage))
+	if progress.Ready && (state == "loading" || state == "resolving" || stage == "loading" || stage == "resolving") {
+		add(DoctorCheck{
+			Name:    "InferenceBridge progress state",
+			Status:  "warn",
+			Message: fmt.Sprintf("Health looks ready but stats still reports state=%q stage=%q", progress.State, progress.Stage),
+			Detail:  "This looks like stale progress state in InferenceBridge, not a model/runtime failure. Reset the progress state after a successful load so UI/Doctor does not show Loading forever.\n" + progress.Raw,
+		})
+		return
+	}
+	if progress.State != "" || progress.Stage != "" {
+		add(DoctorCheck{
+			Name:    "InferenceBridge progress state",
+			Status:  "ok",
+			Message: fmt.Sprintf("state=%q stage=%q ready=%v", progress.State, progress.Stage, progress.Ready),
+		})
+	}
+}
+
+func fetchInferenceBridgeProgressWithClient(base string, client *http.Client) (inferenceBridgeProgress, error) {
+	resp, err := client.Get(base + "/v1/models/stats")
+	if err != nil {
+		return inferenceBridgeProgress{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return inferenceBridgeProgress{}, fmt.Errorf("stats HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return inferenceBridgeProgress{}, err
+	}
+	var stats any
+	if err := json.Unmarshal(data, &stats); err != nil {
+		return inferenceBridgeProgress{}, err
+	}
+	progress := inferenceBridgeProgress{
+		State: firstJSONTextKey(stats, "state", "status"),
+		Stage: firstJSONTextKey(stats, "stage", "phase"),
+		Ready: findBoolJSONKey(stats, "ready") || strings.EqualFold(firstJSONTextKey(stats, "health", "server_state"), "ok"),
+		Raw:   truncateRunes(string(data), 1200),
+	}
+	if strings.Contains(strings.ToLower(string(data)), `"ok"`) || strings.Contains(strings.ToLower(string(data)), `"healthy"`) {
+		progress.Ready = true
+	}
+	return progress, nil
+}
+
+func addInferenceBridgeAgentEndpointCheck(add func(DoctorCheck), provider settings.Provider) {
+	check := probeInferenceBridgeAgentEndpoints(provider, &http.Client{Timeout: 4 * time.Second})
+	if check.Status != "" {
+		add(check)
+	}
+}
+
+func probeInferenceBridgeAgentEndpoints(provider settings.Provider, client *http.Client) DoctorCheck {
+	if provider.Backend != "llamacpp" {
+		return DoctorCheck{}
+	}
+	base := strings.TrimRight(provider.BaseURL, "/")
+	if base == "" {
+		return DoctorCheck{}
+	}
+	if !isLikelyInferenceBridgeBaseURL(base) {
+		runtimeProbe := probeProviderJSONRoute(client, provider, "/runtime/doctor", nil)
+		if runtimeProbe.Err != nil || runtimeProbe.StatusCode == http.StatusNotFound || runtimeProbe.StatusCode == http.StatusMethodNotAllowed {
+			return DoctorCheck{}
+		}
+	}
+
+	validatorBody := map[string]any{
+		"think_tag_style": "qwen",
+		"text":            `{"step_id":"doctor","role":"worker","goal":"probe InferenceBridge agent validator","action":"read","arguments":{"path":"AGENTS.md"},"expected_outcome":"file can be inspected","success_check":"validator accepts the action shape","confidence":0.9,"next_step":"continue"}`,
+	}
+	validator := probeProviderJSONRoute(client, provider, "/reliability/agent-action/validate", validatorBody)
+	messages := probeProviderJSONRoute(client, provider, "/messages", map[string]any{})
+	embeddings := probeProviderJSONRoute(client, provider, "/embeddings", map[string]any{})
+
+	var missing []string
+	var details []string
+	addProbeDetail := func(name string, probe doctorRouteProbe) {
+		status := "ok"
+		if !probe.Exists() {
+			status = "missing"
+			missing = append(missing, name)
+		}
+		detail := fmt.Sprintf("%s: %s HTTP %d", name, status, probe.StatusCode)
+		if probe.Err != nil {
+			detail += " (" + probe.Err.Error() + ")"
+		}
+		if probe.Body != "" {
+			detail += " " + probe.Body
+		}
+		details = append(details, detail)
+	}
+	addProbeDetail("agent-action validator", validator)
+	addProbeDetail("Anthropic /messages", messages)
+	addProbeDetail("OpenAI /embeddings", embeddings)
+
+	if len(missing) > 0 {
+		return DoctorCheck{
+			Name:    "InferenceBridge agent endpoints",
+			Status:  "warn",
+			Message: "Some InferenceBridge agent API endpoints are missing: " + strings.Join(missing, ", "),
+			Detail:  strings.Join(details, "\n"),
+		}
+	}
+	return DoctorCheck{
+		Name:    "InferenceBridge agent endpoints",
+		Status:  "ok",
+		Message: "Agent validator, Anthropic /messages, and /embeddings routes are reachable",
+		Detail:  strings.Join(details, "\n"),
+	}
+}
+
+type doctorRouteProbe struct {
+	StatusCode int
+	Body       string
+	Err        error
+}
+
+func (p doctorRouteProbe) Exists() bool {
+	if p.Err != nil {
+		return false
+	}
+	return p.StatusCode > 0 && p.StatusCode != http.StatusNotFound && p.StatusCode != http.StatusMethodNotAllowed
+}
+
+func probeProviderJSONRoute(client *http.Client, provider settings.Provider, path string, body any) doctorRouteProbe {
+	rawURL := strings.TrimRight(provider.BaseURL, "/") + "/" + strings.TrimLeft(path, "/")
+	data, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, rawURL, strings.NewReader(string(data)))
+	if err != nil {
+		return doctorRouteProbe{Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if key := providerAPIKey(provider); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return doctorRouteProbe{Err: err}
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 800))
+	return doctorRouteProbe{
+		StatusCode: resp.StatusCode,
+		Body:       truncateRunes(strings.TrimSpace(string(respBody)), 300),
+	}
+}
+
+func isLikelyInferenceBridgeBaseURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return parsed.Port() == "8800" || strings.Contains(host, "inferencebridge") || strings.Contains(host, "inference-bridge")
+}
+
+func providerAPIKey(provider settings.Provider) string {
+	envName := strings.TrimSpace(provider.APIKeyEnv)
+	if envName == "" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(envName))
+}
+
+func firstJSONTextKey(value any, keys ...string) string {
+	for _, key := range keys {
+		if text := findTextJSONKey(value, key); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func findNumericJSONKey(value any, key string) int {
+	switch typed := value.(type) {
+	case map[string]any:
+		for k, child := range typed {
+			if strings.EqualFold(k, key) {
+				switch n := child.(type) {
+				case float64:
+					return int(n)
+				case int:
+					return n
+				case json.Number:
+					if i, err := n.Int64(); err == nil {
+						return int(i)
+					}
+				}
+			}
+			if found := findNumericJSONKey(child, key); found > 0 {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if found := findNumericJSONKey(child, key); found > 0 {
+				return found
+			}
+		}
+	}
+	return 0
+}
+
+func findTextJSONKey(value any, key string) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for k, child := range typed {
+			if strings.EqualFold(k, key) {
+				if s, ok := child.(string); ok {
+					return s
+				}
+			}
+			if text := findTextJSONKey(child, key); text != "" {
+				return text
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if text := findTextJSONKey(child, key); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func findBoolJSONKey(value any, key string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for k, child := range typed {
+			if strings.EqualFold(k, key) {
+				if b, ok := child.(bool); ok {
+					return b
+				}
+			}
+			if findBoolJSONKey(child, key) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if findBoolJSONKey(child, key) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type chatTemplateCaps struct {
@@ -611,9 +1342,9 @@ func markBuiltinToolName(text string, found map[string]bool) {
 func dangerousLlamaServerTools() []string {
 	return []string{
 		"exec_shell_command",
-		"read_file",
-		"write_file",
-		"edit_file",
+		"read",
+		"write",
+		"edit",
 		"grep_search",
 		"file_search",
 	}
@@ -627,6 +1358,108 @@ func sortedBuiltinToolNames(found map[string]bool) []string {
 		}
 	}
 	return out
+}
+
+func fetchLlamacppPropsAny(baseURL string, client *http.Client) (any, error) {
+	base := strings.TrimSuffix(baseURL, "/v1")
+	resp, err := client.Get(base + "/props")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("props HTTP %d", resp.StatusCode)
+	}
+	var props any
+	if err := json.NewDecoder(resp.Body).Decode(&props); err != nil {
+		return nil, err
+	}
+	return props, nil
+}
+
+type llamaLaunchSignals struct {
+	HasJinja       bool
+	ReasoningDeep  bool
+	FlashAttention bool
+	Speculative    bool
+	Text           string
+}
+
+func llamaLaunchSignalsFromProps(props any) llamaLaunchSignals {
+	var entries []string
+	collectJSONEntries("", props, &entries)
+	text := strings.ToLower(strings.Join(entries, "\n"))
+	return llamaLaunchSignals{
+		HasJinja:       strings.Contains(text, "--jinja") || hasBoolishJSONSignal(entries, "jinja", true),
+		ReasoningDeep:  strings.Contains(text, "--reasoning-format deepseek") || strings.Contains(text, "reasoning_format=deepseek") || strings.Contains(text, "reasoning-format=deepseek"),
+		FlashAttention: strings.Contains(text, "--flash-attn on") || strings.Contains(text, "--flash-attn true") || hasBoolishJSONSignal(entries, "flash", true),
+		Speculative:    hasSpeculativeJSONSignal(entries),
+		Text:           text,
+	}
+}
+
+func collectJSONEntries(prefix string, value any, out *[]string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			next := key
+			if prefix != "" {
+				next = prefix + "." + key
+			}
+			collectJSONEntries(next, child, out)
+		}
+	case []any:
+		for _, child := range typed {
+			collectJSONEntries(prefix, child, out)
+		}
+	case string:
+		*out = append(*out, strings.ToLower(prefix+"="+typed))
+	case bool:
+		if typed {
+			*out = append(*out, strings.ToLower(prefix+"=true"))
+		} else {
+			*out = append(*out, strings.ToLower(prefix+"=false"))
+		}
+	case float64:
+		*out = append(*out, fmt.Sprintf("%s=%g", strings.ToLower(prefix), typed))
+	case nil:
+		*out = append(*out, strings.ToLower(prefix+"=null"))
+	default:
+		*out = append(*out, strings.ToLower(fmt.Sprintf("%s=%v", prefix, typed)))
+	}
+}
+
+func hasBoolishJSONSignal(entries []string, keyNeedle string, wantOn bool) bool {
+	keyNeedle = strings.ToLower(keyNeedle)
+	for _, entry := range entries {
+		entry = strings.ToLower(entry)
+		if !strings.Contains(entry, keyNeedle) {
+			continue
+		}
+		if wantOn && (strings.HasSuffix(entry, "=true") || strings.HasSuffix(entry, "=on") || strings.HasSuffix(entry, "=1") || strings.Contains(entry, " "+keyNeedle)) {
+			return true
+		}
+		if !wantOn && (strings.HasSuffix(entry, "=false") || strings.HasSuffix(entry, "=off") || strings.HasSuffix(entry, "=0")) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSpeculativeJSONSignal(entries []string) bool {
+	for _, entry := range entries {
+		lower := strings.ToLower(entry)
+		if !(strings.Contains(lower, "spec") || strings.Contains(lower, "draft")) {
+			continue
+		}
+		if strings.Contains(lower, "speculative") || strings.Contains(lower, "spec_type") || strings.Contains(lower, "draft_model") || strings.Contains(lower, "draft_n") {
+			if strings.HasSuffix(lower, "=false") || strings.HasSuffix(lower, "=off") || strings.HasSuffix(lower, "=0") || strings.HasSuffix(lower, "=null") {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 type modelTemplateInfo struct {
@@ -871,7 +1704,7 @@ func addRuntimeProfileChecks(add func(DoctorCheck), profile settings.Profile) {
 		add(DoctorCheck{
 			Name:    "MTP bridge build",
 			Status:  "info",
-			Message: "Self-MTP is enabled (no separate draft model) — this needs an InferenceBridge build that emits --spec-type without -md",
+			Message: "Self-MTP is enabled (no separate draft model) â€” this needs an InferenceBridge build that emits --spec-type without -md",
 			Detail:  "Confirm in the bridge log a \"Speculative decoding enabled\" (target=speculative) line and --spec-type in the llama-server args. An older bridge silently ignores self-MTP, so generation runs at normal speed with no error.",
 		})
 	}
@@ -981,7 +1814,7 @@ func addSharedBackendSubagentCheck(add func(DoctorCheck), cfg settings.Settings,
 	enabled := settings.EffectiveEnabledTools(cfg.Tools)
 	var subagents []string
 	for name, ok := range enabled {
-		if ok && strings.HasPrefix(name, "subagent_") {
+		if ok && (name == "task" || strings.HasPrefix(name, "subagent_")) {
 			subagents = append(subagents, name)
 		}
 	}
@@ -1043,11 +1876,102 @@ func addProfileSanityChecks(add func(DoctorCheck), profile settings.Profile) {
 			Detail:  "Use UD-Q4_K_XL instead; Q6_K can OOM once KV cache grows.",
 		})
 	}
+	if quant := modelQuantTag(profile.ModelID); quant != "" {
+		switch {
+		case strings.Contains(quant, "q2") || strings.Contains(quant, "q3"):
+			add(DoctorCheck{
+				Name:    "Model quant reliability",
+				Status:  "warn",
+				Message: fmt.Sprintf("Active model quant %s is below the reliable agent tier", strings.ToUpper(quant)),
+				Detail:  "Very small GGUF quants often reduce tool-call discipline and reasoning reliability. For the RTX 3090, prefer UD-Q4_K_XL for Qwen3.6-class agent profiles.",
+			})
+		case strings.Contains(quant, "q4_k_s"):
+			add(DoctorCheck{
+				Name:    "Model quant reliability",
+				Status:  "info",
+				Message: "Active model uses Q4_K_S",
+				Detail:  "Q4_K_S is compact and fast, but it may be less reliable for long agentic tool use than UD-Q4_K_XL/Q4_K_M-class variants. Keep benchmarking TTFT and tool discipline before changing quant.",
+			})
+		case strings.Contains(quant, "q4"):
+			add(DoctorCheck{
+				Name:    "Model quant reliability",
+				Status:  "ok",
+				Message: fmt.Sprintf("Active model quant %s is in the expected 3090-friendly range", strings.ToUpper(quant)),
+			})
+		}
+	}
+}
+
+func modelQuantTag(modelID string) string {
+	lower := strings.ToLower(modelID)
+	known := []string{"ud-q4_k_xl", "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_xl", "q4_k_m", "q4_k_s", "q4_0", "q3_k_m", "q3_k_s", "q2_k"}
+	for _, tag := range known {
+		if strings.Contains(lower, tag) {
+			return tag
+		}
+	}
+	return ""
+}
+
+func addLlamacppLaunchAssertions(add func(DoctorCheck), baseURL string, profile settings.Profile) {
+	props, err := fetchLlamacppPropsAny(baseURL, &http.Client{Timeout: 3 * time.Second})
+	if err != nil {
+		add(DoctorCheck{
+			Name:    "llama.cpp launch assertions",
+			Status:  "info",
+			Message: "Could not inspect /props for launch flags",
+			Detail:  err.Error(),
+		})
+		return
+	}
+	signals := llamaLaunchSignalsFromProps(props)
+	if signals.HasJinja {
+		add(DoctorCheck{Name: "llama.cpp Jinja", Status: "ok", Message: "Jinja/template signal detected"})
+	} else {
+		add(DoctorCheck{
+			Name:    "llama.cpp Jinja",
+			Status:  "info",
+			Message: "Could not confirm --jinja/use_jinja from /props",
+			Detail:  "If tool calls leak as text or </think> appears in responses, reload through InferenceBridge/llama.cpp with Jinja enabled.",
+		})
+	}
+	if strings.Contains(strings.ToLower(profile.ModelID), "qwen") {
+		if signals.ReasoningDeep {
+			add(DoctorCheck{Name: "llama.cpp reasoning format", Status: "ok", Message: "DeepSeek/Qwen reasoning-format signal detected"})
+		} else {
+			add(DoctorCheck{
+				Name:    "llama.cpp reasoning format",
+				Status:  "info",
+				Message: "Could not confirm --reasoning-format deepseek from /props",
+				Detail:  "For Qwen3-class thinking models, use the DeepSeek-style reasoning format when the backend supports it so <think> stays structured.",
+			})
+		}
+	}
+	if signals.FlashAttention {
+		add(DoctorCheck{Name: "llama.cpp flash attention", Status: "ok", Message: "Flash-attention signal detected"})
+	} else {
+		add(DoctorCheck{
+			Name:    "llama.cpp flash attention",
+			Status:  "info",
+			Message: "Could not confirm flash-attention from /props",
+			Detail:  "Flash attention is usually the right default for long local-agent contexts when the backend/model supports it.",
+		})
+	}
+	if signals.Speculative {
+		add(DoctorCheck{
+			Name:    "llama.cpp speculative decoding",
+			Status:  "warn",
+			Message: "Speculative/draft decoding signal detected",
+			Detail:  "MTP can improve speed, but if you see early stops near </think>, repeated empty turns, or truncation loops, disable speculative decoding and re-test stability.",
+		})
+	} else {
+		add(DoctorCheck{Name: "llama.cpp speculative decoding", Status: "ok", Message: "No speculative/draft decoding signal detected in /props"})
+	}
 }
 
 // addModelTierCheck warns when the active model is below the parameter tier at
 // which local tool calling stays reliable. BFCL V4 shows a sharp cliff: a ~9B
-// general model scores ~66%, a 4B ~50%, a 2B ~44% — so multi-step agent runs
+// general model scores ~66%, a 4B ~50%, a 2B ~44% â€” so multi-step agent runs
 // spin out well before chat quality visibly drops. Docker's 21-model agent eval
 // makes the same point (a tool-tuned 14B beats a 70B that calls tools poorly):
 // size is a floor, not the goal.
@@ -1061,14 +1985,14 @@ func addModelTierCheck(add func(DoctorCheck), profile settings.Profile) {
 		add(DoctorCheck{
 			Name:    "Model tool-calling tier",
 			Status:  "warn",
-			Message: fmt.Sprintf("Active model looks ~%gB — below the reliable tool-calling tier", b),
-			Detail:  "Agent tool calling degrades sharply under ~7-9B (BFCL V4: ~9B≈66%, 4B≈50%, 2B≈44%). Small models are fine for chat but spin out on multi-step tool use — prefer a 7B+ tool-tuned model for agent runs.",
+			Message: fmt.Sprintf("Active model looks ~%gB â€” below the reliable tool-calling tier", b),
+			Detail:  "Agent tool calling degrades sharply under ~7-9B (BFCL V4: ~9Bâ‰ˆ66%, 4Bâ‰ˆ50%, 2Bâ‰ˆ44%). Small models are fine for chat but spin out on multi-step tool use â€” prefer a 7B+ tool-tuned model for agent runs.",
 		})
 	case b < 7:
 		add(DoctorCheck{
 			Name:    "Model tool-calling tier",
 			Status:  "info",
-			Message: fmt.Sprintf("Active model is ~%gB — near the lower edge of reliable tool calling", b),
+			Message: fmt.Sprintf("Active model is ~%gB â€” near the lower edge of reliable tool calling", b),
 			Detail:  "Below ~7-9B, tool-call reliability starts to drop (BFCL V4). Watch for malformed or looping tool calls; move to a larger tool-tuned model if you see them.",
 		})
 	default:
@@ -1083,16 +2007,16 @@ func addModelTierCheck(add func(DoctorCheck), profile settings.Profile) {
 // addLlamacppAgentFlagAdvisory surfaces the research-backed llama.cpp launch
 // flags that make Qwen3-class local models stable as agents. These cannot all
 // be read back from /props, so it is an advisory (info) check rather than a
-// pass/fail — the chat_format, template, and MTP checks above cover the parts
+// pass/fail â€” the chat_format, template, and MTP checks above cover the parts
 // that are machine-detectable.
 func addLlamacppAgentFlagAdvisory(add func(DoctorCheck)) {
 	detail := strings.Join([]string{
-		"--jinja — convert native <tool_call> output into OpenAI tool_calls. Without it, tool calls and </think> leak as plain text (TheMauler repairs this, but it is a safety net, not a fix).",
-		"--reasoning-format deepseek — Qwen3 uses the same <think>/</think> delimiters as DeepSeek-R1.",
-		"Disable speculative/draft decoding if you see truncation or repetition loops — draft rejections at </think> spike the EOS probability and cause early termination.",
+		"--jinja â€” convert native <tool_call> output into OpenAI tool_calls. Without it, tool calls and </think> leak as plain text (TheMauler repairs this, but it is a safety net, not a fix).",
+		"--reasoning-format deepseek â€” Qwen3 uses the same <think>/</think> delimiters as DeepSeek-R1.",
+		"Disable speculative/draft decoding if you see truncation or repetition loops â€” draft rejections at </think> spike the EOS probability and cause early termination.",
 		"--presence-penalty up to 2.0 if the model loops inside <think> until it runs out of tokens.",
-		"Use the highest quant that fits 24 GB VRAM — UD-Q4_K_XL is the project default for Qwen3.6-27B on the RTX 3090; avoid sub-Q4 quants, which hurt tool-call accuracy.",
-		"--reasoning-budget N — cap thinking tokens at generation time (llama.cpp PR #20297) so a runaway <think> can't eat the whole turn.",
+		"Use the highest quant that fits 24 GB VRAM â€” UD-Q4_K_XL is the project default for Qwen3.6-27B on the RTX 3090; avoid sub-Q4 quants, which hurt tool-call accuracy.",
+		"--reasoning-budget N â€” cap thinking tokens at generation time (llama.cpp PR #20297) so a runaway <think> can't eat the whole turn.",
 	}, "\n")
 	add(DoctorCheck{
 		Name:    "llama.cpp agent flags",
@@ -1123,17 +2047,17 @@ func addToolAccessChecks(add func(DoctorCheck), cfg settings.Settings) {
 		name  string
 		tools []string
 	}{
-		{"Web tools", []string{"web_search", "fetch_url", "subagent_research"}},
-		{"Browser tools", []string{"browser_open", "browser_snapshot", "browser_extract", "browser_screenshot"}},
-		{"Write tools", []string{"write_file", "edit_file"}},
-		{"Shell tools", []string{"shell", "bash"}},
+		{"Web tools", []string{"web_search", "fetch_url", "task"}},
+		{"Browser tools", []string{"browser"}},
+		{"Write tools", []string{"write", "edit"}},
+		{"Shell tools", []string{"shell"}},
 	}
 	for _, group := range groups {
 		enabled := []string{}
 		blocked := []string{}
 		missing := []string{}
 		for _, name := range group.tools {
-			if !available[name] && !strings.HasPrefix(name, "subagent_") {
+			if !available[name] {
 				missing = append(missing, name)
 				continue
 			}
@@ -1266,7 +2190,7 @@ func addShellNetworkBoundaryCheck(add func(DoctorCheck), cfg settings.Settings, 
 	}
 	effective := settings.EffectiveEnabledTools(cfg.Tools)
 	hostSideTools := []string{}
-	for _, name := range []string{"fetch_url", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot", "browser_agent"} {
+	for _, name := range []string{"fetch_url", "browser"} {
 		if effective[name] {
 			hostSideTools = append(hostSideTools, name)
 		}

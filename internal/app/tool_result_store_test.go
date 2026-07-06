@@ -97,7 +97,7 @@ func TestAggregateToolResultOffloadsLargestMessages(t *testing.T) {
 	bigB := "BBB-" + strings.Repeat("b", 700) + "-BEND"
 	msgs := []llm.Message{
 		newToolResultMsg("call-a", "grep", bigA),
-		newToolResultMsg("call-b", "read_file", bigB),
+		newToolResultMsg("call-b", "read", bigB),
 	}
 
 	got := app.offloadToolResultMessagesForAggregate("run-aggregate", msgs, cfg)

@@ -25,6 +25,8 @@ if (-not (Get-Command wails -ErrorAction SilentlyContinue)) {
     throw "wails CLI was not found on PATH. Install Wails or open a shell where wails is available."
 }
 
+Get-Process -Name TheMauler -ErrorAction SilentlyContinue | Stop-Process -Force
+
 if (-not $SkipTests) {
     Invoke-Checked go test ./...
     Invoke-Checked go vet ./...
@@ -43,7 +45,6 @@ if (Test-Path $plainGoBinary) {
     Remove-Item -LiteralPath $plainGoBinary -Force
 }
 
-Get-Process -Name TheMauler -ErrorAction SilentlyContinue | Stop-Process -Force
 Invoke-Checked wails build -clean
 
 $exe = Join-Path $Root "build\bin\TheMauler.exe"

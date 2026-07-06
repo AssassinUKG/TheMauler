@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 9
 
 func DefaultPath() (string, error) {
 	dir, err := settings.ConfigDir()
@@ -92,6 +92,10 @@ func runMigration(db *sql.DB, version int) error {
 		return migrateV6LearningDecisions(db)
 	case 7:
 		return migrateV7RunCheckpoints(db)
+	case 8:
+		return migrateV8ChannelWorkQueue(db)
+	case 9:
+		return migrateV9AppState(db)
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}
@@ -361,6 +365,48 @@ CREATE TABLE IF NOT EXISTS run_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_run_checkpoints_saved_at ON run_checkpoints(saved_at DESC);
 
 PRAGMA user_version=7;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV8ChannelWorkQueue(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS channel_work_queue (
+  id TEXT PRIMARY KEY,
+  envelope_json TEXT NOT NULL,
+  route_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_work_queue_status ON channel_work_queue(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_channel_work_queue_created_at ON channel_work_queue(created_at);
+PRAGMA user_version=8;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV9AppState(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+PRAGMA user_version=9;
 `); err != nil {
 		_ = tx.Rollback()
 		return err

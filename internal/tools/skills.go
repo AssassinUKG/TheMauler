@@ -139,6 +139,17 @@ type skillMeta struct {
 	needsWrite    bool
 }
 
+type externalSkillMatch struct {
+	file    string
+	excerpt string
+	score   float64
+}
+
+type markdownSectionMatch struct {
+	text  string
+	score float64
+}
+
 func toolsSkillsDir() (string, error) {
 	dir, err := settings.ConfigDir()
 	if err != nil {
@@ -330,23 +341,40 @@ func readExternalSkillSource(path, query string, maxBytes int) (string, error) {
 	if query == "" {
 		return externalSkillOutline(abs, files, maxBytes)
 	}
-	var sb strings.Builder
-	sb.WriteString("Master skill excerpts (focused query: " + query + "):\n")
+	terms := skillQueryTerms(query)
+	var matches []externalSkillMatch
 	for _, file := range files {
 		data, err := os.ReadFile(file)
 		if err != nil || strings.TrimSpace(string(data)) == "" {
 			continue
 		}
-		excerpt := relevantMarkdownExcerpt(string(data), query)
-		if strings.TrimSpace(excerpt) == "" {
-			continue
+		for _, section := range relevantMarkdownMatches(string(data), query, 3) {
+			matches = append(matches, externalSkillMatch{
+				file:    file,
+				excerpt: section.text,
+				score:   section.score + externalSkillFileScore(abs, file, terms),
+			})
 		}
-		sb.WriteString("\n--- Source: " + externalSkillDisplayPath(abs, file) + " ---\n")
-		sb.WriteString(strings.TrimSpace(excerpt))
-		sb.WriteString("\n")
 	}
-	if strings.TrimSpace(sb.String()) == "Master skill excerpts (focused query: "+query+"):" {
+	if len(matches) == 0 {
 		return externalSkillOutline(abs, files, maxBytes)
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			return strings.ToLower(filepath.ToSlash(matches[i].file)) < strings.ToLower(filepath.ToSlash(matches[j].file))
+		}
+		return matches[i].score > matches[j].score
+	})
+	var sb strings.Builder
+	sb.WriteString("Master skill excerpts (focused query: " + query + "):\n")
+	limit := len(matches)
+	if limit > 12 {
+		limit = 12
+	}
+	for _, match := range matches[:limit] {
+		sb.WriteString("\n--- Source: " + externalSkillDisplayPath(abs, match.file) + " ---\n")
+		sb.WriteString(strings.TrimSpace(match.excerpt))
+		sb.WriteString("\n")
 	}
 	return clampSkillOutput(sb.String(), maxBytes), nil
 }
@@ -386,24 +414,27 @@ func externalSkillDisplayPath(root, path string) string {
 }
 
 func relevantMarkdownExcerpt(content, query string) string {
-	query = strings.ToLower(strings.TrimSpace(query))
-	if query == "" {
+	if strings.TrimSpace(query) == "" {
 		return content
 	}
-	sections := splitMarkdownSections(content)
-	var matches []string
-	for _, section := range sections {
-		if strings.Contains(strings.ToLower(section), query) {
-			matches = append(matches, strings.TrimSpace(section))
-		}
-	}
+	matches := relevantMarkdownMatches(content, query, 4)
 	if len(matches) > 0 {
-		return strings.Join(matches, "\n\n")
+		parts := make([]string, 0, len(matches))
+		for _, match := range matches {
+			parts = append(parts, strings.TrimSpace(match.text))
+		}
+		return strings.Join(parts, "\n\n")
+	}
+	sections := splitMarkdownSections(content)
+	for _, section := range sections {
+		if strings.Contains(strings.ToLower(section), strings.ToLower(strings.TrimSpace(query))) {
+			return strings.TrimSpace(section)
+		}
 	}
 	lines := strings.Split(content, "\n")
 	var windows []string
 	for i, line := range lines {
-		if !strings.Contains(strings.ToLower(line), query) {
+		if !strings.Contains(strings.ToLower(line), strings.ToLower(strings.TrimSpace(query))) {
 			continue
 		}
 		start := i - 4
@@ -417,6 +448,148 @@ func relevantMarkdownExcerpt(content, query string) string {
 		windows = append(windows, strings.Join(lines[start:end], "\n"))
 	}
 	return strings.Join(windows, "\n\n---\n\n")
+}
+
+func relevantMarkdownMatches(content, query string, limit int) []markdownSectionMatch {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return []markdownSectionMatch{{text: content, score: 1}}
+	}
+	terms := skillQueryTerms(query)
+	if len(terms) == 0 {
+		return nil
+	}
+	var matches []markdownSectionMatch
+	for _, section := range splitMarkdownSections(content) {
+		score := scoreMarkdownSection(section, query, terms)
+		if score <= 0 {
+			continue
+		}
+		matches = append(matches, markdownSectionMatch{
+			text:  strings.TrimSpace(section),
+			score: score,
+		})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].score > matches[j].score
+	})
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches
+}
+
+func scoreMarkdownSection(section, query string, terms []string) float64 {
+	lower := strings.ToLower(section)
+	heading := strings.ToLower(firstSectionHeading(section))
+	score := 0.0
+	if strings.Contains(lower, query) {
+		score += 12
+	}
+	if heading != "" && strings.Contains(heading, query) {
+		score += 10
+	}
+	for _, term := range terms {
+		if term == "" {
+			continue
+		}
+		if strings.Contains(heading, term) {
+			score += 6
+		}
+		count := strings.Count(lower, term)
+		if count > 6 {
+			count = 6
+		}
+		score += float64(count)
+	}
+	return score
+}
+
+func firstSectionHeading(section string) string {
+	for _, line := range strings.Split(section, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func skillQueryTerms(query string) []string {
+	stop := map[string]bool{
+		"a": true, "an": true, "and": true, "as": true, "at": true, "for": true,
+		"from": true, "in": true, "of": true, "on": true, "or": true, "the": true,
+		"to": true, "use": true, "with": true,
+	}
+	seen := map[string]bool{}
+	var terms []string
+	for _, raw := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-')
+	}) {
+		term := strings.Trim(raw, "_-")
+		if len(term) < 2 || stop[term] || seen[term] {
+			continue
+		}
+		seen[term] = true
+		terms = append(terms, term)
+	}
+	return terms
+}
+
+func externalSkillFileScore(root, path string, terms []string) float64 {
+	rel := strings.ToLower(externalSkillDisplayPath(root, path))
+	score := 0.0
+	for _, term := range terms {
+		if strings.Contains(rel, term) {
+			score += 4
+		}
+	}
+	has := func(words ...string) bool {
+		for _, word := range words {
+			for _, term := range terms {
+				if term == word {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch {
+	case strings.Contains(rel, "maps/htb_methodology"):
+		if has("htb", "box", "foothold", "recon", "enumeration", "enum", "privesc", "flag", "root", "user") {
+			score += 16
+		}
+	case strings.Contains(rel, "skills/build/htb_challenge_solver"):
+		if has("htb", "box", "foothold", "privesc", "root", "user") {
+			score += 14
+		}
+	case strings.Contains(rel, "maps/web_application"):
+		if has("web", "http", "https", "admin", "fuzz", "vhost", "directory", "injection", "sqli", "rce") {
+			score += 14
+		}
+	case strings.Contains(rel, "maps/linux_unix"):
+		if has("linux", "unix", "shell", "privesc", "privilege", "sudo", "cron", "root") {
+			score += 12
+		}
+	case strings.Contains(rel, "skills/rules/engagement"):
+		if has("scope", "evidence", "report", "reporting", "rules", "engagement") {
+			score += 10
+		}
+	case strings.Contains(rel, "anti_failure/tool_execution"):
+		if has("tool", "tools", "execution", "command", "repeat", "failure", "terminal") {
+			score += 10
+		}
+	case strings.Contains(rel, "anti_failure/context_budget"):
+		if has("context", "budget", "local", "llm", "memory") {
+			score += 10
+		}
+	}
+	if strings.Contains(rel, "prototyping/func_encyclopedia") || strings.Contains(rel, "evasion") {
+		if !has("evasion", "malware", "prototype", "prototyping", "c", "cpp") {
+			score -= 8
+		}
+	}
+	return score
 }
 
 func splitMarkdownSections(content string) []string {

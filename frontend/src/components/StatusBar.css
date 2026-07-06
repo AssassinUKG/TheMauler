@@ -1,20 +1,21 @@
 .status-bar {
-  height: 26px;
-  background: var(--accent);
+  height: 30px;
+  border-top: 1px solid var(--border);
+  background: #101318;
   display: flex;
   align-items: center;
-  padding: 0 12px;
-  gap: 12px;
+  padding: 0 10px;
+  gap: 10px;
   flex-shrink: 0;
   font-size: 11px;
-  color: rgba(255,255,255,0.92);
+  color: var(--text);
   position: relative;
 }
 
 .status-left, .status-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
@@ -22,7 +23,7 @@
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   justify-content: center;
   min-width: 0;
 }
@@ -33,11 +34,62 @@
 }
 
 .status-profile {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--text);
   cursor: pointer;
-  font-weight: 600;
-  opacity: 0.9;
+  font: inherit;
+  opacity: 1;
 }
-.status-profile:hover { opacity: 1; text-decoration: underline; }
+.status-profile:hover { border-color: rgba(74, 222, 128, .45); }
+
+.status-profile span,
+.status-identity span {
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.status-profile strong,
+.status-identity strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+}
+
+.status-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  max-width: 210px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 6px;
+  background: rgba(255,255,255,.025);
+}
+
+.status-target {
+  border-color: rgba(74, 222, 128, .28);
+  background: rgba(74, 222, 128, .055);
+}
+
+.status-target strong {
+  color: #bbf7d0;
+}
 
 /* Token text info */
 .status-token-info {
@@ -52,19 +104,34 @@
 .status-token-budget { opacity: 0.6; }
 .status-token-reserve { opacity: 0.5; font-size: 10px; color: var(--yellow, #d9a441); }
 .status-token-window { opacity: 0.45; }
+.status-token-shortfall .status-token-window {
+  color: #f87171;
+  opacity: 1;
+  font-weight: 700;
+}
+.status-token-shortfall-label {
+  margin-left: 4px;
+  padding: 1px 5px;
+  border: 1px solid rgba(248,113,113,0.55);
+  border-radius: 4px;
+  color: #fecaca;
+  background: rgba(127,29,29,0.35);
+  font-weight: 700;
+}
 .status-token-pct {
   margin-left: 3px;
   font-weight: 700;
   transition: color 0.4s;
+  color: var(--text-dim);
 }
 
 .status-run-state {
   display: flex;
   align-items: center;
   gap: 5px;
-  min-width: 92px;
+  min-width: 82px;
   justify-content: flex-end;
-  color: rgba(255,255,255,0.92);
+  color: var(--text-bright);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -73,7 +140,7 @@
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: rgba(255,255,255,0.65);
+  background: var(--text-dim);
 }
 
 .status-run-model_loading .status-run-dot,
@@ -87,7 +154,7 @@
 .status-run-researching .status-run-dot,
 .status-run-editing .status-run-dot,
 .status-run-testing .status-run-dot {
-  background: #ffffff;
+  background: var(--accent);
 }
 
 .status-run-recovering .status-run-dot,
@@ -116,12 +183,15 @@
 /* ── Context zone bar ─────────────────────────────── */
 .ctx-bar-wrap {
   position: relative;
-  width: 160px;
+  width: 140px;
   height: 7px;
-  background: rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.08);
   border-radius: 4px;
   overflow: visible;
   flex-shrink: 0;
+}
+.ctx-bar-shortfall {
+  box-shadow: 0 0 0 1px rgba(248,113,113,0.8), 0 0 8px rgba(248,113,113,0.25);
 }
 
 /* Reserved tail — context held back for the model's reply */
@@ -147,7 +217,7 @@
   border-radius: 4px;
   transition: width 0.4s ease;
 }
-.ctx-seg-green  { background: #4ade80; }
+.ctx-seg-green  { background: rgba(148, 163, 184, .75); }
 .ctx-seg-yellow { background: #facc15; }
 .ctx-seg-red    { background: #f87171; }
 
@@ -167,7 +237,7 @@
   position: absolute;
   inset: 0;
   border-radius: 4px;
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.35) 50%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, rgba(74,222,128,0.28) 50%, transparent 100%);
   background-size: 200% 100%;
   animation: ctx-sweep 1.4s ease-in-out infinite;
   pointer-events: none;
@@ -180,7 +250,7 @@
 /* Profile dropdown */
 .profile-dropdown {
   position: absolute;
-  bottom: 30px;
+  bottom: 34px;
   left: 8px;
   background: var(--bg2);
   border: 1px solid var(--border);
@@ -191,33 +261,18 @@
   overflow: hidden;
 }
 .profile-item {
+  display: block;
+  width: 100%;
   padding: 8px 14px;
+  border: 0;
+  background: transparent;
   cursor: pointer;
   font-size: 12px;
   color: var(--text);
+  text-align: left;
 }
 .profile-item:hover { background: var(--bg3); }
 .profile-item.active { color: var(--accent); font-weight: 600; }
-
-/* Thinking indicator */
-.status-thinking {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: 600;
-  color: rgba(255,255,255,0.95);
-  white-space: nowrap;
-  letter-spacing: 0.2px;
-}
-
-.status-thinking-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #4ade80;
-  animation: thinking-pulse 1.1s ease-in-out infinite;
-  flex-shrink: 0;
-}
 
 @keyframes thinking-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }

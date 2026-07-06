@@ -47,6 +47,11 @@ func (t *EditFile) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("edit_file: bad params: %w", err)
 	}
+	cleanPath, err := cleanCompactPathArgFor("edit_file", p.Path)
+	if err != nil {
+		return "", fmt.Errorf("edit_file: %w", err)
+	}
+	p.Path = cleanPath
 	if p.Path == "" {
 		return "", fmt.Errorf("edit_file: path is required")
 	}

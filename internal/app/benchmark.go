@@ -107,7 +107,7 @@ func (a *App) LoadBenchmarkModel(profile settings.Profile, provider settings.Pro
 	}
 	loadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := a.ensureModelLoaded(loadCtx, client, profile); err != nil {
+	if err := loadBenchmarkModelExact(loadCtx, a, client, profile); err != nil {
 		result.Status = "warn"
 		result.Summary = "Provider could not load the requested benchmark context."
 		result.Notes = append(result.Notes, err.Error())
@@ -156,7 +156,7 @@ func (a *App) runBenchmarkProfile(profile settings.Profile, provider settings.Pr
 		return result
 	}
 	loadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	if err := a.ensureModelLoaded(loadCtx, client, recommended); err != nil {
+	if err := loadBenchmarkModelExact(loadCtx, a, client, recommended); err != nil {
 		cancel()
 		result.Status = "warn"
 		result.Summary = "Recommendations generated, but the provider could not load the requested benchmark context."
@@ -240,6 +240,19 @@ func benchmarkActualContext(ctx context.Context, client llm.Client) int {
 	return cq.ActualContextLength(qctx)
 }
 
+func loadBenchmarkModelExact(ctx context.Context, app *App, client llm.Client, profile settings.Profile) error {
+	if loader, ok := client.(interface{ ForceLoadModel(context.Context) error }); ok {
+		return loader.ForceLoadModel(ctx)
+	}
+	if app != nil {
+		return app.ensureModelLoaded(ctx, client, profile)
+	}
+	if loader, ok := client.(interface{ LoadModel(context.Context) error }); ok {
+		return loader.LoadModel(ctx)
+	}
+	return nil
+}
+
 type benchmarkSpec struct {
 	Name            string
 	System          string
@@ -280,7 +293,7 @@ func benchmarkCases(profile settings.Profile) []benchmarkSpec {
 		{
 			Name:       "Tool protocol",
 			System:     "You are a tool-using coding agent. If a tool is available and relevant, call it.",
-			User:       "Use the read_file tool to inspect package.json.",
+			User:       "Use the read tool to inspect package.json.",
 			MaxTokens:  96,
 			Tools:      benchmarkToolDefs(),
 			ToolChoice: "auto",
@@ -330,7 +343,7 @@ func benchmarkToolDefs() []llm.ToolDef {
 	return []llm.ToolDef{{
 		Type: "function",
 		Function: llm.ToolFunctionDef{
-			Name:        "read_file",
+			Name:        "read",
 			Description: "Read a UTF-8 text file from the current workspace.",
 			Parameters:  json.RawMessage(`{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}`),
 		},

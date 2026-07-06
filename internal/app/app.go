@@ -15,9 +15,11 @@ import (
 	"html"
 	"io"
 	"mauler/internal/agent"
+	"mauler/internal/channelbus"
 	"mauler/internal/ledger"
 	"mauler/internal/llm"
 	"mauler/internal/llm/backends"
+	"mauler/internal/runtimeprofile"
 	"mauler/internal/sessionstore"
 	"mauler/internal/settings"
 	"mauler/internal/store"
@@ -58,7 +60,8 @@ type App struct {
 	// contextWindow is the model's full loaded context (tokens). history.Budget()
 	// is this minus the output reserve; we keep the window so the status bar can
 	// show all parts (used / usable budget / reserved / window).
-	contextWindow int
+	contextWindow           int
+	configuredContextWindow int
 
 	loadMu sync.Mutex // serialises model-load/unload calls; never held alongside mu
 
@@ -83,10 +86,25 @@ type App struct {
 	ctxLimitKey string
 	ctxLimitVal int
 
-	// terminal shell session (at most one active at a time)
-	shellOpenMu sync.Mutex
-	shellMu     sync.Mutex
-	shellSess   *shellSession
+	// Short-lived VPN/interface probe cache. Startup calls GetLabStatus and
+	// ListVPNInterfaces back-to-back; without this, WSL-backed configs spawn
+	// duplicate wsl.exe probes just to render the side panel.
+	vpnMu        sync.Mutex
+	vpnCacheKey  string
+	vpnCacheAt   time.Time
+	vpnCacheList []VPNInterfaceInfo
+
+	// terminal shell sessions. shellSess is the shared/agent-facing session kept
+	// for existing shell/terminal tools; shellSessions lets the UI open extra
+	// human terminals without stealing the agent's PTY.
+	shellOpenMu   sync.Mutex
+	shellMu       sync.Mutex
+	shellSess     *shellSession
+	shellSessions map[string]*shellSession
+
+	sessionMu       sync.Mutex
+	agentSessions   map[string]AgentSession
+	lastOpsPhaseKey string
 
 	// background jobs launched in the shared terminal (id -> job), so the agent
 	// can fire a long scan and poll it instead of blocking.
@@ -103,6 +121,19 @@ type App struct {
 	specOverrides   map[string]string
 	specGuard       map[string]string
 	specTruncStreak int
+
+	channelQueue        *channelbus.Queue
+	channelDrainMu      sync.Mutex
+	channelDrainRunning bool
+
+	sideChatMu        sync.Mutex
+	sideChatHistories map[string][]llm.Message
+
+	telegramMu      sync.Mutex
+	telegramCancel  context.CancelFunc
+	telegramRunning bool
+	telegramStatus  string
+	telegramService *telegramRuntime
 }
 
 // bgJob is one detached command running in the shared terminal session, with its
@@ -141,15 +172,17 @@ func New() *App {
 	history := agent.NewHistory(active.CtxTokens)
 
 	app := &App{
-		cfg:        cfg,
-		profiles:   profiles,
-		history:    history,
-		rollback:   &agent.Rollback{},
-		registry:   tools.New(),
-		ledger:     runLedger,
-		db:         db,
-		autoAgents: true,
-		bgJobs:     make(map[string]*bgJob),
+		cfg:           cfg,
+		profiles:      profiles,
+		history:       history,
+		rollback:      &agent.Rollback{},
+		registry:      tools.New(),
+		ledger:        runLedger,
+		db:            db,
+		autoAgents:    true,
+		agentSessions: make(map[string]AgentSession),
+		bgJobs:        make(map[string]*bgJob),
+		channelQueue:  channelbus.NewPersistentQueue(db),
 	}
 	app.registerAppTools()
 	tools.SetConfigSnapshot(cfg.Tools)
@@ -218,6 +251,7 @@ func (a *App) OnStartup(ctx context.Context) {
 	cfg := *a.cfg
 	a.mu.Unlock()
 	configureWorkingDir(&cfg)
+	a.restartTelegramRuntime(cfg.Telegram)
 }
 
 // OnDomReady is called when the frontend DOM is ready.
@@ -229,6 +263,7 @@ func (a *App) OnShutdown(_ context.Context) {
 	if a.cancelAgent != nil {
 		a.cancelAgent()
 	}
+	a.stopTelegramRuntimeLocked()
 	db := a.db
 	a.db = nil
 	a.mu.Unlock()
@@ -289,9 +324,12 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
 	}
 	cfg.Context.OpenFolders = normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, cfg.Context.WorkspaceDir)
-	cfg.Context.Lab.Target = strings.TrimSpace(cfg.Context.Lab.Target)
-	cfg.Context.Lab.VPNInterface = strings.TrimSpace(cfg.Context.Lab.VPNInterface)
-	cfg.Context.Lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(cfg.Context.Lab.LatestArtifact))
+	cfg.Environment = normaliseAppEnvironment(cfg.Environment)
+	cfg.Context.Lab = normaliseAppLabContext(cfg.Context.Lab)
+	cfg.Context.LabProfiles = normaliseAppLabProfiles(cfg.Context.LabProfiles, cfg.Context.Lab, cfg.Context.WorkspaceDir)
+	if strings.TrimSpace(cfg.Context.ActiveLabProfile) == "" {
+		cfg.Context.ActiveLabProfile = cfg.Context.Lab.ID
+	}
 	if err := settings.Save(&cfg); err != nil {
 		return err
 	}
@@ -312,6 +350,7 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	if workspaceChanged && a.ctx != nil {
 		a.emit("mauler:workspace_changed", cfg.Context.WorkspaceDir)
 	}
+	a.restartTelegramRuntime(cfg.Telegram)
 	return nil
 }
 
@@ -416,23 +455,34 @@ type HistoryStats struct {
 	RollbackLen int     `json:"rollback_len"`
 	// Window is the model's full context; Reserve is the output headroom held
 	// back from it (Window - Budget). The status bar shows all three parts.
-	Window  int `json:"window"`
-	Reserve int `json:"reserve"`
+	Window           int `json:"window"`
+	Reserve          int `json:"reserve"`
+	ConfiguredWindow int `json:"configured_window,omitempty"`
 }
 
 type LabStatus struct {
-	AgentRoot      string                     `json:"agent_root"`
-	ShellBackend   string                     `json:"shell_backend"`
-	ShellDistro    string                     `json:"shell_distro"`
-	ShellUser      string                     `json:"shell_user"`
-	Target         string                     `json:"target"`
-	VPNInterface   string                     `json:"vpn_interface"`
-	VPNIP          string                     `json:"vpn_ip"`
-	VPNCIDR        string                     `json:"vpn_cidr"`
-	VPNKind        string                     `json:"vpn_kind"`
-	LatestArtifact string                     `json:"latest_artifact"`
-	OpsProfile     string                     `json:"ops_profile"`
-	OpenFolders    []settings.WorkspaceFolder `json:"open_folders"`
+	AgentRoot        string                     `json:"agent_root"`
+	LabID            string                     `json:"lab_id"`
+	LabName          string                     `json:"lab_name"`
+	ShellBackend     string                     `json:"shell_backend"`
+	ShellDistro      string                     `json:"shell_distro"`
+	ShellUser        string                     `json:"shell_user"`
+	Target           string                     `json:"target"`
+	Hostname         string                     `json:"hostname"`
+	VPNInterface     string                     `json:"vpn_interface"`
+	VPNIP            string                     `json:"vpn_ip"`
+	VPNCIDR          string                     `json:"vpn_cidr"`
+	VPNKind          string                     `json:"vpn_kind"`
+	LatestArtifact   string                     `json:"latest_artifact"`
+	OpsProfile       string                     `json:"ops_profile"`
+	EvidencePolicy   string                     `json:"evidence_policy"`
+	AccessPreference string                     `json:"access_preference"`
+	Notes            string                     `json:"notes"`
+	ListenerBackend  string                     `json:"listener_backend"`
+	ListenerCommand  string                     `json:"listener_command"`
+	LHOSTSource      string                     `json:"lhost_source"`
+	ManualLHOST      string                     `json:"manual_lhost"`
+	OpenFolders      []settings.WorkspaceFolder `json:"open_folders"`
 }
 
 // MaintenanceResult is returned by one-click local runtime recovery actions.
@@ -451,12 +501,13 @@ func (a *App) GetHistoryStats() HistoryStats {
 		window = budget // not yet recorded — show budget as the window
 	}
 	return HistoryStats{
-		TokenCount:  a.history.TokenCount(),
-		Budget:      budget,
-		Fraction:    a.history.UsageFraction(),
-		RollbackLen: a.rollback.Len(),
-		Window:      window,
-		Reserve:     window - budget,
+		TokenCount:       a.history.TokenCount(),
+		Budget:           budget,
+		Fraction:         a.history.UsageFraction(),
+		RollbackLen:      a.rollback.Len(),
+		Window:           window,
+		Reserve:          window - budget,
+		ConfiguredWindow: a.configuredContextWindow,
 	}
 }
 
@@ -741,7 +792,7 @@ func (a *App) SendMessage(text string, images []string, attachments []ChatAttach
 	run := startTaskRun(messageText, mode.Name, cfg.ActiveProfile, profile.ModelID)
 	run.attachLedger(a.ledger)
 	if len(memorySelection.Withheld) > 0 {
-		run.addEvent("memory_conflict", fmt.Sprintf("Withheld %d conflicting memor%s from prompt injection", len(memorySelection.Withheld), plural(len(memorySelection.Withheld), "y", "ies")), strings.Join(memorySelection.Conflicts, "\n"))
+		run.addMemoryConflictEvent(fmt.Sprintf("Withheld %d conflicting memor%s from prompt injection", len(memorySelection.Withheld), plural(len(memorySelection.Withheld), "y", "ies")), memoryConflictSummary(memorySelection.Conflicts))
 	}
 	if len(memorySelection.Plan.Selected) > 0 {
 		run.addEvent("memory_retrieval_plan", fmt.Sprintf("Selected %d context item%s for %s prompt packet", len(memorySelection.Plan.Selected), plural(len(memorySelection.Plan.Selected), "", "s"), memorySelection.Plan.Intent), memoryRetrievalPlanDetail(memorySelection.Plan))
@@ -754,6 +805,35 @@ func (a *App) SendMessage(text string, images []string, attachments []ChatAttach
 const maxMemoryReinjections = 3
 
 const maxAutoDistilledMemories = 2
+
+func memoryConflictSummary(conflicts []string) string {
+	const maxExamples = 5
+	seen := map[string]bool{}
+	var examples []string
+	for _, conflict := range conflicts {
+		conflict = strings.TrimSpace(conflict)
+		if conflict == "" || seen[conflict] {
+			continue
+		}
+		seen[conflict] = true
+		if len(examples) < maxExamples {
+			examples = append(examples, conflict)
+		}
+	}
+	if len(examples) == 0 {
+		return "Conflicting memory was withheld; no detail available."
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("withheld_conflicts=%d\nshown_examples=%d", len(seen), len(examples)))
+	for _, example := range examples {
+		sb.WriteString("\n- ")
+		sb.WriteString(example)
+	}
+	if len(seen) > len(examples) {
+		sb.WriteString(fmt.Sprintf("\n... %d more withheld conflict%s omitted", len(seen)-len(examples), plural(len(seen)-len(examples), "", "s")))
+	}
+	return sb.String()
+}
 
 // autoDistillLearnings closes the learning loop at run finish: it mines this run's
 // ledger for high-importance reflection candidates (repeated failures, blocking
@@ -863,7 +943,7 @@ func (a *App) maybeReinjectMemory(run *TaskRun, cfg settings.Settings, injected 
 	}
 	filtered, withheld, conflicts := filterMemoryInjectionConflicts(candidates, cfg, window)
 	if len(withheld) > 0 && run != nil {
-		run.addEvent("memory_conflict", fmt.Sprintf("Withheld %d conflicting memory reinjection candidate%s", len(withheld), plural(len(withheld), "", "s")), strings.Join(conflicts, "\n"))
+		run.addMemoryConflictEvent(fmt.Sprintf("Withheld %d conflicting memory reinjection candidate%s", len(withheld), plural(len(withheld), "", "s")), memoryConflictSummary(conflicts))
 	}
 	var fresh []MemoryEntry
 	for _, entry := range filtered {
@@ -951,7 +1031,7 @@ func composeUserTextWithAttachments(text string, attachments []ChatAttachment) s
 		if att.Path != "" {
 			fmt.Fprintf(&sb, "Path: %s\n", att.Path)
 		} else {
-			sb.WriteString("Source: inline chat attachment. This is not a filesystem path; do not call read_file on the attachment name.\n")
+			sb.WriteString("Source: inline chat attachment. This is not a filesystem path; do not call read on the attachment name.\n")
 		}
 		if att.MIME != "" {
 			fmt.Fprintf(&sb, "MIME: %s\n", att.MIME)
@@ -1057,10 +1137,10 @@ func (a *App) ApplySafetyPreset(name string) error {
 			a.cfg.Tools.EnabledTools = map[string]bool{}
 		}
 		// Re-enable core file tools (offline only blocks network tools)
-		for _, tool := range []string{"read_file", "read_many", "read_pdf", "write_file", "edit_file", "glob", "grep", "shell", "bash"} {
+		for _, tool := range []string{"read", "write", "edit", "glob", "grep", "shell"} {
 			a.cfg.Tools.EnabledTools[tool] = true
 		}
-		for _, tool := range []string{"web_search", "fetch_url", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot", "browser_close", "browser_agent"} {
+		for _, tool := range []string{"web_search", "fetch_url", "browser"} {
 			a.cfg.Tools.EnabledTools[tool] = false
 		}
 	case "balanced":
@@ -1076,10 +1156,10 @@ func (a *App) ApplySafetyPreset(name string) error {
 			a.cfg.Tools.EnabledTools = map[string]bool{}
 		}
 		// Re-enable all core tools; restore web tools to their defaults
-		for _, tool := range []string{"read_file", "read_many", "read_pdf", "write_file", "edit_file", "glob", "grep", "shell", "bash"} {
+		for _, tool := range []string{"read", "write", "edit", "glob", "grep", "shell"} {
 			a.cfg.Tools.EnabledTools[tool] = true
 		}
-		for _, tool := range []string{"web_search", "fetch_url", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot", "browser_close", "browser_agent"} {
+		for _, tool := range []string{"web_search", "fetch_url", "browser"} {
 			a.cfg.Tools.EnabledTools[tool] = defaults.Tools.EnabledTools[tool]
 		}
 	default:
@@ -1128,6 +1208,20 @@ func (a *App) InterruptShellTool() {
 	case sess.interrupt <- struct{}{}:
 	default:
 	}
+}
+
+func (a *App) shellSessionByID(id string) *shellSession {
+	a.shellMu.Lock()
+	defer a.shellMu.Unlock()
+	if a.shellSessions != nil {
+		if sess := a.shellSessions[id]; sess != nil {
+			return sess
+		}
+	}
+	if a.shellSess != nil && a.shellSess.id == id {
+		return a.shellSess
+	}
+	return nil
 }
 
 // RespondConfirm unblocks the confirm gate (true = allow, false = deny).
@@ -1425,6 +1519,7 @@ func (a *App) UpdateLabContext(target, vpnInterface, latestArtifact, opsProfile 
 	a.cfg.Context.Lab.VPNInterface = strings.TrimSpace(vpnInterface)
 	a.cfg.Context.Lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(latestArtifact))
 	a.cfg.Context.Lab.OpsProfile = normaliseOpsProfile(opsProfile)
+	a.cfg.Context.Lab = normaliseAppLabContext(a.cfg.Context.Lab)
 	cfg := *a.cfg
 	a.mu.Unlock()
 	if err := settings.Save(&cfg); err != nil {
@@ -1442,20 +1537,30 @@ func (a *App) GetLabStatus() LabStatus {
 	if latest == "" {
 		latest = latestWorkspaceArtifact(normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, cfg.Context.WorkspaceDir))
 	}
-	vpn, _ := selectedVPNInfo(cfg)
+	vpn, _ := selectedVPNInfoFromList(cfg, a.cachedVPNInterfaces(cfg))
 	return LabStatus{
-		AgentRoot:      filepath.ToSlash(wd),
-		ShellBackend:   cfg.Tools.ShellBackend,
-		ShellDistro:    cfg.Tools.ShellDistro,
-		ShellUser:      cfg.Tools.ShellUser,
-		Target:         cfg.Context.Lab.Target,
-		VPNInterface:   cfg.Context.Lab.VPNInterface,
-		VPNIP:          vpn.IP,
-		VPNCIDR:        vpn.CIDR,
-		VPNKind:        vpn.Kind,
-		LatestArtifact: filepath.ToSlash(latest),
-		OpsProfile:     normaliseOpsProfile(cfg.Context.Lab.OpsProfile),
-		OpenFolders:    normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, filepath.ToSlash(wd)),
+		AgentRoot:        filepath.ToSlash(wd),
+		LabID:            cfg.Context.Lab.ID,
+		LabName:          cfg.Context.Lab.Name,
+		ShellBackend:     cfg.Tools.ShellBackend,
+		ShellDistro:      cfg.Tools.ShellDistro,
+		ShellUser:        cfg.Tools.ShellUser,
+		Target:           cfg.Context.Lab.Target,
+		Hostname:         cfg.Context.Lab.Hostname,
+		VPNInterface:     cfg.Context.Lab.VPNInterface,
+		VPNIP:            vpn.IP,
+		VPNCIDR:          vpn.CIDR,
+		VPNKind:          vpn.Kind,
+		LatestArtifact:   filepath.ToSlash(latest),
+		OpsProfile:       normaliseOpsProfile(cfg.Context.Lab.OpsProfile),
+		EvidencePolicy:   normaliseEvidencePolicy(cfg.Context.Lab.EvidencePolicy, cfg.Context.Lab.OpsProfile),
+		AccessPreference: cfg.Context.Lab.AccessPreference,
+		Notes:            cfg.Context.Lab.Notes,
+		ListenerBackend:  cfg.Environment.ListenerBackend,
+		ListenerCommand:  cfg.Environment.ListenerCommand,
+		LHOSTSource:      cfg.Environment.LHOSTSource,
+		ManualLHOST:      cfg.Environment.ManualLHOST,
+		OpenFolders:      normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, filepath.ToSlash(wd)),
 	}
 }
 
@@ -1466,6 +1571,145 @@ func normaliseOpsProfile(profile string) string {
 	default:
 		return "pentesting"
 	}
+}
+
+func normaliseEvidencePolicy(policy, opsProfile string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "discovery-first", "discovery_first", "discovery":
+		return "discovery_first"
+	case "research-assisted", "research_assisted", "research":
+		return "research_assisted"
+	case "reference-allowed", "reference_allowed", "reference":
+		return "reference_allowed"
+	case "fastest-path", "fastest_path", "fast":
+		return "fastest_path"
+	default:
+		switch normaliseOpsProfile(opsProfile) {
+		case "htb":
+			return "discovery_first"
+		default:
+			return "research_assisted"
+		}
+	}
+}
+
+func normaliseAccessPreference(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "webshell", "reverse_shell", "bind_shell", "none":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "auto"
+	}
+}
+
+func normaliseAppEnvironment(env settings.EnvironmentConfig) settings.EnvironmentConfig {
+	defaults := settings.DefaultSettings().Environment
+	if strings.TrimSpace(env.MainOS) == "" {
+		env.MainOS = defaults.MainOS
+	}
+	if strings.TrimSpace(env.AIShellBackend) == "" {
+		env.AIShellBackend = defaults.AIShellBackend
+	}
+	if strings.TrimSpace(env.AIShellDistro) == "" {
+		env.AIShellDistro = defaults.AIShellDistro
+	}
+	if strings.TrimSpace(env.AIShellUser) == "" {
+		env.AIShellUser = defaults.AIShellUser
+	}
+	if strings.TrimSpace(env.TargetWorkBackend) == "" {
+		env.TargetWorkBackend = defaults.TargetWorkBackend
+	}
+	if strings.TrimSpace(env.ListenerBackend) == "" {
+		env.ListenerBackend = defaults.ListenerBackend
+	}
+	if strings.TrimSpace(env.ListenerCommand) == "" {
+		env.ListenerCommand = defaults.ListenerCommand
+	}
+	if strings.TrimSpace(env.LHOSTSource) == "" {
+		env.LHOSTSource = defaults.LHOSTSource
+	}
+	if strings.TrimSpace(env.UserCorrectionPolicy) == "" {
+		env.UserCorrectionPolicy = defaults.UserCorrectionPolicy
+	}
+	if strings.TrimSpace(env.ReverseShellGuidance) == "" {
+		env.ReverseShellGuidance = defaults.ReverseShellGuidance
+	}
+	env.MainOS = strings.TrimSpace(env.MainOS)
+	env.AIShellBackend = strings.TrimSpace(env.AIShellBackend)
+	env.AIShellDistro = strings.TrimSpace(env.AIShellDistro)
+	env.AIShellUser = strings.TrimSpace(env.AIShellUser)
+	env.TargetWorkBackend = strings.TrimSpace(env.TargetWorkBackend)
+	env.ListenerBackend = strings.TrimSpace(env.ListenerBackend)
+	env.ListenerCommand = strings.TrimSpace(env.ListenerCommand)
+	env.LHOSTSource = strings.TrimSpace(env.LHOSTSource)
+	env.ManualLHOST = strings.TrimSpace(env.ManualLHOST)
+	env.UserCorrectionPolicy = strings.TrimSpace(env.UserCorrectionPolicy)
+	return env
+}
+
+func normaliseAppLabContext(lab settings.LabContext) settings.LabContext {
+	if strings.TrimSpace(lab.ID) == "" {
+		lab.ID = "default"
+	}
+	if strings.TrimSpace(lab.Name) == "" {
+		lab.Name = "HTB / Pentest box"
+	}
+	lab.ID = strings.TrimSpace(lab.ID)
+	lab.Name = strings.TrimSpace(lab.Name)
+	lab.Target = strings.TrimSpace(lab.Target)
+	lab.Hostname = strings.TrimSpace(lab.Hostname)
+	if lab.Hostname == "" && lab.ID == "default" {
+		lab.Hostname = "boxname.htb"
+	}
+	lab.VPNInterface = strings.TrimSpace(lab.VPNInterface)
+	lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(lab.LatestArtifact))
+	lab.OpsProfile = normaliseOpsProfile(lab.OpsProfile)
+	lab.EvidencePolicy = normaliseEvidencePolicy(lab.EvidencePolicy, lab.OpsProfile)
+	lab.AccessPreference = normaliseAccessPreference(lab.AccessPreference)
+	lab.Notes = strings.TrimSpace(lab.Notes)
+	return lab
+}
+
+func normaliseAppLabProfiles(profiles []settings.LabProfile, lab settings.LabContext, workspaceDir string) []settings.LabProfile {
+	seen := map[string]bool{}
+	out := make([]settings.LabProfile, 0, len(profiles)+1)
+	for _, profile := range profiles {
+		profile.ID = strings.TrimSpace(profile.ID)
+		if profile.ID == "" || seen[profile.ID] {
+			continue
+		}
+		if strings.TrimSpace(profile.Name) == "" {
+			profile.Name = profile.ID
+		}
+		profile.Name = strings.TrimSpace(profile.Name)
+		profile.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(profile.WorkspaceDir))
+		profile.Target = strings.TrimSpace(profile.Target)
+		profile.Hostname = strings.TrimSpace(profile.Hostname)
+		profile.VPNInterface = strings.TrimSpace(profile.VPNInterface)
+		profile.LatestArtifact = filepath.ToSlash(strings.TrimSpace(profile.LatestArtifact))
+		profile.OpsProfile = normaliseOpsProfile(profile.OpsProfile)
+		profile.EvidencePolicy = normaliseEvidencePolicy(profile.EvidencePolicy, profile.OpsProfile)
+		profile.AccessPreference = normaliseAccessPreference(profile.AccessPreference)
+		profile.Notes = strings.TrimSpace(profile.Notes)
+		out = append(out, profile)
+		seen[profile.ID] = true
+	}
+	if !seen[lab.ID] {
+		out = append([]settings.LabProfile{{
+			ID:               lab.ID,
+			Name:             lab.Name,
+			WorkspaceDir:     filepath.ToSlash(strings.TrimSpace(workspaceDir)),
+			Target:           lab.Target,
+			Hostname:         lab.Hostname,
+			VPNInterface:     lab.VPNInterface,
+			LatestArtifact:   lab.LatestArtifact,
+			OpsProfile:       lab.OpsProfile,
+			EvidencePolicy:   lab.EvidencePolicy,
+			AccessPreference: lab.AccessPreference,
+			Notes:            lab.Notes,
+		}}, out...)
+	}
+	return out
 }
 
 func (a *App) ScaffoldWorkspaceFolders(root string, names []string) ([]string, error) {
@@ -1959,7 +2203,9 @@ func (a *App) ListWSLDistros() ([]string, error) {
 	if runtime.GOOS != "windows" {
 		return nil, nil
 	}
-	out, err := exec.Command("wsl.exe", "-l", "-v").CombinedOutput()
+	cmd := exec.Command("wsl.exe", "-l", "-v")
+	hideShellWindow(cmd)
+	out, err := cmd.CombinedOutput()
 	cleaned := cleanWSLOutput(string(out))
 	if err != nil {
 		return nil, fmt.Errorf("list WSL distros: %w: %s", err, strings.TrimSpace(cleaned))
@@ -2091,9 +2337,17 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		if finalStatus == "done" && requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) {
 			finalStatus = "stopped"
-			detail := "The user asked for a README/writeup/docs update, but the run completed without write_file or edit_file. Update the requested document before marking the task done."
+			detail := "The user asked for a README/writeup/docs update, but the run completed without write or edit. Update the requested document before marking the task done."
 			run.stopTerminal("documentation_missing", detail)
 			run.addEvent("blocked", "Documentation update missing", detail)
+		}
+		if finalStatus == "done" {
+			if reason := invalidDoneReason(run, finalSummary); reason != "" {
+				finalStatus = "stopped"
+				run.stopTerminal("completion_invalid", reason)
+				run.addEvent("blocked", "Completion rejected", reason)
+				finalSummary = ""
+			}
 		}
 		if finalStatus == "done" {
 			a.setRunState(&run, "done", "Run completed successfully.")
@@ -2115,6 +2369,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		run.addEvent("loop_metrics", "Loop-health metrics", buildLoopMetrics(run).Detail())
 		run.finish(finalStatus, finalSummary)
+		a.appendProgressUpdate(context.Background(), &run, "Run Finish", progressContentForRunFinish(run))
 		if ctx.Err() == nil {
 			a.deleteRunCheckpoint(run.ID)
 		}
@@ -2148,6 +2403,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.emit("mauler:stream_done")
 		a.autoSave()
 		finalRun = run
+		a.drainChannelQueueAsync()
 	}()
 
 	// Append system prompt on first turn
@@ -2172,6 +2428,9 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		return
 	}
 	a.setRunState(&run, "model_loading", modelLoadKey(profile))
+	a.mu.Lock()
+	modelKeyBeforeLoad := a.loadedModelKey
+	a.mu.Unlock()
 	if err := a.ensureModelLoaded(ctx, client, profile, func(attempt int, err error) {
 		detail := fmt.Sprintf("attempt=%d error=%v", attempt, err)
 		run.addEvent("retry", "Retrying model load", detail)
@@ -2184,6 +2443,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.emit("mauler:stream_error", err.Error())
 		return
 	}
+	modelLoadFlag := modelLoadFlagForCall(client, profile, modelKeyBeforeLoad)
 	run.addEvent("model", "Model ready", modelLoadKey(profile))
 	stopKeepalive := a.startShellKeepalive(cfg)
 	defer stopKeepalive()
@@ -2225,11 +2485,16 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		injectedMemoryIDs[m.ID] = true
 	}
 	memoryReinjections := 0
-	persistNudgeSent := false // one-time reminder to save evidence before context is dropped
+	persistNudgeSent := false  // one-time reminder to save evidence before context is dropped
+	footholdNudgeSent := false // one-time reminder to stop re-exploiting once code execution is established
+	listenerNudgeSent := false // one-time reminder to start the listener before a reverse-shell payload
 	const maxAutoContinues = 8
 	const maxMalformedToolContinues = 2
 	logCfg := cfg.Logging
 	var respBuf strings.Builder // accumulated response text for log_responses
+	var pendingRepairToolDefs []llm.ToolDef
+	forceRequiredToolTurn := false
+	modelCallTurn := 0
 
 agentLoop:
 	for {
@@ -2239,7 +2504,24 @@ agentLoop:
 
 		toolBudgetExhausted := agentToolBudgetExhausted(cfg.Agents, len(run.Tools))
 		timeBudgetExhausted := agentTimeBudgetExhausted(cfg.Agents, startedAt, time.Now())
-		toolDefs, toolChoice := toolDefsAndChoiceForTurn(a.registry, cfg.Tools, firstUserText, autoContinues, totalToolCallsMade)
+		terminalState := a.GetSharedTerminalState()
+		toolDefs, toolChoice := toolDefsAndChoiceForTurnWithState(a.registry, cfg.Tools, firstUserText, autoContinues, totalToolCallsMade, terminalState)
+		if a.recordToolRoutingState(run.ID, firstUserText, toolChoice, toolDefs, autoContinues, totalToolCallsMade, terminalState) {
+			run.addEvent("tool_routing", "Tool routing state", fmt.Sprintf("phase=%s\ntool_choice=%s\ntool_count=%d\nterminal_state=%s\ntools=%s", opsPhaseForTaskWithState(firstUserText, terminalState), toolChoice, len(toolDefs), terminalState.State, toolProtocolToolNames(toolDefs)))
+		}
+		if len(pendingRepairToolDefs) > 0 && !toolBudgetExhausted && !timeBudgetExhausted {
+			toolDefs = pendingRepairToolDefs
+			toolChoice = "required"
+			run.addEvent("tool_protocol_constrain", "Narrowed malformed-tool recovery to one constrained tool", toolProtocolToolNames(toolDefs))
+			pendingRepairToolDefs = nil
+		}
+		if forceRequiredToolTurn && !toolBudgetExhausted && !timeBudgetExhausted {
+			forceRequiredToolTurn = false
+			if len(toolDefs) > 0 && toolChoice != "none" {
+				toolChoice = "required"
+				run.addEvent("tool_choice_required", "Forced tool_choice after repeated narration without a tool call", fmt.Sprintf("no_tool_continues=%d tools=%d", noToolContinues, len(toolDefs)))
+			}
+		}
 		if toolBudgetExhausted {
 			toolDefs = nil
 			toolChoice = "none"
@@ -2267,7 +2549,7 @@ agentLoop:
 			}
 		}
 		if docRecoveryRequested && requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) && !toolBudgetExhausted && !timeBudgetExhausted {
-			toolDefs = filterToolDefsByName(toolDefs, "read_file", "write_file", "edit_file", "glob", "grep")
+			toolDefs = filterToolDefsByName(toolDefs, "read", "write", "edit", "glob", "grep")
 			toolChoice = "auto"
 			if !docRecoveryPromptSent {
 				docRecoveryPromptSent = true
@@ -2312,6 +2594,9 @@ agentLoop:
 				run.addEvent("context_clear", "Cleared stale tool results after backend token pressure", fmt.Sprintf("cleared=%d\nbefore_tokens=%d\nafter_tokens=%d", cleared.Cleared, cleared.BeforeTokens, cleared.AfterTokens))
 			}
 			if needsCompact {
+				needsCompact = a.applyMicrocompactStage(&run, cfg, toolDefs, "backend_token_pressure")
+			}
+			if needsCompact {
 				if compacted := a.doCompact(ctx, client, profile); compacted != nil {
 					contextDropped = true
 					run.addEvent("compaction", compacted.Message(), compacted.Detail())
@@ -2328,6 +2613,9 @@ agentLoop:
 				run.addEvent("context_clear", "Cleared stale tool results", fmt.Sprintf("cleared=%d\nbefore_estimated_tokens=%d\nafter_estimated_tokens=%d", cleared.Cleared, cleared.BeforeTokens, cleared.AfterTokens))
 			}
 			if needsCompact {
+				needsCompact = a.applyMicrocompactStage(&run, cfg, toolDefs, "threshold")
+			}
+			if needsCompact {
 				if compacted := a.doCompact(ctx, client, profile); compacted != nil {
 					contextDropped = true
 					run.addEvent("compaction", compacted.Message(), compacted.Detail())
@@ -2340,7 +2628,7 @@ agentLoop:
 		if contextDropped && !persistNudgeSent {
 			persistNudgeSent = true
 			a.mu.Lock()
-			a.history.Append(llm.NewTextMessage(llm.RoleSystem, "Context is filling and older tool results are being dropped to make room. Persist anything you are accumulating NOW — extracted hashes/credentials, discovered paths/endpoints, partial findings — by writing them to a file (write_file) or saving them with the memory tool. Do not rely on earlier tool output staying in context, and do not re-run commands whose results you already captured."))
+			a.history.Append(llm.NewTextMessage(llm.RoleSystem, "Context is filling and older tool results are being dropped to make room. Persist anything you are accumulating NOW — extracted hashes/credentials, discovered paths/endpoints, partial findings — by writing them to a file with write, updating progress, or saving them with memory. Do not rely on earlier tool output staying in context, and do not re-run commands whose results you already captured."))
 			a.mu.Unlock()
 			run.addEvent("persist_nudge", "Reminded model to persist findings before context loss", "")
 		}
@@ -2348,35 +2636,104 @@ agentLoop:
 			a.appendGoalReminder(&run)
 		}
 
+		// One-time nudge: if the model has re-invoked the same exploit/script many
+		// times with varying commands it already has code execution and is wasting
+		// the time budget re-exploiting per command. Steer it to a persistent
+		// foothold. Non-blocking — the current command still runs.
+		if !footholdNudgeSent {
+			if sig, n := mostRepeatedScriptInvocation(run); n >= 6 {
+				footholdNudgeSent = true
+				a.mu.Lock()
+				a.history.Append(llm.NewTextMessage(llm.RoleSystem, fmt.Sprintf("You have run %s %d times with varying commands, so you already have code execution on the target. Stop re-running the exploit once per command — it wastes the run's time budget. Establish ONE persistent foothold (an interactive session via terminal_send, or a reverse/bind shell) and run further enumeration inside it.", sig, n)))
+				a.mu.Unlock()
+				run.addEvent("foothold_nudge", "Reminded model to establish a persistent foothold instead of re-exploiting per command", sig)
+			}
+		}
+
+		// One-time nudge: a reverse-shell payload was fired but no listener was
+		// started this run, so the callback connects to nothing and hangs. Steer
+		// the model to start the configured listener first.
+		if !listenerNudgeSent && reverseShellFiredWithoutListener(run) {
+			listenerNudgeSent = true
+			a.mu.Lock()
+			a.history.Append(llm.NewTextMessage(llm.RoleSystem, "A reverse-shell payload was fired but no listener has been started this run, so the callback has nothing to connect to and will hang. Start the listener FIRST with the start_listener tool (it uses your configured Windows ncat.exe and VPN LHOST), confirm it is listening, then re-fire the payload through http_probe, shell, or the webshell path - not terminal_send, which would type into the busy listener terminal. Watch the terminal with terminal_read to catch the shell."))
+			a.mu.Unlock()
+			run.addEvent("listener_nudge", "Reminded model to start the configured listener before firing a reverse-shell payload", "")
+		}
+
 		a.mu.Lock()
 		msgs := a.history.Messages()
 		a.mu.Unlock()
 		if compacted := a.ensureRequestContextRoom(ctx, client, profile, cfg, toolDefs, &run); compacted != nil {
 			run.addEvent("compaction", compacted.Message(), compacted.Detail())
+			a.appendProgressUpdate(ctx, &run, "Context Drop", progressContentForContextDrop(run))
 			a.appendGoalReminder(&run)
 			a.mu.Lock()
 			msgs = a.history.Messages()
 			a.mu.Unlock()
 		}
+		a.mu.Lock()
+		repairActions := a.history.RepairStructure()
+		if len(repairActions) > 0 {
+			msgs = a.history.Messages()
+		}
+		a.mu.Unlock()
+		if len(repairActions) > 0 {
+			detail := formatRepairActions(repairActions)
+			message := fmt.Sprintf("Repaired %d malformed history message(s)", len(repairActions))
+			run.addEvent("session_repair", message, detail)
+			a.recordLedger(ledger.Event{
+				RunID:   run.ID,
+				Kind:    "session_repair",
+				Source:  "agent_history",
+				Status:  "done",
+				Message: message,
+				Detail:  detail,
+				Metadata: map[string]string{
+					"actions": strconv.Itoa(len(repairActions)),
+				},
+			})
+		}
+		if statePrompt := a.buildExecutionStatePrompt(firstUserText, toolChoice, toolDefs, terminalState); strings.TrimSpace(statePrompt) != "" {
+			msgs = append(msgs, llm.NewTextMessage(llm.RoleSystem, statePrompt))
+		}
 
-		// After the configured threshold of tool calls, disable thinking for the
-		// remainder of the run. Qwen3 tends to place tool calls inside the <think>
-		// block when thinking is on and the context is heavy with prior tool results,
-		// which causes grammar-triggered early termination.
+		// Tool/coding execution is more reliable with thinking disabled. Qwen3-class
+		// local models can place tool calls inside reasoning output when thinking is
+		// on, which causes missed calls, malformed JSON, or grammar early exits.
 		noThinkThreshold := cfg.Agents.NoThinkAfterToolCalls
 		if noThinkThreshold <= 0 {
-			noThinkThreshold = 3
+			noThinkThreshold = 2
 		}
-		forceNoThink := profile.Thinking && (totalToolCallsMade >= noThinkThreshold || noToolContinues > 0)
+		toolTurn := len(toolDefs) > 0 && !strings.EqualFold(strings.TrimSpace(toolChoice), "none")
+		forceNoThink := profile.Thinking && (toolTurn || totalToolCallsMade >= noThinkThreshold || noToolContinues > 0)
 		req := buildChatRequest(profile, msgs, toolDefs, toolChoice, forceNoThink, shouldUseCodingParams(firstUserText, mode), currentEffort)
+		// Experimental: for non-native local models, constrain output to a valid
+		// tool-call envelope via GBNF. Off unless explicitly enabled, never when an
+		// arg-schema grammar is already in play, and only when a tool call is allowed.
+		if cfg.Tools.ToolGrammarConstraint && req.JSONSchema == nil && len(toolDefs) > 0 &&
+			toolChoice != "none" && runtimeToolProtocol(profile) != "native-openai" {
+			req.Grammar = llm.ToolCallGrammar(toolDefs)
+		}
+		modelCallTurn++
+		promptBudget := buildPromptBudgetSnapshot(msgs, req.Tools, a.contextWindow)
+		recordPromptBudget(&run, promptBudget, modelCallTurn)
+		callObserver := newModelCallObserver(modelCallTurn, client.Name(), profile, req, promptBudget, modelLoadFlag)
 		a.setRunState(&run, "thinking", fmt.Sprintf("tool_choice=%s messages=%d tools=%d no_think=%v effort=%s", toolChoice, len(msgs), len(toolDefs), forceNoThink, currentEffort))
 		if len(toolDefs) > 0 {
-			run.addEvent("tool_protocol_request", "Chat request tool protocol", fmt.Sprintf("client=%s model=%s tool_choice=%s tools=%d thinking=%v preserve_thinking=%v force_no_think=%v reasoning_effort=%s max_tokens=%d", client.Name(), profile.ModelID, toolChoice, len(toolDefs), req.EnableThinking, req.PreserveThinking, forceNoThink, req.ReasoningEffort, req.MaxTokens))
+			grammarMode := "off"
+			if req.JSONSchema != nil {
+				grammarMode = "single_tool_args"
+			} else if req.Grammar != "" {
+				grammarMode = "tool_envelope"
+			}
+			run.addEvent("tool_protocol_request", "Chat request tool protocol", fmt.Sprintf("client=%s model=%s runtime_tool_protocol=%s tool_choice=%s tools=%d grammar=%s thinking=%v preserve_thinking=%v force_no_think=%v reasoning_effort=%s max_tokens=%d", client.Name(), profile.ModelID, runtimeToolProtocol(profile), toolChoice, len(toolDefs), grammarMode, req.EnableThinking, req.PreserveThinking, forceNoThink, req.ReasoningEffort, req.MaxTokens))
 		}
 		a.recordBackendRuntimeMismatch(ctx, client, profile, &run)
 
 		ch, err := client.Chat(ctx, req)
 		if err != nil {
+			callObserver.record(&run, nil, "error", err)
 			if ctx.Err() != nil {
 				return
 			}
@@ -2404,7 +2761,9 @@ agentLoop:
 		var wasTruncated bool
 
 		for delta := range ch {
+			callObserver.observe(delta)
 			if delta.Error != nil {
+				callObserver.record(&run, usage, "error", delta.Error)
 				if ctx.Err() != nil {
 					return
 				}
@@ -2454,6 +2813,8 @@ agentLoop:
 				usage = delta.Usage
 			}
 		}
+		callObserver.record(&run, usage, "ok", nil)
+		modelLoadFlag = "reused"
 
 		// Stability guard: while MTP/speculative decoding is on, watch for the
 		// speculative-rejection-at-</think> signature — a turn that truncates with
@@ -2495,6 +2856,16 @@ agentLoop:
 				a.emit("mauler:stream_replace", textBuf.String())
 			}
 		}
+		if len(toolCalls) == 0 && req.JSONSchema != nil && len(toolDefs) == 1 && strings.TrimSpace(repairText) != "" {
+			if repaired := parseConstrainedToolArgsContent(repairText, toolDefs[0]); len(repaired) > 0 {
+				toolCalls = repaired
+				textBuf.Reset()
+				a.setRunState(&run, "recovering", "Backend returned constrained tool arguments as text; converting to a structured tool call.")
+				run.addEvent("tool_protocol_schema_repair", "Converted constrained JSON content to tool call", toolProtocolDebugDetail(rawText, textBuf.String(), repaired, toolDefs))
+				a.emit("mauler:tool_protocol_repair")
+				a.emit("mauler:stream_replace", "")
+			}
+		}
 		if toolBudgetExhausted && len(toolCalls) > 0 {
 			run.addEvent("blocked", "Ignored tool calls after agent tool budget was exhausted", toolProtocolDebugDetail(rawText, textBuf.String(), toolCalls, nil))
 			toolCalls = nil
@@ -2516,6 +2887,13 @@ agentLoop:
 			run.addEvent("tool_protocol_unrepaired", "Could not convert inline tool markup", toolProtocolDebugDetail(rawText, textBuf.String(), nil, toolDefs))
 			a.emit("mauler:stream_replace", "")
 		}
+		hallucinatedToolResult := len(toolCalls) == 0 && containsHallucinatedToolResult(repairText) && !toolBudgetExhausted && !timeBudgetExhausted && toolChoice != "none"
+		if hallucinatedToolResult {
+			a.setRunState(&run, "recovering", "Model wrote a fake tool result without a real tool call.")
+			run.addEvent("tool_protocol_hallucinated_result", "Rejected hallucinated tool/system result", toolProtocolDebugDetail(rawText, textBuf.String(), nil, toolDefs))
+			a.emit("mauler:stream_replace", "")
+		}
+		protocolFailure := unrepairedToolMarkup || hallucinatedToolResult
 
 		// Normalize shell commands (HTML-unescape operators) BEFORE storing in history,
 		// so the model never re-reads its own escaped commands and re-learns the
@@ -2527,7 +2905,7 @@ agentLoop:
 
 		visibleText := strings.TrimSpace(textBuf.String())
 		a.mu.Lock()
-		if !unrepairedToolMarkup && (visibleText != "" || len(toolCalls) > 0) {
+		if !protocolFailure && (visibleText != "" || len(toolCalls) > 0) {
 			msg := llm.NewTextMessage(llm.RoleAssistant, textBuf.String())
 			if len(toolCalls) > 0 {
 				msg.ToolCalls = toolCalls
@@ -2538,10 +2916,10 @@ agentLoop:
 			a.history.SetExactCount(usage.PromptTokens + usage.CompletionTokens)
 		}
 		a.mu.Unlock()
-		if !unrepairedToolMarkup {
+		if !protocolFailure {
 			finalSummary = visibleText
 		}
-		if !unrepairedToolMarkup && logCfg.LogResponses && visibleText != "" {
+		if !protocolFailure && logCfg.LogResponses && visibleText != "" {
 			if respBuf.Len() > 0 {
 				respBuf.WriteString("\n\n---\n\n")
 			}
@@ -2561,6 +2939,19 @@ agentLoop:
 			a.emit("mauler:usage", map[string]int{
 				"prompt_tokens":     usage.PromptTokens,
 				"completion_tokens": usage.CompletionTokens,
+			})
+		} else {
+			completionEstimate := estimateCharsAsTokens(len(rawText) + thinkBuf.Len())
+			if completionEstimate == 0 && len(toolCalls) > 0 {
+				if data, err := json.Marshal(toolCalls); err == nil {
+					completionEstimate = estimateCharsAsTokens(len(data))
+				}
+			}
+			run.setTokens(promptBudget.TotalTokens, completionEstimate)
+			run.addEvent("usage_estimate", "Backend did not report usage; recorded local token estimate", fmt.Sprintf("prompt_tokens=%d\ncompletion_tokens=%d", promptBudget.TotalTokens, completionEstimate))
+			a.emit("mauler:usage", map[string]int{
+				"prompt_tokens":     promptBudget.TotalTokens,
+				"completion_tokens": completionEstimate,
 			})
 		}
 
@@ -2591,24 +2982,32 @@ agentLoop:
 				return
 			}
 
-			if unrepairedToolMarkup && autoContinues < maxAutoContinues && malformedToolContinues < maxMalformedToolContinues {
+			if protocolFailure && autoContinues < maxAutoContinues && malformedToolContinues < maxMalformedToolContinues {
 				autoContinues++
 				noToolContinues++
 				malformedToolContinues++
 				if !sleepBeforeAutoContinue(ctx, autoContinues) {
 					return
 				}
-				prompt := buildMalformedToolMarkupPrompt(repairText, toolDefs)
-				run.addEvent("continue", fmt.Sprintf("Auto-continue %d/%d: malformed inline tool markup (%d/%d)", autoContinues, maxAutoContinues, malformedToolContinues, maxMalformedToolContinues), prompt)
+				if narrowed := singleMentionedToolDefs(repairText, toolDefs); len(narrowed) == 1 {
+					pendingRepairToolDefs = narrowed
+				}
+				prompt := buildToolProtocolRecoveryPrompt(repairText, toolDefs, hallucinatedToolResult)
+				run.addEvent("continue", fmt.Sprintf("Auto-continue %d/%d: tool protocol recovery (%d/%d)", autoContinues, maxAutoContinues, malformedToolContinues, maxMalformedToolContinues), prompt)
 				continueMsg := llm.NewTextMessage(llm.RoleUser, prompt)
 				a.mu.Lock()
 				a.history.Append(continueMsg)
 				a.mu.Unlock()
 				continue
 			}
-			if unrepairedToolMarkup {
+			if protocolFailure {
+				stopReason := "tool_protocol_unrepaired"
 				detail := fmt.Sprintf("The model emitted inline tool markup that TheMauler could not convert after %d repair retries. Try again with a stricter tool-compatible profile/template, or inspect the Logs tab for the raw markup.", malformedToolContinues)
-				if attempt, ok := a.tryEscalation(ctx, cfg, profile, &run, "tool_protocol_unrepaired", detail, toolDefs, shouldUseCodingParams(firstUserText, mode), &escalationsUsed); ok {
+				if hallucinatedToolResult {
+					stopReason = "tool_protocol_hallucinated_result"
+					detail = fmt.Sprintf("The model wrote text that looked like a tool/system result, but no real tool call was parsed after %d repair retries. Try again with a stricter tool-compatible profile/template, or inspect the Logs tab for the raw text.", malformedToolContinues)
+				}
+				if attempt, ok := a.tryEscalation(ctx, cfg, profile, &run, stopReason, detail, toolDefs, shouldUseCodingParams(firstUserText, mode), &escalationsUsed); ok {
 					malformedToolContinues = 0
 					autoContinues = 0
 					if len(attempt.ToolCalls) > 0 {
@@ -2620,9 +3019,9 @@ agentLoop:
 					continue
 				}
 				finalStatus = "stopped"
-				run.stop("tool_protocol_unrepaired", detail)
+				run.stop(stopReason, detail)
 				a.setRunState(&run, "blocked", detail)
-				run.addEvent("stop", "Malformed tool markup retry limit reached", detail)
+				run.addEvent("stop", "Tool protocol recovery limit reached", detail)
 				return
 			}
 
@@ -2645,6 +3044,9 @@ agentLoop:
 				thinkingText := strings.TrimSpace(thinkBuf.String())
 				if looksAboutToAct(thinkingText) {
 					prompt = buildDirectivePrompt(thinkingText)
+					if noToolContinues >= 2 {
+						forceRequiredToolTurn = true
+					}
 				} else if needsOperationalTool(firstUserText) {
 					prompt = "You produced no visible output and made no tool call. " +
 						"This is an authorised Ops/HTB target workflow, not a repository-inspection task. " +
@@ -2661,12 +3063,12 @@ agentLoop:
 					prompt = "You have thought about this multiple times but still produced no tool call. " +
 						"The content is likely too large to fit in a single response given the current max_tokens budget. " +
 						"SOLUTION — write it in chunks:\n" +
-						"1. Call write_file NOW with only the FIRST SECTION of the content (first 80-120 lines or first major heading block). Do NOT try to include everything.\n" +
-						"2. For each remaining section, call write_file again with append=true to add it to the end of the file.\n" +
-						"Start immediately — call write_file with the first chunk right now. No explanation."
+						"1. Call write NOW with only the FIRST SECTION of the content (first 80-120 lines or first major heading block). Do NOT try to include everything.\n" +
+						"2. For each remaining section, call write again with append=true to add it to the end of the file.\n" +
+						"Start immediately — call write with the first chunk right now. No explanation."
 				} else {
 					prompt = "You completed your reasoning but produced no output and made no tool calls. " +
-						"If the output is large, write only the FIRST SECTION now using write_file, then append the rest in follow-up calls (write_file with append=true). " +
+						"If the output is large, write only the FIRST SECTION now using write, then append the rest in follow-up calls (write with append=true). " +
 						"Make a tool call immediately — do not explain."
 				}
 				run.addEvent("continue", fmt.Sprintf("Auto-continue %d/%d: empty output (noToolContinues=%d)", autoContinues, maxAutoContinues, noToolContinues), prompt)
@@ -2694,11 +3096,14 @@ agentLoop:
 					prompt = "Your tool call was cut off by the token limit before the arguments were complete. " +
 						"The file you are trying to write is too large for a single response.\n\n" +
 						"SOLUTION — write the file in sections:\n" +
-						"1. Call write_file NOW with only the FIRST SECTION (first 60-80 lines). Keep it short.\n" +
-						"2. For every remaining section call write_file again with append=true.\n" +
-						"Do NOT try to include the whole file in one call. Make the first write_file call right now."
+						"1. Call write NOW with only the FIRST SECTION (first 60-80 lines). Keep it short.\n" +
+						"2. For every remaining section call write again with append=true.\n" +
+						"Do NOT try to include the whole file in one call. Make the first write call right now."
 				} else if noToolContinues >= 2 || looksAboutToAct(text) {
 					prompt = buildDirectivePrompt(text)
+					if noToolContinues >= 2 && looksAboutToAct(text) {
+						forceRequiredToolTurn = true
+					}
 				} else {
 					tail := text
 					if len(tail) > 400 {
@@ -2730,6 +3135,9 @@ agentLoop:
 				var prompt string
 				if aboutToAct || noToolContinues >= 2 {
 					prompt = buildDirectivePrompt(text)
+					if aboutToAct && noToolContinues >= 2 {
+						forceRequiredToolTurn = true
+					}
 				} else {
 					tail := text
 					if len(tail) > 400 {
@@ -2834,6 +3242,23 @@ agentLoop:
 				})
 				continue
 			}
+			if len(toolDefs) > 0 && !toolCallAdvertised(toolDefs, tc.Function.Name) {
+				result := fmt.Sprintf("tool %q was not available in this turn. Available tools now: %s. Use one of the available tools instead; for HTTP/DNS reachability checks prefer http_probe or shell when present.", tc.Function.Name, toolProtocolToolNames(toolDefs))
+				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "disabled", 0)
+				if shouldStopForDisabledTool(run, tc.Function.Name) {
+					run.stop("tool_disabled", result)
+					a.setRunState(&run, "blocked", result)
+					run.addEvent("blocked", "Unadvertised tool call repeated", result)
+				} else {
+					a.setRunState(&run, "recovering", result)
+					run.addEvent("tool_error", "Unadvertised tool call returned to model for recovery", result)
+				}
+				a.emit("mauler:tool_result", map[string]string{
+					"id": tc.ID, "name": tc.Function.Name, "result": result,
+				})
+				continue
+			}
 			run.addEvent("tool_call", tc.Function.Name, logInput(string(tc.Function.Arguments)))
 			toolCallPayload := map[string]string{
 				"id":    tc.ID,
@@ -2922,6 +3347,46 @@ agentLoop:
 				})
 				continue
 			}
+			if cached := cachedToolResultForCall(run, tc); cached != "" {
+				status := "cached"
+				eventKind := "tool_cache"
+				eventMessage := "Returned cached tool result"
+				if repeatedCachedToolCall(run, tc) {
+					status = "skipped"
+					eventKind = "tool_skip"
+					eventMessage = "Skipped repeated cached tool call"
+					cached = strings.TrimRight(cached, "\r\n") + "\n\n[duplicate_cached_call_block]\nThis exact input was already replayed from cache in this run. Do not call it again. Change the hypothesis/input, inspect a saved artifact/file, update progress, or summarize the blocker."
+				}
+				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, cached))
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(cached), status, 0)
+				a.setRunState(&run, "recovering", cached)
+				run.addEvent(eventKind, eventMessage, fmt.Sprintf("%s: %s", tc.Function.Name, truncateLine(cached, 240)))
+				a.emit("mauler:tool_result", map[string]string{
+					"id": tc.ID, "name": tc.Function.Name, "result": cached,
+				})
+				continue
+			}
+			if rewritten, note, ok := autoBackgroundShellCall(tc); ok {
+				tc.Function.Arguments = rewritten
+				run.addEvent("tool_rewrite", "Auto-backgrounded long-running shell command", note)
+			}
+			if isShellTool(tc.Function.Name) {
+				decision := adviseShellCall(a.GetSharedTerminalState(), shellCommandFromToolArgs(tc.Function.Arguments))
+				if !decision.Allowed {
+					result := formatToolExecutionBlock(decision, a.GetSharedTerminalState())
+					toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
+					run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "routed", 0)
+					a.setRunState(&run, "recovering", result)
+					run.addEvent("tool_state_machine", "Shell call routed before execution", result)
+					a.emit("mauler:tool_result", map[string]string{
+						"id": tc.ID, "name": tc.Function.Name, "result": result,
+					})
+					continue
+				}
+				if strings.TrimSpace(decision.Message) != "" && decision.State == "listener" && looksLikeReverseShellTrigger(shellCommandFromToolArgs(tc.Function.Arguments)) {
+					run.addEvent("tool_state_machine", "Shell allowed as listener trigger path", decision.Message)
+				}
+			}
 
 			var beforeMutation fileChangeSnapshot
 			if isKnown && isWriteTool(tc.Function.Name) {
@@ -2935,13 +3400,18 @@ agentLoop:
 			toolStart := time.Now()
 			var result string
 			var runErr error
-			if shouldUseSharedTerminal(cfg.Tools, tc.Function.Name) {
+			sharedFallback := ""
+			if shouldUseSharedTerminal(cfg.Tools, tc.Function.Name) && !scanCallPrefersIsolated(tc) {
 				result, runErr = a.runSharedTerminalShell(ctx, tc.Function.Name, tc.Function.Arguments, cfg.Tools.BashTimeout)
-				if errors.Is(runErr, errSharedTerminalUnsupported) {
+				if errors.Is(runErr, errSharedTerminalUnsupported) || errors.Is(runErr, errSharedTerminalBusy) {
+					sharedFallback = sharedTerminalFallbackNote(runErr, a.GetSharedTerminalState())
 					result, runErr = a.registry.Run(ctx, tc)
 				}
 			} else {
 				result, runErr = a.registry.Run(ctx, tc)
+			}
+			if sharedFallback != "" {
+				result = sharedFallback + result
 			}
 			toolDurMs := time.Since(toolStart).Milliseconds()
 			if isShellTool(tc.Function.Name) && runErr != nil {
@@ -2973,6 +3443,7 @@ agentLoop:
 					}
 				}
 			}
+			result = appendCriticalVerifierHint(tc, result)
 			if guarded, findings := guardToolResult(tc.Function.Name, result, cfg.Tools.RedactSecrets); len(findings) > 0 {
 				result = guarded
 				run.addEvent("guardrail", "Tool result guardrail applied", fmt.Sprintf("%s: %s", tc.Function.Name, strings.Join(findings, ", ")))
@@ -2992,15 +3463,23 @@ agentLoop:
 			}
 			run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), status, toolDurMs)
 			a.recordCategorizedToolLedger(run.ID, tc, status, result, toolDurMs)
+			if status == "done" {
+				a.recordPinnedEvidenceLedger(run.ID, tc, result)
+			}
 			a.emit("mauler:tool_result", map[string]string{
 				"id": tc.ID, "name": tc.Function.Name, "result": result,
 			})
 		}
 
 		toolResultMsgs = a.offloadToolResultMessagesForAggregate(run.ID, toolResultMsgs, cfg.Tools)
+		verifierPrompt := buildPendingVerifierPrompt(toolResultMsgs)
 		a.mu.Lock()
 		for _, m := range toolResultMsgs {
 			a.history.Append(m)
+		}
+		if verifierPrompt != "" {
+			a.history.Append(llm.NewTextMessage(llm.RoleSystem, verifierPrompt))
+			run.addEvent("verifier_required", "Queued critical-action verifier", verifierPrompt)
 		}
 		a.mu.Unlock()
 		finalSummary = textBuf.String()
@@ -3225,6 +3704,25 @@ func (a *App) ensureRequestContextRoom(ctx context.Context, client llm.Client, p
 			AfterMessages:   len(msgs),
 			BeforeTokens:    beforeTokens,
 			AfterTokens:     cleared.AfterTokens,
+			OmittedMessages: 0,
+			Fallback:        true,
+		}
+	}
+
+	a.mu.Lock()
+	micro := a.history.MicrocompactThinking(1)
+	msgs = a.history.Messages()
+	a.mu.Unlock()
+	if micro.Compacted > 0 && run != nil {
+		run.addEvent("context_ladder", "Microcompacted old thinking traces before request overflow", fmt.Sprintf("compacted=%d\nbefore_tokens=%d\nafter_tokens=%d\nrequest_estimate=%d\ncontext_limit=%d", micro.Compacted, micro.BeforeTokens, micro.AfterTokens, estimated, limit))
+	}
+	estimated = estimateChatPromptTokens(msgs, toolDefs)
+	if micro.Compacted > 0 && estimated+contextOverflowMargin(limit) < limit {
+		return &compactionResult{
+			BeforeMessages:  beforeMessages,
+			AfterMessages:   len(msgs),
+			BeforeTokens:    beforeTokens,
+			AfterTokens:     micro.AfterTokens,
 			OmittedMessages: 0,
 			Fallback:        true,
 		}
@@ -3606,6 +4104,17 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max]) + "... [truncated]"
 }
 
+func tailRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return "[truncated earlier]\n" + string(runes[len(runes)-max:])
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -3641,6 +4150,7 @@ func (a *App) setRunState(run *TaskRun, state, detail string) {
 		"state":  run.State,
 		"detail": strings.TrimSpace(detail),
 	})
+	a.telegramNotifyRunState(run.State, detail)
 }
 
 // truncateToolResult caps tool output before it enters the conversation history.
@@ -3661,32 +4171,90 @@ func truncateToolResult(result string, maxChars int) string {
 }
 
 func isShellTool(name string) bool {
-	return name == "shell" || name == "bash"
+	return name == "shell"
 }
 
 func normalizeToolCallArguments(tc llm.ToolCallDef) llm.ToolCallDef {
-	if !isShellTool(tc.Function.Name) {
-		return tc
-	}
 	var args map[string]interface{}
 	if err := json.Unmarshal(tc.Function.Arguments, &args); err != nil {
 		return tc
 	}
-	command, ok := args["command"].(string)
-	if !ok {
-		return tc
+	switch strings.TrimSpace(tc.Function.Name) {
+	case "shell":
+		normalizeCommandArg(args, "bash", "cmd", "powershell", "input")
+		normalizeShellCommandArg(args)
+	case "terminal_send":
+		normalizeCommandArg(args, "data", "text", "input")
+		if strings.TrimSpace(stringArg(args, "command")) == "" {
+			if idData := terminalDataFromID(stringArg(args, "id")); idData != "" {
+				args["command"] = idData
+				delete(args, "id")
+			}
+		}
+		normalizeShellCommandArg(args)
+		normalizeTerminalKeyArgs(args)
+	case "read":
+		if path := stringArg(args, "path"); path != "" {
+			args["path"] = cleanToolPathArg(path)
+		}
 	}
-	normalized := tools.NormalizeShellCommandText(command)
-	if normalized == command {
-		return tc
-	}
-	args["command"] = normalized
 	raw, err := marshalToolArgsNoHTMLEscape(args)
 	if err != nil {
 		return tc
 	}
+	if string(raw) == string(tc.Function.Arguments) {
+		return tc
+	}
 	tc.Function.Arguments = raw
 	return tc
+}
+
+func normalizeCommandArg(args map[string]interface{}, aliases ...string) {
+	if strings.TrimSpace(stringArg(args, "command")) != "" {
+		return
+	}
+	for _, alias := range aliases {
+		if value := strings.TrimSpace(stringArg(args, alias)); value != "" {
+			args["command"] = value
+			delete(args, alias)
+			return
+		}
+	}
+}
+
+func normalizeShellCommandArg(args map[string]interface{}) {
+	command := stringArg(args, "command")
+	if command == "" {
+		return
+	}
+	args["command"] = tools.NormalizeShellCommandText(command)
+}
+
+func normalizeTerminalKeyArgs(args map[string]interface{}) {
+	keys := strings.TrimSpace(stringArg(args, "keys"))
+	if keys == "" {
+		return
+	}
+	lower := strings.ToLower(keys)
+	if _, ok := namedTerminalKeys[lower]; ok && !looksLikeTerminalCommandText(keys) {
+		args["key"] = lower
+		delete(args, "keys")
+	}
+}
+
+func cleanToolPathArg(path string) string {
+	path = strings.TrimSpace(path)
+	for _, tag := range []string{"</path>", "</file>", "</filename>", "</target>"} {
+		for strings.HasSuffix(strings.ToLower(path), tag) {
+			path = strings.TrimSpace(path[:len(path)-len(tag)])
+		}
+	}
+	return path
+}
+
+func stringArg(args map[string]interface{}, name string) string {
+	value, _ := args[name].(string)
+	return value
 }
 
 func marshalToolArgsNoHTMLEscape(args map[string]interface{}) (json.RawMessage, error) {
@@ -3701,6 +4269,29 @@ func marshalToolArgsNoHTMLEscape(args map[string]interface{}) (json.RawMessage, 
 
 func shouldUseSharedTerminal(cfg settings.ToolsConfig, toolName string) bool {
 	return isShellTool(toolName) && strings.EqualFold(strings.TrimSpace(cfg.ShellMode), "shared_terminal")
+}
+
+// scanCallPrefersIsolated reports whether a shell tool call should bypass the
+// shared terminal and run isolated. Progress-heavy fuzzers (ffuf/gobuster/…)
+// emit carriage-return progress UIs that corrupt when captured through the PTY;
+// run isolated (non-TTY) they print clean findings-only output. Background-job
+// polls and launches are left on their normal path.
+func scanCallPrefersIsolated(tc llm.ToolCallDef) bool {
+	if !isShellTool(tc.Function.Name) {
+		return false
+	}
+	var p struct {
+		Command    string `json:"command"`
+		Background bool   `json:"background"`
+		Job        string `json:"job"`
+	}
+	if err := json.Unmarshal(tc.Function.Arguments, &p); err != nil {
+		return false
+	}
+	if p.Background || strings.TrimSpace(p.Job) != "" || strings.TrimSpace(p.Command) == "" {
+		return false
+	}
+	return tools.IsScanCommand(p.Command)
 }
 
 func resolvedToolTimeout(cfg settings.ToolsConfig, tc llm.ToolCallDef) int {
@@ -3730,41 +4321,53 @@ type recoveryPolicyDecision struct {
 }
 
 type preToolRecoveryRule struct {
-	stopReason string
-	event      string
-	soft       bool
-	evaluate   func(TaskRun, llm.ToolCallDef) string
+	stopReason    string
+	event         string
+	soft          bool
+	neverHardStop bool
+	evaluate      func(TaskRun, llm.ToolCallDef) string
 }
 
 var preToolRecoveryRules = []preToolRecoveryRule{
 	{
 		stopReason: "repeated_tool_failure",
 		event:      "Repeated shell command blocked",
+		soft:       true,
 		evaluate:   repeatedShellFailureBlock,
 	},
 	{
-		stopReason: "repeated_empty_tool_output",
-		event:      "Repeated empty shell output blocked",
-		evaluate:   repeatedShellEmptyOutputBlock,
+		stopReason:    "repeated_empty_tool_output",
+		event:         "Repeated empty shell output blocked",
+		soft:          true,
+		neverHardStop: true,
+		evaluate:      repeatedShellEmptyOutputBlock,
 	},
 	{
-		stopReason: "repeated_same_tool_result",
-		event:      "Repeated identical shell result blocked",
-		soft:       true,
-		evaluate:   repeatedShellSameResultBlock,
+		stopReason:    "repeated_same_tool_result",
+		event:         "Repeated identical shell result blocked",
+		soft:          true,
+		neverHardStop: true,
+		evaluate:      repeatedShellSameResultBlock,
 	},
 	{
-		stopReason: "repeated_identical_read",
-		event:      "Repeated identical read tool blocked",
+		stopReason:    "repeated_identical_read",
+		event:         "Repeated identical read tool blocked",
+		soft:          true,
+		neverHardStop: true,
+		evaluate:      repeatedIdenticalReadBlock,
+	},
+	{
+		stopReason: "repeated_malformed_tool_args",
+		event:      "Repeated malformed terminal_send args blocked",
 		soft:       true,
-		evaluate:   repeatedIdenticalReadBlock,
+		evaluate:   repeatedMalformedTerminalSendArgsBlock,
 	},
 }
 
 func evaluatePreToolRecoveryPolicy(run TaskRun, tc llm.ToolCallDef) recoveryPolicyDecision {
 	for _, rule := range preToolRecoveryRules {
 		if msg := rule.evaluate(run, tc); msg != "" {
-			hardStop := !rule.soft || repeatedPreToolRecoveryIgnored(run, tc)
+			hardStop := !rule.soft || (!rule.neverHardStop && repeatedPreToolRecoveryIgnored(run, tc))
 			status := "blocked"
 			state := "blocked"
 			event := rule.event
@@ -3774,7 +4377,7 @@ func evaluatePreToolRecoveryPolicy(run TaskRun, tc llm.ToolCallDef) recoveryPoli
 				state = "recovering"
 				event = strings.Replace(rule.event, "blocked", "returned for recovery", 1)
 				stopReason = ""
-				msg = msg + "\nRecovery: this repeated command was skipped without stopping the run. Continue from the evidence already shown, choose a different verification/action, or write/update the relevant artifact."
+				msg = msg + "\nRecovery: this repeated command was skipped without stopping the run. Do not ask the user for permission to continue in autonomous mode; continue from the evidence already shown, choose a different verification/action, or write/update the relevant artifact."
 			}
 			return recoveryPolicyDecision{
 				Message:      msg,
@@ -3822,7 +4425,7 @@ func repeatedPreToolRecoveryIgnored(run TaskRun, tc llm.ToolCallDef) bool {
 		}
 		if tool.Status == "skipped" && strings.Contains(tool.Result, "repeated command was skipped") {
 			skips++
-			if skips >= 2 {
+			if skips >= repeatedShellRecoverySkipHardStopThreshold {
 				return true
 			}
 		}
@@ -3832,6 +4435,8 @@ func repeatedPreToolRecoveryIgnored(run TaskRun, tc llm.ToolCallDef) bool {
 	}
 	return false
 }
+
+const repeatedShellRecoverySkipHardStopThreshold = 4
 
 type skipRecoveryRule struct {
 	status   string
@@ -3846,6 +4451,18 @@ var skipRecoveryRules = []skipRecoveryRule{
 		state:    "recovering",
 		event:    "Duplicate fetch_url skipped",
 		evaluate: duplicateFetchURLSkip,
+	},
+	{
+		status:   "skipped",
+		state:    "recovering",
+		event:    "Repeated terminal interrupt skipped",
+		evaluate: repeatedTerminalInterruptSkip,
+	},
+	{
+		status:   "skipped",
+		state:    "recovering",
+		event:    "Repeated terminal Enter recovery skipped",
+		evaluate: repeatedTerminalEnterSkip,
 	},
 }
 
@@ -3880,6 +4497,94 @@ func evaluateDisabledToolRecoveryPolicy(run TaskRun, cfg settings.ToolsConfig, t
 	return decision
 }
 
+func repeatedTerminalInterruptSkip(run TaskRun, tc llm.ToolCallDef) string {
+	if !strings.EqualFold(strings.TrimSpace(tc.Function.Name), "terminal_send") {
+		return ""
+	}
+	if !terminalSendInterruptFromArgs(tc.Function.Arguments) {
+		return ""
+	}
+	recentInterrupts := 0
+	for i := len(run.Tools) - 1; i >= 0 && recentInterrupts < 1; i-- {
+		tool := run.Tools[i]
+		if !strings.EqualFold(strings.TrimSpace(tool.Name), "terminal_send") {
+			continue
+		}
+		if !terminalSendInterruptFromArgs(json.RawMessage(tool.Input)) {
+			continue
+		}
+		recentInterrupts++
+	}
+	if recentInterrupts < 1 {
+		return ""
+	}
+	return "terminal_send skipped: Ctrl-C was already sent once in this run. Do not keep interrupting the terminal blindly; call terminal_read to inspect the current screen, use Recover/Restart if the terminal is stale, or choose a different non-terminal action."
+}
+
+func terminalSendInterruptFromArgs(raw json.RawMessage) bool {
+	var args terminalSendArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return false
+	}
+	normalizeTerminalSendArgs(&args)
+	return terminalSendHasInterrupt(args)
+}
+
+func repeatedTerminalEnterSkip(run TaskRun, tc llm.ToolCallDef) string {
+	if !strings.EqualFold(strings.TrimSpace(tc.Function.Name), "terminal_send") {
+		return ""
+	}
+	if !terminalSendEnterFromArgs(tc.Function.Arguments) {
+		return ""
+	}
+	for i := len(run.Tools) - 1; i >= 0; i-- {
+		tool := run.Tools[i]
+		if !strings.EqualFold(strings.TrimSpace(tool.Name), "terminal_send") {
+			continue
+		}
+		if terminalSendEnterFromArgs(json.RawMessage(tool.Input)) {
+			return "terminal_send skipped: Enter was already sent once as terminal recovery in this run. Do not keep pressing Enter blindly; call terminal_read to inspect the screen, use Recover/Restart if the terminal is stale, or choose a separate shell/read action."
+		}
+	}
+	return ""
+}
+
+func repeatedMalformedTerminalSendArgsBlock(run TaskRun, tc llm.ToolCallDef) string {
+	if !strings.EqualFold(strings.TrimSpace(tc.Function.Name), "terminal_send") {
+		return ""
+	}
+	errors := 0
+	for i := len(run.Tools) - 1; i >= 0; i-- {
+		tool := run.Tools[i]
+		if !strings.EqualFold(strings.TrimSpace(tool.Name), "terminal_send") {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(tool.Status), "error") {
+			continue
+		}
+		lower := strings.ToLower(tool.Result)
+		if strings.Contains(lower, "provide keys and/or control") ||
+			strings.Contains(lower, "bad params") ||
+			strings.Contains(lower, "command is required") ||
+			strings.Contains(lower, "no keys/control were provided") {
+			errors++
+			if errors >= 2 {
+				return "terminal_send blocked after repeated malformed argument errors. Do not call terminal_send again with legacy fields like data/id markup. Use one advertised tool with its exact schema: http_probe for HTTP checks, shell with {\"command\":\"...\"} for one-shot local commands, or terminal_send with {\"command\":\"...\"} only when terminal_send is actually available."
+			}
+		}
+	}
+	return ""
+}
+
+func terminalSendEnterFromArgs(raw json.RawMessage) bool {
+	var args terminalSendArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return false
+	}
+	normalizeTerminalSendArgs(&args)
+	return terminalSendIsPureEnter(args)
+}
+
 func repeatedShellFailureBlock(run TaskRun, tc llm.ToolCallDef) string {
 	if !isShellTool(tc.Function.Name) {
 		return ""
@@ -3897,6 +4602,9 @@ func repeatedShellFailureBlock(run TaskRun, tc llm.ToolCallDef) string {
 		}
 		if repeatShellCommandKey(shellCommandFromToolArgs(json.RawMessage(tool.Input))) != key {
 			continue
+		}
+		if tool.Status == "done" {
+			break
 		}
 		if tool.Status == "error" || tool.Status == "blocked" {
 			failures++
@@ -3950,6 +4658,7 @@ func repeatedShellSameResultBlock(run TaskRun, tc llm.ToolCallDef) string {
 		return ""
 	}
 	var lastResult string
+	var lastRawResult string
 	repeats := 0
 	for i := len(run.Tools) - 1; i >= 0; i-- {
 		tool := run.Tools[i]
@@ -3968,6 +4677,7 @@ func repeatedShellSameResultBlock(run TaskRun, tc llm.ToolCallDef) string {
 		}
 		if lastResult == "" {
 			lastResult = normalized
+			lastRawResult = tool.Result
 			repeats = 1
 			continue
 		}
@@ -3976,10 +4686,44 @@ func repeatedShellSameResultBlock(run TaskRun, tc llm.ToolCallDef) string {
 		}
 		repeats++
 		if repeats >= 2 {
-			return fmt.Sprintf("Repeated shell command blocked after %d identical successful results: %s\nRepeated evidence: %s\n%s", repeats, command, truncateLine(lastResult, 500), shellRepeatRecoveryHint(run, command))
+			cached := strings.TrimSpace(truncateRunes(lastRawResult, 1200))
+			if cached != "" {
+				cached = "\nCached result preview:\n" + cached
+			}
+			return fmt.Sprintf("Repeated shell command blocked after %d identical successful results: %s\nRepeated evidence summary: %s%s\n%s", repeats, command, truncateLine(lastResult, 220), cached, shellRepeatRecoveryHint(run, command))
 		}
 	}
 	return ""
+}
+
+// exploitScriptRE matches a script/exploit path token in a shell command, e.g.
+// "python3 /tmp/x/exploit.py --rhost ..." -> "/tmp/x/exploit.py".
+var exploitScriptRE = regexp.MustCompile(`(?:^|[\s])([\w.\-/]+\.(?:py|sh|pl|rb|php))(?:\s|$)`)
+
+// mostRepeatedScriptInvocation returns the script path invoked most often across
+// a run's shell calls and that count, so the loop can detect per-command
+// re-exploitation (same script, varying inner commands) that the identical-command
+// guards miss.
+func mostRepeatedScriptInvocation(run TaskRun) (string, int) {
+	counts := map[string]int{}
+	best := ""
+	bestN := 0
+	for _, tool := range run.Tools {
+		if !isShellTool(tool.Name) {
+			continue
+		}
+		m := exploitScriptRE.FindStringSubmatch(shellCommandFromToolArgs(json.RawMessage(tool.Input)))
+		if m == nil {
+			continue
+		}
+		sig := m[1]
+		counts[sig]++
+		if counts[sig] > bestN {
+			bestN = counts[sig]
+			best = sig
+		}
+	}
+	return best, bestN
 }
 
 func shellRepeatRecoveryHint(run TaskRun, command string) string {
@@ -3991,6 +4735,7 @@ func shellRepeatRecoveryHint(run TaskRun, command string) string {
 	if hint := commandSpecificRecoveryHint(command); hint != "" {
 		lines = append(lines, hint)
 	}
+	lines = append(lines, "Use probe-capture-inspect-decide: if the response/page/log may contain useful data, save the full output to a file or artifact once, inspect that saved artifact locally, and only run a new live command when one variable has changed.")
 	lines = append(lines, "Replan from the latest output, narrow or change the command, use background=true with a job id for long scans, or stop and summarize what is known.")
 	return strings.Join(lines, "\n")
 }
@@ -4025,6 +4770,13 @@ func usefulShellEvidenceSummary(result string) string {
 			continue
 		}
 		lower := strings.ToLower(line)
+		if strings.Contains(lower, "isolated shell fallback") ||
+			strings.Contains(lower, "shared terminal is busy") ||
+			strings.HasPrefix(lower, "% total ") ||
+			strings.Contains(lower, "hostname connected.htb was found in dns cache") ||
+			strings.Contains(lower, "added connected.htb:") {
+			continue
+		}
 		if lower == "null null null" || strings.Contains(lower, `"status":null`) || strings.Contains(lower, "no such file or directory") {
 			continue
 		}
@@ -4079,6 +4831,9 @@ func commandSpecificRecoveryHint(command string) string {
 	}
 	if strings.Contains(lower, "| head") && strings.Contains(lower, "curl") {
 		return "curl/head hint: if output was already shown, treat it as evidence; use `sed -n '1,50p'` instead of `head` to avoid broken-pipe exit codes."
+	}
+	if strings.Contains(lower, "curl") && (strings.Contains(lower, "grep") || strings.Contains(lower, "head") || strings.Contains(lower, "tail")) {
+		return "curl capture hint: save the full HTTP response to a file once, for example `curl -skL ... > /tmp/response.html`, then inspect the saved file with grep/sed/jq/read instead of repeating live curl filters."
 	}
 	return ""
 }
@@ -4192,7 +4947,7 @@ func shellCommandStormHint(run TaskRun, tc llm.ToolCallDef) string {
 	if script := lastScriptArtifact(run); script != "" {
 		parts = append(parts, fmt.Sprintf("You already wrote %s — run it to do this in one shot instead of one request per value.", script))
 	} else if bin == "curl" {
-		parts = append(parts, "For repeated HTTP path/header checks, use http_probe with a paths list so raw output is saved as an artifact and only a compact summary enters context.")
+		parts = append(parts, "For repeated HTTP path/header checks, use http_probe with a paths list so raw output is saved as an artifact and only a compact summary enters context. If a single page matters, save it once with curl and inspect the saved file locally.")
 	} else {
 		parts = append(parts, "If you're extracting or enumerating, script the loop (one bash loop or a small script) and run it once instead of issuing each request by hand.")
 	}
@@ -4205,7 +4960,7 @@ func shellCommandStormHint(run TaskRun, tc llm.ToolCallDef) string {
 func lastScriptArtifact(run TaskRun) string {
 	for i := len(run.Tools) - 1; i >= 0; i-- {
 		tool := run.Tools[i]
-		if tool.Name != "write_file" && tool.Name != "edit_file" {
+		if !isWriteTool(tool.Name) {
 			continue
 		}
 		var p struct {
@@ -4303,7 +5058,7 @@ func shellCommandFromToolArgs(raw json.RawMessage) string {
 }
 
 func repeatShellCommandKey(command string) string {
-	command = strings.TrimSpace(command)
+	command = normalizeShellCommandForDedup(command)
 	if command == "" {
 		return ""
 	}
@@ -4323,7 +5078,7 @@ func appendShellRecoveryHints(result string) string {
 	lower := strings.ToLower(result)
 	var hints []string
 	if strings.Contains(lower, "keyword fuzz defined") && strings.Contains(lower, "not found in headers") {
-		hints = append(hints, "ffuf syntax hint: ffuf requires the literal word FUZZ in the URL, headers, method, or POST data. For directory fuzzing use a URL such as http://connected.htb/admin/FUZZ, not http://connected.htb/admin/.")
+		hints = append(hints, "ffuf syntax hint: ffuf requires the literal word FUZZ in the URL, headers, method, or POST data. For directory fuzzing use a URL such as http://boxname.htb/admin/FUZZ, not http://boxname.htb/admin/.")
 	}
 	if strings.Contains(lower, "flag provided but not defined: -length") && strings.Contains(lower, "gobuster dir") {
 		hints = append(hints, "gobuster syntax hint: this gobuster build does not support --length. Use --exclude-length <size> when filtering by response length, or omit length filtering and save output to a file for review.")
@@ -4353,6 +5108,11 @@ func appendShellCommandRecoveryHints(result, command string) string {
 	if strings.Contains(lowerResult, "could not open file") && strings.Contains(lowerCommand, "fuzz_results.json") {
 		hints = append(hints, "ffuf filename hint: check `ls -l *fuzz*` and parse the existing output file. ffuf may write JSON content to the requested `.txt` filename unless `-of json -o name.json` was used.")
 	}
+	if shellResultLooksLikeMissingPath(lowerResult) {
+		if hint := workspaceShellPathHint(); hint != "" {
+			hints = append(hints, hint+" Do not retry guessed absolute paths such as /root/<workspace>. Run `pwd; ls -la; find . -maxdepth 3 -type f | sed -n '1,80p'` from the current workspace, then use a listed relative path or the WSL workspace path.")
+		}
+	}
 	if len(hints) == 0 {
 		return result
 	}
@@ -4363,6 +5123,26 @@ func appendShellCommandRecoveryHints(result, command string) string {
 		result = strings.TrimRight(result, "\r\n") + "\nRecovery: " + hint
 	}
 	return result
+}
+
+func shellResultLooksLikeMissingPath(lowerResult string) bool {
+	return strings.Contains(lowerResult, "no such file or directory") ||
+		strings.Contains(lowerResult, "cannot access") ||
+		strings.Contains(lowerResult, "can't open file")
+}
+
+func workspaceShellPathHint() string {
+	wd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(wd) == "" {
+		return ""
+	}
+	hostRoot := filepath.ToSlash(wd)
+	if runtime.GOOS == "windows" {
+		if wslRoot := tools.WindowsPathToWSL(hostRoot); wslRoot != "" && wslRoot != hostRoot {
+			return "Workspace path hint: Agent root is " + hostRoot + "; inside WSL use " + wslRoot + " or relative paths from that directory."
+		}
+	}
+	return "Workspace path hint: Agent root is " + hostRoot + "; use relative paths from this directory unless `pwd` proves a different cwd."
 }
 
 func recoverBenignShellPipelineClose(tc llm.ToolCallDef, result string, runErr error) (string, bool) {
@@ -4616,7 +5396,114 @@ func runHasFileMutation(run TaskRun) bool {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(tool.Name))
-		if name == "write_file" || name == "edit_file" {
+		if name == "write" || name == "edit" || name == "write_file" || name == "edit_file" {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidDoneReason(run TaskRun, summary string) string {
+	if isJunkFinalSummary(summary) {
+		return fmt.Sprintf("Final assistant message was not meaningful: %q", strings.TrimSpace(summary))
+	}
+	if finalSummaryStillNeedsAction(summary) {
+		return "Final assistant message describes a next action instead of completing it; continue autonomously with the required tool call."
+	}
+	metrics := buildLoopMetrics(run)
+	if metrics.ToolErrors > 0 && !runHasSuccessfulExecutionTool(run) {
+		return "Run only planned or failed tools; no successful execution tool ran after tool errors."
+	}
+	if runHasOnlyPlannerTools(run) && executionLikelyRequired(run.Prompt) {
+		return "Run only updated the plan/todos for an execution task; it did not run an execution tool."
+	}
+	return ""
+}
+
+func finalSummaryStillNeedsAction(summary string) bool {
+	text := strings.TrimSpace(stripVisibleThinkTags(summary))
+	if text == "" {
+		return false
+	}
+	if looksAboutToAct(text) || looksIncomplete(text) {
+		return true
+	}
+	lower := strings.ToLower(text)
+	actionPhrases := []string{
+		"i need to ",
+		"i still need to ",
+		"i should ",
+		"i will ",
+		"i'll ",
+		"let me ",
+		"need to send ",
+		"need to run ",
+		"need to read ",
+		"need to check ",
+		"need to verify ",
+		"then proceed",
+		"then continue",
+	}
+	for _, phrase := range actionPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func isJunkFinalSummary(summary string) bool {
+	s := strings.TrimSpace(stripVisibleThinkTags(summary))
+	if s == "" {
+		return true
+	}
+	if s == "*" || s == "." || s == "-" || s == "..." {
+		return true
+	}
+	lower := strings.ToLower(s)
+	if lower == "<think>" || lower == "<think>*" || strings.HasPrefix(lower, "<think>") {
+		return true
+	}
+	return len([]rune(s)) < 4
+}
+
+func runHasOnlyPlannerTools(run TaskRun) bool {
+	if len(run.Tools) == 0 {
+		return false
+	}
+	for _, tool := range run.Tools {
+		if !isPlannerToolName(tool.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+func runHasSuccessfulExecutionTool(run TaskRun) bool {
+	for _, tool := range run.Tools {
+		if !strings.EqualFold(strings.TrimSpace(tool.Status), "done") {
+			continue
+		}
+		if !isPlannerToolName(tool.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPlannerToolName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == "todo_write" || strings.HasPrefix(name, "todo_") || name == "progress"
+}
+
+func executionLikelyRequired(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	for _, marker := range []string{
+		"hack", "hacking", "htb", "connected.htb", "target", "box", "webshell", "revshell",
+		"root.txt", "user.txt", "exploit", "privesc", "priv esc", "execute", "run ",
+		"carry on", "continue", "start the plan", "start the pkan",
+	} {
+		if strings.Contains(lower, marker) {
 			return true
 		}
 	}
@@ -4694,6 +5581,11 @@ func (b *taskBudget) before(name string) string {
 			return fmt.Sprintf("fetch_url budget exhausted (%d fetches). Stop fetching and summarize uncertainty from the sources already gathered.", b.maxFetches)
 		}
 		b.fetches++
+	case "browser":
+		if b.browserActions >= b.maxBrowserActions {
+			return fmt.Sprintf("browser automation budget exhausted (%d actions). Stop browsing and summarize what is known.", b.maxBrowserActions)
+		}
+		b.browserActions++
 	default:
 		if strings.HasPrefix(name, "browser_") && name != "browser_close" {
 			if b.browserActions >= b.maxBrowserActions {
@@ -4746,11 +5638,11 @@ func ledgerKindForTool(name string) string {
 	switch {
 	case name == "web_search" || name == "fetch_url":
 		return "web_research"
-	case strings.HasPrefix(name, "browser_"):
+	case name == "browser" || strings.HasPrefix(name, "browser_"):
 		return "browser_action"
-	case strings.HasPrefix(name, "todo_"):
+	case name == "todo_write" || strings.HasPrefix(name, "todo_"):
 		return "planner_event"
-	case strings.HasPrefix(name, "subagent_"):
+	case name == "task" || strings.HasPrefix(name, "subagent_"):
 		return "subagent_result"
 	default:
 		return ""
@@ -4759,15 +5651,15 @@ func ledgerKindForTool(name string) string {
 
 func stateForTool(name string) string {
 	switch {
-	case name == "web_search" || name == "fetch_url" || strings.HasPrefix(name, "browser_"):
+	case name == "web_search" || name == "fetch_url" || name == "browser" || strings.HasPrefix(name, "browser_"):
 		return "researching"
-	case name == "read_file" || name == "read_many" || name == "read_pdf" || name == "glob" || name == "grep" || name == "session_search":
+	case name == "read" || name == "read_file" || name == "read_many" || name == "read_pdf" || name == "glob" || name == "grep" || name == "session_search":
 		return "reading"
-	case name == "write_file" || name == "edit_file":
+	case name == "write" || name == "edit" || name == "write_file" || name == "edit_file":
 		return "editing"
-	case name == "shell" || name == "bash":
+	case name == "shell":
 		return "testing"
-	case strings.HasPrefix(name, "todo_"):
+	case name == "todo_write" || strings.HasPrefix(name, "todo_"):
 		return "planning"
 	default:
 		return "using_tools"
@@ -4788,11 +5680,6 @@ func isMalformedToolArgsError(err error) bool {
 func toolEnabled(enabled map[string]bool, name string) bool {
 	if enabled == nil {
 		return true
-	}
-	if name == "bash" {
-		if shellEnabled, ok := enabled["shell"]; ok {
-			return shellEnabled
-		}
 	}
 	if on, ok := enabled[name]; ok {
 		return on
@@ -4851,9 +5738,6 @@ func enabledToolListForMessage(enabled map[string]bool) string {
 }
 
 func toolsetContains(cfg settings.ToolsConfig, active, name string) bool {
-	if name == "bash" {
-		name = "shell"
-	}
 	toolsets := cfg.Toolsets
 	if toolsets == nil {
 		toolsets = settings.DefaultSettings().Tools.Toolsets
@@ -4884,9 +5768,9 @@ func classifyAgentMode(text string) AgentMode {
 	switch {
 	case looksShellCentricTask(lower):
 		return AgentMode{
-			Name:         "Ops",
-			Description:  "Operate inside a lab target with shell-first evidence gathering.",
-			Instructions: "Work like a careful HTB/Kali operator. Prefer WSL shell evidence over Windows browser/fetch, verify the target state before choosing an exploit path, keep notes/writeups current with confirmed facts, and avoid copying large public PoCs unless the user explicitly asks for that route.",
+			Name:         "Auto",
+			Description:  "General agent with terminal-first execution.",
+			Instructions: "Use the terminal and tools directly when the task needs them. Prefer live evidence over stale notes, keep artifacts/current facts updated, and continue autonomously unless blocked by missing external state.",
 		}
 	case hasAny(lower, "review", "audit", "risks", "regression", "security", "code quality"):
 		return AgentMode{
@@ -4947,7 +5831,7 @@ func shouldUseCodingParams(text string, mode AgentMode) bool {
 		"script", "code", "function", "class", "module", "component",
 		"powershell", "bash", "shell", "python", "typescript", "javascript",
 		"html", "css", "json", "yaml", "sql", "go ", "golang",
-		"write_file", "edit_file", "full file", "complete file",
+		"write", "edit", "full file", "complete file",
 		".ps1", ".sh", ".py", ".ts", ".tsx", ".js", ".jsx", ".go",
 	)
 }
@@ -5083,6 +5967,25 @@ func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile 
 		actual := cq.ActualContextLength(qctx)
 		cancel()
 		if actual > 0 {
+			if profile.CtxTokens > 0 && actual < profile.CtxTokens {
+				err := backendContextShortfallError(profile, actual)
+				a.recordLedger(ledger.Event{
+					Kind:    "model_context",
+					Source:  "provider",
+					Status:  "fail",
+					Message: fmt.Sprintf("backend context shortfall: actual %d < configured %d", actual, profile.CtxTokens),
+					Detail:  err.Error(),
+					Metadata: map[string]string{
+						"configured_ctx": strconv.Itoa(profile.CtxTokens),
+						"actual_ctx":     strconv.Itoa(actual),
+						"model":          profile.ModelID,
+						"backend":        profile.Backend,
+						"base_url":       profile.BaseURL,
+					},
+				})
+				a.clearLoadedModelKey(key)
+				return err
+			}
 			window := profile.CtxTokens
 			if window <= 0 || actual < window {
 				window = actual
@@ -5095,6 +5998,7 @@ func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile 
 				changed := a.history.Budget() != usable
 				a.history.SetBudget(usable)
 				a.contextWindow = window
+				a.configuredContextWindow = profile.CtxTokens
 				a.mu.Unlock()
 				if changed && a.ctx != nil {
 					a.emit("mauler:budget_updated", usable)
@@ -5104,6 +6008,15 @@ func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile 
 	}
 
 	return nil
+}
+
+func backendContextShortfallError(profile settings.Profile, actual int) error {
+	return fmt.Errorf(
+		"backend context shortfall: profile %q requests %d tokens but the running backend reports %d; reload/restart InferenceBridge/llama.cpp with this exact context before running the agent",
+		profile.Name,
+		profile.CtxTokens,
+		actual,
+	)
 }
 
 var (
@@ -5248,7 +6161,9 @@ func (a *App) recordBackendRuntimeMismatch(ctx context.Context, client llm.Clien
 		return
 	}
 	severity := "info"
-	if actual < profile.CtxTokens {
+	if severeContextUndersize(profile.CtxTokens, actual) {
+		severity = "fail"
+	} else if actual < profile.CtxTokens {
 		severity = "warn"
 	}
 	// Backends often round context upward slightly. Record that once per run so
@@ -5267,7 +6182,10 @@ func buildChatRequest(profile settings.Profile, msgs []llm.Message, toolDefs []l
 	plan := effortToThinking(effort, profile)
 	useCodingParams := coding || plan.coding
 	params := profile.ActiveParams(useCodingParams)
-	if useCodingParams && !profile.Thinking && profile.ThinkCoding.MaxTokens > 0 {
+	if forceNoThink {
+		params = profile.NoThink
+	}
+	if useCodingParams && (!profile.Thinking || forceNoThink) && profile.ThinkCoding.MaxTokens > 0 {
 		params = profile.ThinkCoding
 	}
 	if plan.maxTokensCap > 0 && (params.MaxTokens <= 0 || params.MaxTokens > plan.maxTokensCap) {
@@ -5279,7 +6197,7 @@ func buildChatRequest(profile settings.Profile, msgs []llm.Message, toolDefs []l
 		enableThinking = false
 		preserveThinking = false
 	}
-	return llm.Request{
+	req := llm.Request{
 		Messages:         msgs,
 		Tools:            toolDefs,
 		ToolChoice:       toolChoice,
@@ -5296,6 +6214,39 @@ func buildChatRequest(profile settings.Profile, msgs []llm.Message, toolDefs []l
 		SpecType:         profile.SpecType,
 		SpecDraftNMax:    profile.SpecDraftNMax,
 	}
+	if schema := constrainedToolArgsSchema(profile, toolDefs, toolChoice); schema != nil {
+		req.JSONSchema = schema
+	}
+	return req
+}
+
+func formatRepairActions(actions []agent.RepairAction) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(actions))
+	for _, action := range actions {
+		lines = append(lines, action.String())
+	}
+	return strings.Join(lines, "\n")
+}
+
+func runtimeToolProtocol(profile settings.Profile) string {
+	if rp, ok := runtimeprofile.Match(profile); ok && strings.TrimSpace(rp.ToolProtocol) != "" {
+		return rp.ToolProtocol
+	}
+	return "unknown"
+}
+
+func constrainedToolArgsSchema(profile settings.Profile, toolDefs []llm.ToolDef, toolChoice string) json.RawMessage {
+	rp, ok := runtimeprofile.Match(profile)
+	if !ok || strings.EqualFold(strings.TrimSpace(rp.ToolProtocol), "native-openai") {
+		return nil
+	}
+	if toolChoice != "required" || len(toolDefs) != 1 || len(toolDefs[0].Function.Parameters) == 0 {
+		return nil
+	}
+	return toolDefs[0].Function.Parameters
 }
 
 func configureWorkingDir(cfg *settings.Settings) {
@@ -5377,12 +6328,47 @@ type shellSession struct {
 	// by pipeShellOutput independently of the marker-protocol output channel. The
 	// interactive terminal_send/terminal_read tools snapshot it for a non-blocking,
 	// real-terminal-style read; the blocking shell command path does not use it.
-	scroll *terminalScrollback
+	scroll      *terminalScrollback
+	screen      *terminalScreen
+	promptReady bool
+	lastExit    *int
+	lastCWD     string
+	lastDoneAt  time.Time
+	oscBuffer   string
+	// sawPromptMarker is set once this session's shell has emitted an OSC-133
+	// integration mark. When true, running/finished state is taken from the marker
+	// protocol (authoritative) rather than tail-text heuristics.
+	sawPromptMarker bool
+	// awaitingCommand is set when a command has been sent and no completion marker
+	// (133;D local / 133;R remote) has arrived yet, i.e. the command is genuinely
+	// still running. Reset by resetShellSessionPromptState, cleared by the marker.
+	awaitingCommand bool
+	// remoteConnected tracks a nested/remote interactive session (ssh/nc/webshell)
+	// occupying the shared terminal. Set from connect evidence, cleared
+	// deterministically by a local 133;D marker (we are back at the local prompt).
+	remoteConnected bool
+	// remoteIntegrated is set once the OSC-133 marker hook has been injected into the
+	// connected remote session, so its running/finished/exit state is authoritative
+	// too. Cleared with remoteConnected on return to the local shell.
+	remoteIntegrated bool
 }
 
 type terminalOutput struct {
 	data   string
 	stream string
+}
+
+type TerminalRecoveryResult struct {
+	Status  string   `json:"status"`
+	Summary string   `json:"summary"`
+	Lines   []string `json:"lines"`
+}
+
+type TerminalStateSnapshot struct {
+	Session string   `json:"session"`
+	State   string   `json:"state"`
+	Summary string   `json:"summary"`
+	Lines   []string `json:"lines"`
 }
 
 // Terminal output is rendered as plain text in the frontend, not by a full VT
@@ -5401,7 +6387,8 @@ func maulerBashInteractiveArgs() []string {
 	// which is the main reason the agent finds the shared terminal "problematic".
 	rc := "exec bash --rcfile <(printf '%s\\n' " +
 		"'test -f ~/.bashrc && . ~/.bashrc' " +
-		"'PROMPT_COMMAND=' " +
+		"'__mauler_prompt_marker(){ local ec=$?; printf \"\\033]133;D;%s\\007\" \"$ec\"; printf \"\\033]133;P;cwd=%s\\007\" \"$PWD\"; printf \"\\033]133;A\\007\"; return $ec; }' " +
+		"'PROMPT_COMMAND=__mauler_prompt_marker' " +
 		"'PROMPT_DIRTRIM=3' " +
 		"'export PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat MANPAGER=cat LESS=FRX' " +
 		"'export DEBIAN_FRONTEND=noninteractive GIT_TERMINAL_PROMPT=0 PIP_DISABLE_PIP_VERSION_CHECK=1' " +
@@ -5410,25 +6397,17 @@ func maulerBashInteractiveArgs() []string {
 	return []string{"-lc", rc}
 }
 
-// OpenShell starts a new interactive shell and returns its session ID.
-// Any previously open shell is closed first.  Output is streamed to the
-// frontend via "mauler:shell_output" events; exit is signalled by
-// "mauler:shell_exit".
+func maulerPowerShellInteractiveArgs() []string {
+	promptHook := `$esc=[char]27;$bel=[char]7;function global:prompt { $code=if($?){0}else{1}; $cwd=(Get-Location).Path; [Console]::Write("$esc]133;D;$code$bel$esc]133;P;cwd=$cwd$bel$esc]133;A$bel"); "PS $cwd> " }`
+	return []string{"-NoLogo", "-NoProfile", "-NoExit", "-Command", promptHook}
+}
+
+// OpenShell starts a new interactive shell and returns its session ID. Multiple
+// shells may be open at once; the first live shell remains the shared/agent
+// terminal used by terminal_send/terminal_read and shared shell tools.
 func (a *App) OpenShell() (string, error) {
 	a.shellMu.Lock()
 	defer a.shellMu.Unlock()
-
-	// Kill any existing session so we don't leak processes.
-	if a.shellSess != nil {
-		a.recordLedger(ledger.Event{
-			Kind:    "shell_close",
-			Source:  "terminal",
-			Status:  "replaced",
-			Message: a.shellSess.id,
-		})
-		a.shellSess.cancel()
-		a.shellSess = nil
-	}
 
 	a.mu.Lock()
 	backend := a.cfg.Tools.ShellBackend
@@ -5445,7 +6424,7 @@ func (a *App) OpenShell() (string, error) {
 	switch backend {
 	case "powershell":
 		shellCmd = "powershell.exe"
-		shellArgs = []string{"-NoLogo", "-NoProfile"}
+		shellArgs = maulerPowerShellInteractiveArgs()
 	case "cmd":
 		shellCmd = "cmd.exe"
 	case "bash":
@@ -5467,7 +6446,7 @@ func (a *App) OpenShell() (string, error) {
 	default: // auto
 		if runtime.GOOS == "windows" {
 			shellCmd = "powershell.exe"
-			shellArgs = []string{"-NoLogo", "-NoProfile"}
+			shellArgs = maulerPowerShellInteractiveArgs()
 		} else {
 			shellCmd = "bash"
 			shellArgs = maulerBashInteractiveArgs()
@@ -5499,14 +6478,15 @@ func (a *App) OpenShell() (string, error) {
 	if err := cmd.Start(); err != nil {
 		cancel()
 		_ = terminal.Close()
+		startErr := decorateShellStartError(backend, distro, user, err)
 		a.recordLedger(ledger.Event{
 			Kind:   "shell_start",
 			Source: "terminal",
 			Status: "error",
-			Error:  err.Error(),
+			Error:  startErr.Error(),
 			Input:  shellCmd + " " + strings.Join(shellArgs, " "),
 		})
-		return "", fmt.Errorf("shell start: %w", err)
+		return "", startErr
 	}
 
 	id := fmt.Sprintf("shell-%d", time.Now().UnixMilli())
@@ -5541,8 +6521,15 @@ func (a *App) OpenShell() (string, error) {
 		output:    make(chan terminalOutput, 4096),
 		interrupt: make(chan struct{}, 1),
 		scroll:    newTerminalScrollback(0),
+		screen:    newTerminalScreen(200, 50),
 	}
-	a.shellSess = sess
+	if a.shellSessions == nil {
+		a.shellSessions = map[string]*shellSession{}
+	}
+	a.shellSessions[id] = sess
+	if a.shellSess == nil {
+		a.shellSess = sess
+	}
 
 	go a.pipeShellOutput(id, terminal, "stdout")
 	go func() {
@@ -5550,8 +6537,13 @@ func (a *App) OpenShell() (string, error) {
 		sess.cancel()
 		close(sess.done)
 		a.shellMu.Lock()
+		delete(a.shellSessions, id)
 		if a.shellSess != nil && a.shellSess.id == id {
 			a.shellSess = nil
+			for _, candidate := range a.shellSessions {
+				a.shellSess = candidate
+				break
+			}
 		}
 		a.shellMu.Unlock()
 		a.recordLedger(ledger.Event{
@@ -5566,6 +6558,28 @@ func (a *App) OpenShell() (string, error) {
 	}()
 
 	return id, nil
+}
+
+func decorateShellStartError(backend, distro, user string, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.EqualFold(strings.TrimSpace(backend), "wsl") {
+		detail := "WSL failed to start the terminal"
+		if strings.TrimSpace(distro) != "" {
+			detail += " for distro " + strconv.Quote(strings.TrimSpace(distro))
+		}
+		if strings.TrimSpace(user) != "" {
+			detail += " as user " + strconv.Quote(strings.TrimSpace(user))
+		}
+		recovery := "Try the app's Restart WSL button, or run `wsl --shutdown` in PowerShell and then start the terminal again. If it keeps happening, verify `wsl -l -v` works and that the configured distro/user still exists."
+		if strings.Contains(strings.ToLower(msg), "wsl/service/e_unexpected") || strings.Contains(strings.ToLower(msg), "catastrophic failure") {
+			return fmt.Errorf("%s: Windows returned Wsl/Service/E_UNEXPECTED (catastrophic failure). %s Original error: %w", detail, recovery, err)
+		}
+		return fmt.Errorf("%s. %s Original error: %w", detail, recovery, err)
+	}
+	return fmt.Errorf("shell start: %w", err)
 }
 
 // pipeShellOutput fans PTY output out to two consumers:
@@ -5595,11 +6609,17 @@ func (a *App) pipeShellOutput(id string, r io.Reader, stream string) {
 		n, err := r.Read(buf)
 		if n > 0 {
 			// 1. Raw bytes (minus framing markers) to the xterm.js terminal.
-			emitUI(uiFilter.feed(buf[:n]))
+			uiBytes := uiFilter.feed(buf[:n])
+			emitUI(uiBytes)
 			// 2. Sanitized, line-framed text for the agent collector.
 			a.shellMu.Lock()
-			sess := a.shellSess
-			if sess != nil && sess.id == id {
+			sess := a.shellSessions[id]
+			isShared := sess != nil && a.shellSess != nil && a.shellSess.id == id
+			if isShared {
+				updateShellSessionOSCState(sess, buf[:n])
+				if sess.screen != nil {
+					sess.screen.write(uiBytes)
+				}
 				var records []terminalOutput
 				records, pending = terminalOutputRecords(pending+decodeTerminalOutput(buf[:n]), stream, false)
 				for _, record := range records {
@@ -5607,6 +6627,7 @@ func (a *App) pipeShellOutput(id string, r io.Reader, stream string) {
 					if strings.TrimSpace(record.data) == "" {
 						continue
 					}
+					updateShellSessionMarkerState(sess, record.data)
 					// Feed the always-on scrollback for the interactive read tools,
 					// skipping framing markers so a polled screen stays clean.
 					if sess.scroll != nil && !strings.Contains(record.data, "__MAULER_") {
@@ -5632,8 +6653,8 @@ func (a *App) pipeShellOutput(id string, r io.Reader, stream string) {
 			emitUI(uiFilter.flush())
 			if clean := sanitizeTerminalLine(pending); strings.TrimSpace(clean) != "" {
 				a.shellMu.Lock()
-				sess := a.shellSess
-				if sess != nil && sess.id == id {
+				sess := a.shellSessions[id]
+				if sess != nil && a.shellSess != nil && a.shellSess.id == id {
 					select {
 					case sess.output <- terminalOutput{data: strings.TrimRight(clean, "\r\n"), stream: stream}:
 					default:
@@ -5666,6 +6687,146 @@ func terminalOutputRecords(chunk, stream string, flush bool) ([]terminalOutput, 
 		out = append(out, terminalOutput{data: strings.TrimRight(remainder, "\r"), stream: stream})
 	}
 	return out, remainder
+}
+
+func updateShellSessionMarkerState(sess *shellSession, line string) {
+	if sess == nil {
+		return
+	}
+	if cwd, ok := sharedTerminalAnyCWD(line); ok {
+		sess.lastCWD = cwd
+		return
+	}
+	if code, ok := sharedTerminalAnyDone(line); ok {
+		sess.promptReady = true
+		sess.lastExit = &code
+		sess.lastDoneAt = time.Now()
+	}
+}
+
+func updateShellSessionOSCState(sess *shellSession, raw []byte) {
+	if sess == nil || len(raw) == 0 {
+		return
+	}
+	sess.oscBuffer += decodeTerminalOutput(raw)
+	if len(sess.oscBuffer) > 8192 {
+		sess.oscBuffer = sess.oscBuffer[len(sess.oscBuffer)-4096:]
+	}
+	for {
+		start := strings.Index(sess.oscBuffer, "\x1b]133;")
+		if start < 0 {
+			if len(sess.oscBuffer) > 256 {
+				sess.oscBuffer = sess.oscBuffer[len(sess.oscBuffer)-256:]
+			}
+			return
+		}
+		if start > 0 {
+			sess.oscBuffer = sess.oscBuffer[start:]
+		}
+		end, size := findOSCTerminator(sess.oscBuffer)
+		if end < 0 {
+			return
+		}
+		payload := sess.oscBuffer[len("\x1b]133;"):end]
+		applyShellSessionOSCPayload(sess, payload)
+		sess.oscBuffer = sess.oscBuffer[end+size:]
+	}
+}
+
+func findOSCTerminator(s string) (int, int) {
+	bel := strings.IndexByte(s, '\x07')
+	st := strings.Index(s, "\x1b\\")
+	switch {
+	case bel < 0 && st < 0:
+		return -1, 0
+	case bel >= 0 && (st < 0 || bel < st):
+		return bel, 1
+	default:
+		return st, 2
+	}
+}
+
+// applyShellSessionOSCPayload consumes one OSC-133 payload. We emit and parse a
+// small private extension of the FinalTerm/iTerm2 semantic-prompt protocol:
+//   - D;<ec> / P;cwd= / A  — the LOCAL shell (a D also means we are back at the
+//     local prompt, so it clears any nested/remote session flags).
+//   - R;<ec> / Q;cwd=      — an injected REMOTE/nested shell. Distinct letters so a
+//     remote completion is not mistaken for a return to the local shell.
+func applyShellSessionOSCPayload(sess *shellSession, payload string) {
+	switch {
+	case strings.HasPrefix(payload, "D;"):
+		codeText := strings.TrimSpace(strings.TrimPrefix(payload, "D;"))
+		code, err := strconv.Atoi(codeText)
+		if err == nil {
+			sess.sawPromptMarker = true
+			sess.promptReady = true
+			sess.awaitingCommand = false
+			sess.lastExit = &code
+			sess.lastDoneAt = time.Now()
+			// A local prompt marker means the nested/remote session (if any) has
+			// exited and we are back at the local shell.
+			sess.remoteConnected = false
+			sess.remoteIntegrated = false
+		}
+	case strings.HasPrefix(payload, "R;"):
+		codeText := strings.TrimSpace(strings.TrimPrefix(payload, "R;"))
+		code, err := strconv.Atoi(codeText)
+		if err == nil {
+			sess.sawPromptMarker = true
+			sess.promptReady = true
+			sess.awaitingCommand = false
+			sess.lastExit = &code
+			sess.lastDoneAt = time.Now()
+			// Remote completion: stay flagged as connected/integrated.
+			sess.remoteIntegrated = true
+		}
+	case strings.HasPrefix(payload, "P;cwd="):
+		cwd := strings.TrimSpace(strings.TrimPrefix(payload, "P;cwd="))
+		if cwd != "" {
+			sess.lastCWD = cwd
+		}
+	case strings.HasPrefix(payload, "Q;cwd="):
+		cwd := strings.TrimSpace(strings.TrimPrefix(payload, "Q;cwd="))
+		if cwd != "" {
+			sess.lastCWD = cwd
+		}
+	case payload == "A":
+		sess.sawPromptMarker = true
+		sess.promptReady = true
+		if sess.lastDoneAt.IsZero() {
+			sess.lastDoneAt = time.Now()
+		}
+	}
+}
+
+// remoteShellIntegrationScript installs the OSC-133 remote prompt markers (R/Q)
+// into a connected bash-like nested session. It is inert on shells that ignore
+// PROMPT_COMMAND, so it is safe to best-effort inject when a shell prompt is seen.
+const remoteShellIntegrationScript = `__mauler_rpm(){ local ec=$?; printf '\033]133;R;%s\007' "$ec"; printf '\033]133;Q;cwd=%s\007' "$PWD"; return $ec; }; PROMPT_COMMAND=__mauler_rpm`
+
+// maybeInjectRemoteShellIntegration best-effort installs the remote OSC-133 markers
+// into a connected nested session, once per handoff, and only when a shell prompt is
+// visible (so the remote is ready for input). This keeps terminal running/finished
+// and exit-code state authoritative across an ssh/nc/webshell handoff.
+func maybeInjectRemoteShellIntegration(sess *shellSession, tail []string) {
+	if sess == nil || sess.input == nil || sess.remoteIntegrated || !sess.remoteConnected {
+		return
+	}
+	if !endsWithShellPrompt(tail) {
+		return
+	}
+	sess.remoteIntegrated = true
+	_, _ = io.WriteString(sess.input, remoteShellIntegrationScript+"\r")
+}
+
+func resetShellSessionPromptState(sess *shellSession) {
+	if sess == nil {
+		return
+	}
+	sess.promptReady = false
+	sess.lastExit = nil
+	// A command is now in flight; it is running until a completion marker arrives.
+	sess.awaitingCommand = true
 }
 
 // uiMarkerFilter removes the shared-terminal framing from the *raw* byte stream
@@ -5948,10 +7109,8 @@ func decodeTerminalOutput(data []byte) string {
 // "\r", backspace as "\x7f", arrows/function keys as "\x1b[…", Tab as "\t",
 // Ctrl-C as "\x03" — so we forward verbatim without munging line endings.
 func (a *App) ShellInput(id, text string) error {
-	a.shellMu.Lock()
-	sess := a.shellSess
-	a.shellMu.Unlock()
-	if sess == nil || sess.id != id {
+	sess := a.shellSessionByID(id)
+	if sess == nil {
 		return fmt.Errorf("no active shell session %q", id)
 	}
 	a.recordLedger(ledger.Event{
@@ -5988,13 +7147,16 @@ func (a *App) ShellResize(id string, cols, rows int) error {
 		rows = 120
 	}
 	a.shellMu.Lock()
-	sess := a.shellSess
+	sess := a.shellSessions[id]
 	a.shellMu.Unlock()
-	if sess == nil || sess.id != id {
+	if sess == nil {
 		return nil
 	}
 	if sess.pty == nil {
 		return nil
+	}
+	if sess.screen != nil {
+		sess.screen.resize(cols, rows)
 	}
 	return sess.pty.Resize(cols, rows)
 }
@@ -6048,7 +7210,11 @@ func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw j
 	// later command in the session. Make sudo non-interactive so it fails fast instead.
 	command = tools.ForceNonInteractiveSudo(command)
 	if containsShellHeredoc(command) {
-		return "shared_terminal does not support heredoc commands from AI tool calls because the wrapper can leave bash waiting at a continuation prompt. Use a printf pipe instead, for example: printf '%s\\n' '10.129.245.100 connected.htb' | sudo -n tee -a /etc/hosts, or write a temporary script/file and run it.", fmt.Errorf("%s: heredoc unsupported in shared terminal", toolName)
+		// The shared terminal's marker wrapper can leave bash at a PS2 continuation
+		// prompt on a heredoc. Rather than reject it (the model just retries the
+		// heredoc), fall back to isolated exec, where `bash -lc` runs the heredoc
+		// cleanly. errSharedTerminalUnsupported makes the caller re-run via registry.
+		return "", errSharedTerminalUnsupported
 	}
 	if isShellJobsCommand(command) {
 		return "Mauler background jobs are not listed with the shell command `job` or `jobs`. Poll a known background job by calling the shell tool with {\"job\":\"j1\"}; if no job id was returned, start the long command with {\"command\":\"...\",\"background\":true}.", fmt.Errorf("%s: use shell job parameter for Mauler background jobs", toolName)
@@ -6056,6 +7222,9 @@ func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw j
 	if stripped, ok := stripTrailingBackgroundOperator(command); ok {
 		command = stripped
 		p.Background = true
+	}
+	if !p.Background && looksLikeInteractiveListenerCommand(command) {
+		return "This looks like a live listener/reverse-shell command. Do not run it through the blocking shell tool because a successful shell will stay open until the shell-tool timeout and be logged as a failure. Use terminal_send to start it in the visible terminal, then terminal_read to watch and interact with the session. On this HTB/VPN setup, prefer the Windows listener via PowerShell/ncat.exe when WSL callbacks are unreliable, for example: terminal_send keys=\"powershell.exe -NoProfile -Command \\\"ncat.exe -lvp 4444\\\"\".", fmt.Errorf("%s: interactive listener requires terminal_send/terminal_read", toolName)
 	}
 	timeoutSecs := defaultTimeout
 	if timeoutSecs <= 0 {
@@ -6067,6 +7236,9 @@ func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw j
 	sess, err := a.ensureShellSession()
 	if err != nil {
 		return "", err
+	}
+	if !sharedTerminalReadyForWrappedCommand(sess) {
+		return "", errSharedTerminalBusy
 	}
 	sess.runMu.Lock()
 	defer sess.runMu.Unlock()
@@ -6111,7 +7283,7 @@ func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw j
 				result := withSharedTerminalCWD(formatSharedTerminalResult(parser.out, backend, exitCode, time.Since(startedAt).Round(time.Millisecond)), parser.cwd)
 				if a.ctx != nil {
 					a.emit("mauler:terminal_command_done", map[string]string{
-						"id": runID, "session": sess.id, "exit_code": strconv.Itoa(exitCode),
+						"id": runID, "session": sess.id, "exit_code": strconv.Itoa(exitCode), "duration_ms": strconv.FormatInt(time.Since(startedAt).Milliseconds(), 10), "tool": toolName, "result": result,
 					})
 				}
 				if exitCode != 0 {
@@ -6160,6 +7332,199 @@ func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw j
 }
 
 var errSharedTerminalUnsupported = errors.New("shared terminal is only supported for bash/wsl shell backends")
+var errSharedTerminalBusy = errors.New("shared terminal is busy")
+
+func sharedTerminalReadyForWrappedCommand(sess *shellSession) bool {
+	if sess == nil || sess.scroll == nil {
+		return true
+	}
+	if terminalSessionPromptReady(sess) {
+		return true
+	}
+	tail := cleanTerminalLines(sess.scroll.tail(20))
+	if len(tail) == 0 {
+		return true
+	}
+	if endsWithShellPrompt(tail) {
+		return true
+	}
+	if terminalTailHasInteractivePrompt(tail) {
+		return false
+	}
+	for i := len(tail) - 1; i >= 0 && i >= len(tail)-8; i-- {
+		line := strings.TrimSpace(tail[i])
+		if line == "" || isLowSignalArtLineLocal(line) {
+			continue
+		}
+		if endsWithShellPrompt([]string{line}) {
+			return true
+		}
+	}
+	return false
+}
+
+func sharedTerminalStateSnapshot(sess *shellSession) TerminalStateSnapshot {
+	if sess == nil {
+		return TerminalStateSnapshot{State: "missing", Summary: "No shared terminal is open"}
+	}
+	snap := TerminalStateSnapshot{Session: sess.id, State: "ready", Summary: "Shared terminal is ready"}
+	if sess.scroll != nil {
+		snap.Lines = cleanTerminalLines(sess.scroll.tail(20))
+	}
+	if terminalSessionPromptReady(sess) {
+		snap.State = "ready"
+		if sess.lastExit != nil {
+			snap.Summary = fmt.Sprintf("Shared terminal is ready; last exit %d", *sess.lastExit)
+		}
+		if strings.TrimSpace(sess.lastCWD) != "" {
+			snap.Summary = strings.TrimSpace(snap.Summary + "; cwd " + sess.lastCWD)
+		}
+	}
+	if !sess.runMu.TryLock() {
+		snap.State = "running"
+		snap.Summary = "Shared terminal is running an agent command"
+		return snap
+	}
+	sess.runMu.Unlock()
+	select {
+	case <-sess.done:
+		snap.State = "closed"
+		snap.Summary = "Shared terminal has exited"
+		return snap
+	default:
+	}
+	if terminalTailHasInteractivePrompt(snap.Lines) {
+		snap.State = "interactive_prompt"
+		snap.Summary = "Shared terminal appears to be waiting for interactive input"
+		return snap
+	}
+	// Nested/remote session tracking. A connect banner latches remoteConnected on the
+	// session; a local 133;D marker (return to the local prompt) clears it in
+	// applyShellSessionOSCPayload. This replaces the old per-snapshot tail heuristic,
+	// which stayed "connected" as long as the banner lingered in the visible tail.
+	if terminalTailLooksLikeConnectedSession(snap.Lines) {
+		sess.remoteConnected = true
+	}
+	if sess.remoteConnected {
+		snap.State = "connected"
+		snap.Summary = "Shared terminal appears to contain a connected live session"
+		return snap
+	}
+	if terminalTailLooksLikeListener(snap.Lines) {
+		snap.State = "listener"
+		snap.Summary = "Shared terminal appears to be running a listener or live session"
+		return snap
+	}
+	if sharedTerminalReadyForWrappedCommand(sess) {
+		snap.State = "ready"
+		snap.Summary = "Shared terminal is ready"
+		return snap
+	}
+	snap.State = "busy"
+	snap.Summary = "Shared terminal has recent output but no clear prompt"
+	return snap
+}
+
+func terminalTailLooksLikeConnectedSession(tail []string) bool {
+	if len(tail) == 0 {
+		return false
+	}
+	for i := len(tail) - 1; i >= 0 && i >= len(tail)-8; i-- {
+		line := strings.TrimSpace(tail[i])
+		if lineLooksLikeLocalPromptCommand(line) {
+			return false
+		}
+		if lineLooksLikeConnectedSessionEvidence(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func lineLooksLikeConnectedSessionEvidence(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	if strings.HasPrefix(lower, "* connected to ") || strings.HasPrefix(lower, "* connected") {
+		return false
+	}
+	return containsAny(lower,
+		"connection received",
+		"connect to [",
+		"accepted connection",
+		"command shell session",
+		"meterpreter session",
+		"shell opened",
+		"opened shell",
+		"session opened",
+	)
+}
+
+func lineLooksLikeLocalPromptCommand(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if strings.Contains(trimmed, "$ ") || strings.Contains(trimmed, "# ") {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	return strings.HasPrefix(lower, "curl ") ||
+		strings.HasPrefix(lower, "wget ") ||
+		strings.HasPrefix(lower, "python ") ||
+		strings.HasPrefix(lower, "python3 ") ||
+		strings.HasPrefix(lower, "bash ") ||
+		strings.HasPrefix(lower, "sh ")
+}
+
+func terminalTailLooksLikeListener(tail []string) bool {
+	if len(tail) == 0 {
+		return false
+	}
+	text := strings.ToLower(strings.Join(tail, "\n"))
+	signals := []string{
+		"listening on",
+		"listening ",
+		"ncat: listening",
+		"nc -l",
+		"ncat -l",
+		"ncat.exe -l",
+		"socat tcp-listen",
+		"reverse shell",
+	}
+	for _, signal := range signals {
+		if strings.Contains(text, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func sharedTerminalFallbackNote(err error, state TerminalStateSnapshot) string {
+	reason := "unavailable"
+	if err != nil {
+		reason = strings.TrimSpace(strings.TrimPrefix(err.Error(), "shared terminal "))
+	}
+	lines := []string{fmt.Sprintf("[isolated shell fallback: shared terminal %s]", reason)}
+	if state.State != "" {
+		lines = append(lines, fmt.Sprintf("Shared terminal state: %s - %s", state.State, state.Summary))
+		switch state.State {
+		case "listener":
+			lines = append(lines, "Routing note: a listener/live session appears to own the shared terminal. Use terminal_read/terminal_send to interact with it; use shell only for separate one-shot checks.")
+		case "interactive_prompt":
+			lines = append(lines, "Routing note: the shared terminal appears to be waiting for input. Use terminal_send for that prompt, or Recover/Restart before running new one-shot commands.")
+		case "running":
+			lines = append(lines, "Routing note: a command is already running in the shared terminal. Use terminal_read for progress or background jobs rather than launching duplicate probes.")
+		case "busy":
+			lines = append(lines, "Routing note: no clean prompt was detected. Prefer terminal_read or Recover before assuming the target/network failed.")
+		}
+	}
+	if hint := workspaceShellPathHint(); strings.TrimSpace(hint) != "" {
+		lines = append(lines, hint)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
 
 func sharedTerminalSupportsBackend(backend string) bool {
 	return sharedTerminalSupportsResolvedBackend(resolveSharedTerminalBackend(backend))
@@ -6167,6 +7532,35 @@ func sharedTerminalSupportsBackend(backend string) bool {
 
 func sharedTerminalSupportsResolvedBackend(backend string) bool {
 	return backend == "wsl" || backend == "bash"
+}
+
+func looksLikeInteractiveListenerCommand(command string) bool {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, " -z") || strings.Contains(lower, " --zero") {
+		return false
+	}
+	if strings.Contains(lower, "ncat.exe") || strings.Contains(lower, "ncat ") || strings.Contains(lower, "socat ") {
+		return strings.Contains(lower, " -l") ||
+			strings.Contains(lower, " --listen") ||
+			strings.Contains(lower, "listen:")
+	}
+	listenerTools := []string{"nc ", "nc."}
+	hasTool := false
+	for _, tool := range listenerTools {
+		if strings.Contains(" "+lower, " "+tool) || strings.HasPrefix(lower, tool) || strings.Contains(lower, "/"+tool) {
+			hasTool = true
+			break
+		}
+	}
+	if !hasTool {
+		return false
+	}
+	return strings.Contains(lower, " -l") ||
+		strings.Contains(lower, " --listen") ||
+		strings.Contains(lower, "listen:")
 }
 
 func resolveSharedTerminalBackend(backend string) string {
@@ -6202,6 +7596,78 @@ func (a *App) ensureShellSession() (*shellSession, error) {
 		return nil, fmt.Errorf("shared terminal did not start")
 	}
 	return a.shellSess, nil
+}
+
+// RecoverSharedTerminal tries to return the shared agent terminal to an idle
+// prompt without destroying useful session state. It is intentionally gentler
+// than Restart/Kill: first inspect, then Ctrl-C + newline probe, then report
+// whether the terminal is reusable.
+func (a *App) RecoverSharedTerminal() (TerminalRecoveryResult, error) {
+	a.shellMu.Lock()
+	sess := a.shellSess
+	a.shellMu.Unlock()
+	if sess == nil {
+		return TerminalRecoveryResult{Status: "missing", Summary: "No shared terminal is open", Lines: []string{"Start the terminal first."}}, nil
+	}
+	if sharedTerminalReadyForWrappedCommand(sess) {
+		lines := cleanTerminalLines(sess.scroll.tail(12))
+		return TerminalRecoveryResult{Status: "ready", Summary: "Shared terminal already looks ready", Lines: lines}, nil
+	}
+
+	sess.runMu.Lock()
+	defer sess.runMu.Unlock()
+	drainTerminalOutput(sess.output)
+	if _, err := io.WriteString(sess.input, "\x03"); err != nil {
+		return TerminalRecoveryResult{Status: "error", Summary: "Could not send Ctrl-C to the shared terminal", Lines: []string{err.Error()}}, err
+	}
+	time.Sleep(120 * time.Millisecond)
+	sentinel := "__MAULER_UI_RECOVER_" + sharedTerminalRunID() + "__"
+	if _, err := io.WriteString(sess.input, fmt.Sprintf("stty echo 2>/dev/null || true; printf '%%s\\n' %s\r", terminalShellQuote(sentinel))); err != nil {
+		return TerminalRecoveryResult{Status: "error", Summary: "Could not probe the shared terminal", Lines: []string{err.Error()}}, err
+	}
+
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	var seen []string
+	for {
+		select {
+		case line, ok := <-sess.output:
+			if !ok {
+				return TerminalRecoveryResult{Status: "closed", Summary: "Shared terminal output closed during recovery", Lines: seen}, nil
+			}
+			if strings.Contains(line.data, sentinel) {
+				lines := cleanTerminalLines(sess.scroll.tail(16))
+				return TerminalRecoveryResult{Status: "ready", Summary: "Shared terminal recovered and prompt probe succeeded", Lines: lines}, nil
+			}
+			clean := strings.TrimSpace(line.data)
+			if clean != "" && !strings.Contains(clean, "__MAULER_") {
+				seen = append(seen, clean)
+				if len(seen) > 16 {
+					seen = seen[len(seen)-16:]
+				}
+			}
+		case <-sess.done:
+			return TerminalRecoveryResult{Status: "closed", Summary: "Shared terminal exited during recovery", Lines: seen}, nil
+		case <-timer.C:
+			lines := cleanTerminalLines(sess.scroll.tail(16))
+			if len(lines) > 0 {
+				seen = append(seen, lines...)
+			}
+			return TerminalRecoveryResult{Status: "busy", Summary: "Shared terminal did not answer the recovery probe; restart may be needed", Lines: seen}, nil
+		}
+	}
+}
+
+// GetSharedTerminalState exposes the agent/shared terminal state for the UI and
+// future routing logic. It is read-only and intentionally avoids probing or
+// writing to the terminal.
+func (a *App) GetSharedTerminalState() TerminalStateSnapshot {
+	a.shellMu.Lock()
+	sess := a.shellSess
+	a.shellMu.Unlock()
+	snapshot := sharedTerminalStateSnapshot(sess)
+	a.updateAgentSessionsFromTerminalState(snapshot)
+	return snapshot
 }
 
 // interruptSharedTerminalRun sends Ctrl+C to a timed-out command and tries to
@@ -6546,8 +8012,20 @@ func formatBackgroundJobTooEarly(job *bgJob, wait time.Duration) string {
 
 func (a *App) killSharedTerminalSession(sess *shellSession) {
 	a.shellMu.Lock()
-	if a.shellSess != nil && a.shellSess.id == sess.id {
-		a.shellSess.cancel()
+	if sess != nil {
+		if a.shellSessions != nil {
+			delete(a.shellSessions, sess.id)
+		}
+		if a.shellSess != nil && a.shellSess.id == sess.id {
+			a.shellSess = nil
+			for _, candidate := range a.shellSessions {
+				a.shellSess = candidate
+				break
+			}
+		}
+		sess.cancel()
+	}
+	if a.shellSess != nil && sess != nil && a.shellSess.id == sess.id {
 		a.shellSess = nil
 	}
 	a.shellMu.Unlock()
@@ -6669,6 +8147,7 @@ func writeSharedTerminalWrappedCommand(sess *shellSession, wrapped string) (int,
 	// which no longer matched markerEchoSig and leaked into the visible terminal.
 	// With echo left on, the full `M=__MA''ULER_…` line is echoed intact and the
 	// uiMarkerFilter drops it; the agent-side parser ignores it via the START gate.
+	resetShellSessionPromptState(sess)
 	return io.WriteString(sess.input, wrapped+"\r")
 }
 
@@ -6736,12 +8215,53 @@ func sharedTerminalCWD(line, runID string) (string, bool) {
 	return strings.TrimRight(line[idx+len(prefix):], "\r\n"), true
 }
 
+func sharedTerminalAnyCWD(line string) (string, bool) {
+	idx := strings.Index(line, "__MAULER_CWD_")
+	if idx < 0 {
+		return "", false
+	}
+	rest := line[idx+len("__MAULER_CWD_"):]
+	end := strings.Index(rest, "__")
+	if end < 0 {
+		return "", false
+	}
+	cwd := strings.TrimRight(rest[end+2:], "\r\n")
+	if strings.TrimSpace(cwd) == "" {
+		return "", false
+	}
+	return cwd, true
+}
+
+func sharedTerminalAnyDone(line string) (int, bool) {
+	idx := strings.Index(line, "__MAULER_DONE_")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := line[idx+len("__MAULER_DONE_"):]
+	colon := strings.Index(rest, ":")
+	if colon < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(strings.TrimSpace(rest[colon+1:]))
+	if len(fields) == 0 {
+		return 0, false
+	}
+	code, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
 // withSharedTerminalCWD appends the session's working directory to a result so
 // the agent stays oriented after commands that cd around.
 func withSharedTerminalCWD(result, cwd string) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return result
+	}
+	if strings.Contains(result, "\n  cwd: unknown\n") {
+		return strings.Replace(result, "\n  cwd: unknown\n", "\n  cwd: "+cwd+"\n", 1)
 	}
 	return result + "\ncwd: " + cwd
 }
@@ -6787,6 +8307,7 @@ func parseSharedTerminalExitCode(statusText string) (int, error) {
 
 func formatSharedTerminalResult(lines []terminalOutput, backend string, exitCode int, elapsed time.Duration) string {
 	var sb strings.Builder
+	prev := ""
 	for _, line := range lines {
 		if strings.TrimSpace(line.data) == "" {
 			continue
@@ -6794,15 +8315,32 @@ func formatSharedTerminalResult(lines []terminalOutput, backend string, exitCode
 		if isSharedTerminalWrapperEcho(line.data) || strings.Contains(line.data, "__MAULER_START_") || strings.Contains(line.data, "__MAULER_DONE_") {
 			continue
 		}
+		// Collapse \r-overwritten progress and drop scan progress noise so the
+		// model receives findings, not banner/progress spam (see scan_output.go).
+		data := tools.CollapseLineCarriageReturns(line.data)
+		if tools.IsScanProgressLine(data) || strings.TrimSpace(data) == "" || data == prev {
+			continue
+		}
+		prev = data
 		if line.stream == "stderr" {
 			sb.WriteString("[stderr] ")
 		}
-		sb.WriteString(line.data)
+		sb.WriteString(data)
 		sb.WriteString("\n")
 	}
 	if sb.Len() > 0 {
 		sb.WriteString("\n")
 	}
+	state := "done"
+	nextTool := "proceed"
+	if exitCode < 0 {
+		state = "stopped"
+		nextTool = "terminal_read or recover terminal state"
+	} else if exitCode != 0 {
+		state = "error"
+		nextTool = "inspect error, change command, or use saved evidence"
+	}
+	sb.WriteString(formatShellLikeResultContract("shell", "shared_terminal/"+backend, state, exitCode, "unknown", "-", nextTool))
 	if exitCode >= 0 {
 		sb.WriteString(fmt.Sprintf("[shared_terminal/%s exit %d, %s]", backend, exitCode, elapsed))
 	} else {
@@ -6811,11 +8349,65 @@ func formatSharedTerminalResult(lines []terminalOutput, backend string, exitCode
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+func formatShellLikeResultContract(tool, backend, state string, exitCode int, cwd, resultID, nextTool string) string {
+	if strings.TrimSpace(tool) == "" {
+		tool = "shell"
+	}
+	if strings.TrimSpace(backend) == "" {
+		backend = "unknown"
+	}
+	if strings.TrimSpace(state) == "" {
+		state = "done"
+	}
+	exit := "unknown"
+	if exitCode >= 0 {
+		exit = fmt.Sprintf("%d", exitCode)
+	}
+	if strings.TrimSpace(cwd) == "" {
+		cwd = "unknown"
+	}
+	if strings.TrimSpace(resultID) == "" {
+		resultID = "-"
+	}
+	if strings.TrimSpace(nextTool) == "" {
+		nextTool = "proceed"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "[%s_result state=%s backend=%s]\n", tool, state, backend)
+	sb.WriteString("contract:\n")
+	fmt.Fprintf(&sb, "  state: %s\n", state)
+	fmt.Fprintf(&sb, "  backend: %s\n", backend)
+	fmt.Fprintf(&sb, "  exit: %s\n", exit)
+	fmt.Fprintf(&sb, "  cwd: %s\n", cwd)
+	fmt.Fprintf(&sb, "  result_id: %s\n", resultID)
+	fmt.Fprintf(&sb, "  next_tool: %s\n", nextTool)
+	sb.WriteString("  do_not_repeat: do not rerun the same command if this output already answered the check; use saved files/read_tool_result/search instead\n")
+	return sb.String()
+}
+
 // ShellClose terminates the shell session identified by id.
 func (a *App) ShellClose(id string) error {
 	a.shellMu.Lock()
 	defer a.shellMu.Unlock()
-	if a.shellSess == nil || a.shellSess.id != id {
+	sess := a.shellSessions[id]
+	if sess == nil {
+		if a.shellSess != nil && a.shellSess.id == id {
+			sess = a.shellSess
+		} else {
+			return nil
+		}
+	}
+	if a.shellSessions != nil {
+		delete(a.shellSessions, id)
+	}
+	if a.shellSess != nil && a.shellSess.id == id {
+		a.shellSess = nil
+		for _, candidate := range a.shellSessions {
+			a.shellSess = candidate
+			break
+		}
+	}
+	if sess == nil {
 		return nil
 	}
 	a.recordLedger(ledger.Event{
@@ -6824,8 +8416,7 @@ func (a *App) ShellClose(id string) error {
 		Status:  "requested",
 		Message: id,
 	})
-	a.shellSess.cancel()
-	a.shellSess = nil
+	sess.cancel()
 	return nil
 }
 
@@ -6938,11 +8529,6 @@ func toSessionStoreMessages(msgs []llm.Message) []sessionstore.Message {
 func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryEntry, skills []Skill) string {
 	var sb strings.Builder
 	sb.WriteString("You are TheMauler, an expert AI coding assistant. ")
-	sb.WriteString("Current date: " + time.Now().Format("2006-01-02") + ". ")
-	if mode.Name != "" {
-		sb.WriteString("Auto agent mode: " + mode.Name + " - " + mode.Description + " ")
-		sb.WriteString(mode.Instructions + " ")
-	}
 	// Core behaviour rules — stated before tool guidance so they have highest priority.
 	sb.WriteString("IMPORTANT RULES: " +
 		"(1) Only use tools when they are genuinely required to answer — if you already know the answer, reply directly without any tool calls. " +
@@ -6950,53 +8536,36 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 		"(3) Never mention the availability of tools in a conversational reply. " +
 		"(4) If you say you will find, inspect, read, search, fetch, write, create, update, or run something, your very next action must be the appropriate tool call — not more narration. ")
 	sb.WriteString(formatEnabledToolSummary(cfg.Tools))
-	sb.WriteString("For substantial multi-step implementation, debugging, research, review, or Ops tasks, first call todo_create with a concise 3-8 step plan, then use todo_update/todo_done/todo_blocked as phases change. ")
+	sb.WriteString("Latest user correction policy: the newest user instruction wins over older plans and prior tool trails. If the user says to switch access method, use a webshell, stop an exploit path, or use a specific shell/listener route, abandon the stale path immediately and update the plan before any further tool calls. ")
+	sb.WriteString("For substantial multi-step implementation, debugging, research, review, or Ops tasks, use todo_write with a concise 3-8 step plan and update it as phases change. ")
 	sb.WriteString("If the user asks to update a README, writeup, notes file, report, or documentation as work progresses, treat that file as a living artifact: write a concise update after each major verified milestone instead of leaving all documentation until the end. ")
 	sb.WriteString("Use session_search when the user asks about prior work, past decisions, remembered fixes, or anything likely discussed in an earlier chat. ")
-	sb.WriteString("Use skills_list at the start of a complex task to see if a relevant procedural skill exists, then skill_view to read its full instructions. ")
+	sb.WriteString("Use skill mode=list at the start of a complex task to see if a relevant procedural skill exists, then skill mode=view to read its instructions. ")
 	sb.WriteString("Use set_reasoning_effort to control thinking depth as the task changes: minimal or low for rote reads, small edits, formatting, and running known commands; medium for normal implementation; high for ambiguous design, debugging, exploitation reasoning, or complex reviews. Do not change effort more than a few times per task. ")
-	sb.WriteString("For interactive, prompt-driven, or live-watched terminal work, use terminal_send with terminal_read instead of a blocking shell call; terminal_send types into the same visible PTY and terminal_read snapshots the latest output. ")
-	sb.WriteString("Use http_probe for bounded HTTP header/path probing when you would otherwise run several similar curl commands; it returns a compact summary and artifact path. ")
+	sb.WriteString("Tool routing: use read/glob/grep for local files; terminal_send/terminal_read only for commands that belong inside a live or interactive terminal session; shell for short deterministic local one-shots; http_probe for independent HTTP/webshell/curl/wget checks, especially repeated probes; web/fetch/browser for public or JS-heavy research; and task for bounded delegated exploration. Do not type independent HTTP or webshell probes into a connected terminal. Tool descriptions carry the detailed workflow. ")
+	sb.WriteString("Loop discipline: test one hypothesis at a time, vary repeats only when they can produce new evidence, save bulky reusable output as an artifact, inspect artifacts locally, and summarize blockers instead of spiraling. ")
+	sb.WriteString("Current date: " + time.Now().Format("2006-01-02") + ". ")
+	if mode.Name != "" {
+		sb.WriteString("Auto agent mode: " + mode.Name + " - " + mode.Description + " ")
+		sb.WriteString(mode.Instructions + " ")
+	}
 	if hint := masterSkillRegistryHint(); hint != "" {
 		sb.WriteString(hint)
 	}
-	sb.WriteString("Prefer glob/grep/file_outline/read_chunks/read_file/read_many/read_pdf for file discovery and inspection instead of shell. Use file_outline before reading large files, then read_chunks or read_file line ranges for only the needed sections. Use read_pdf for local PDF documents the user wants analysed. For large codebase mapping, broad enumeration, or read-heavy inspection tasks, call subagent_explore and work from its bounded summary instead of pulling many files into the main context. ")
 	if workspace := buildWorkspaceContextPrompt(); workspace != "" {
 		sb.WriteString(workspace)
 	}
-	sb.WriteString("The shell tool is platform-aware: Windows uses PowerShell by default, Linux and WSL use bash by default. Use syntax and paths appropriate to the active shell; on Windows PowerShell do not use bash-only constructs like /dev/null or complex bash pipelines. ")
-	if strings.EqualFold(cfg.Tools.ShellBackend, "wsl") {
-		if distro := strings.TrimSpace(cfg.Tools.ShellDistro); distro != "" {
-			sb.WriteString("The active shell backend is WSL distro " + distro + "; run Linux/Kali commands directly with bash syntax and Linux paths. Do not prefix shell commands with wsl or wsl.exe because the shell tool is already inside that distro. ")
-		} else {
-			sb.WriteString("The active shell backend is the default WSL distro; run Linux commands directly with bash syntax and Linux paths. Do not prefix shell commands with wsl or wsl.exe because the shell tool is already inside WSL. ")
-		}
-		sb.WriteString("For HTB/Kali target interaction, prefer the shell tool for target HTTP/TCP work because it runs inside WSL/Kali with that distro's /etc/hosts, VPN routing, and tooling. Use curl, nc, nmap, ffuf, gobuster, and similar tools from shell for .htb hosts and lab IPs. fetch_url and browser tools run from the Windows host and may not share WSL DNS, hosts entries, VPN routes, or Kali tools; use them for public internet research or only when the user explicitly needs a visible Windows browser. ")
-		sb.WriteString("For HTB/CTF enumeration, use realistic shell timeouts: 120-300 seconds for nmap, gobuster, ffuf, hydra, and similar scans. Do not pipe long-running scans through head because it can terminate the scan early and hide the real exit status; write scan output to a file with -oA/-oN/-oG or tee, then tail/grep the saved file afterward. If a scan times out, retry narrower or with a larger timeout and continue from partial output instead of stopping. For long scans in shared-terminal mode, prefer background=true and poll the returned job id with backoff: wait about 1s, 2s, 3s, 5s, 8s, 13s, then 30s between polls; use verbose=true only when fuller output is needed. Sudo is allowed when the user supplied the WSL/Kali sudo password, but it must be non-interactive: pass the password through stdin with sudo -S and a bounded timeout. For privileged one-line writes such as /etc/hosts, prefer printf piped into sudo -S tee -a instead of nested sudo bash -c quoting. ")
+	if envPrompt := buildEnvironmentRoutingPrompt(cfg); envPrompt != "" {
+		sb.WriteString(envPrompt)
 	}
+	sb.WriteString(buildShellRoutingPrompt(cfg))
 	if strings.EqualFold(mode.Name, "Ops") {
-		switch normaliseOpsProfile(cfg.Context.Lab.OpsProfile) {
-		case "htb":
-			sb.WriteString("Ops profile: HTB/CTF. Assist the authorised box workflow from WSL/Kali: recon, foothold, user, privilege escalation, root, and writeup. Flag discovery is allowed as evidence for the exercise, but still verify live target state before relying on old notes or public PoCs. ")
-		default:
-			sb.WriteString("Ops profile: Pentesting. Assist authorised attack/testing and evidence capture only. Track assets, services, suspected vulnerabilities, requests/responses, PoC verification, screenshots, impact notes, and report-ready evidence. Do not perform remediation, patching, hardening, or client-system fixes unless the user explicitly changes the task. Do not frame objectives as user/root flags. ")
-		}
-		sb.WriteString("Ops mode: treat prior run memories, old writeups, CVE names, and public PoCs as hypotheses until live target evidence confirms them. First reconcile the requested target IP/hostname with the writeup and /etc/hosts, then verify services and versions from the target. Do not choose an exploit only because a memory or old note mentions it, and do not write or paste a large public exploit before a small proof check shows the endpoint and parameters match this host. ")
-		sb.WriteString("Ops mode: when a CVE, public exploit, or named product vulnerability is central to the task and the user has not explicitly forbidden web research, do one fresh current-source pass before committing to an exploit path: search with the current year/date plus product/version/CVE terms, fetch at least one primary or high-quality source, and compare publication/update dates against the target version. If web tools are unavailable, state that the exploit choice is based only on local evidence/memory. ")
-		if masterSkillRegistryHint() != "" {
-			sb.WriteString("Ops mode: for complex recon, exploitation, foothold, privilege escalation, or report/evidence tasks, call skill_view with name `master` and a focused query early in the run. Use the relevant workflow steps from that skill instead of repeatedly guessing commands. ")
-		}
-		sb.WriteString("Ops mode: if the same shell command returns the same response twice, stop repeating it, record the evidence, and vary only one thing or summarize the finding. For repeated HTTP curl probes, prefer http_probe so raw output goes to an artifact and the prompt only gets a summary. ")
+		sb.WriteString(buildOpsModePrompt(cfg))
 	}
 	if len(cfg.Tools.ProtectedPaths) > 0 {
 		sb.WriteString("Never edit, delete, move, overwrite, chmod/chown, or otherwise mutate these protected paths: " + strings.Join(cfg.Tools.ProtectedPaths, "; ") + ". ")
 	}
-	sb.WriteString(fmt.Sprintf("Web research is budgeted per task: at most %d searches, %d fetches, and %d failed/no-result web attempts. ", cfg.Tools.MaxSearches, cfg.Tools.MaxFetches, cfg.Tools.MaxFailedFetches))
-	sb.WriteString("For exploit, CVE, PoC, CTF/HTB, or service-version research, the runtime may grant a larger web budget; fan out across vendor advisories, NVD/CVE records, GitHub PoCs, Exploit-DB/Rapid7/Packet Storm, and relevant issue/forum reports before concluding none exists. ")
-	sb.WriteString("Rank sources as official docs first, then GitHub/repo docs, package docs, blogs/community posts, and random mirrors last. ")
-	sb.WriteString("If repeated searches/fetches fail or return only mirrors, stop searching and state the uncertainty instead of spiraling. ")
-	sb.WriteString("When web_search/fetch_url are insufficient for JavaScript-heavy pages or forms, use browser_open/browser_snapshot/browser_click/browser_type/browser_extract/browser_screenshot within the browser action budget. ")
-	sb.WriteString("When using web_search for current events, include today's year/date in the query and fetch promising high-ranked sources with fetch_url. ")
+	sb.WriteString(fmt.Sprintf("Web budgets: max %d searches, %d fetches, %d failed/no-result attempts; current/exploit research may receive a larger runtime budget. Prefer official/high-quality sources, fetch promising results, use browser tools only when search/fetch cannot inspect the page, and stop with uncertainty when results stay poor. ", cfg.Tools.MaxSearches, cfg.Tools.MaxFetches, cfg.Tools.MaxFailedFetches))
 	sb.WriteString("If a tool is blocked, disabled, denied, exhausted by budget, or returns repeated errors, stop the loop and clearly report what stopped you, what you already tried, and the exact next permission or input needed. ")
 	if cfg.Agents.RequirePlan {
 		sb.WriteString("The plan should be visible through the todo tools, not only prose in chat. ")
@@ -7011,12 +8580,12 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 			}
 			if strings.TrimSpace(s.SourcePath) != "" {
 				sb.WriteString("External source: " + s.SourcePath + "\n")
-				sb.WriteString("Load lazily with skill_view. Pass a focused query when only a section is needed.\n")
+				sb.WriteString("Load lazily with skill mode=view. Pass a focused query when only a section is needed.\n")
 			} else if s.Body != "" {
 				body := strings.TrimSpace(s.Body)
 				const maxInlineSkillChars = 6000
 				if len(body) > maxInlineSkillChars {
-					body = body[:maxInlineSkillChars] + "\n\n[Skill truncated in prompt. Use skill_view for the full instructions.]"
+					body = body[:maxInlineSkillChars] + "\n\n[Skill truncated in prompt. Use skill mode=view for the full instructions.]"
 				}
 				sb.WriteString(body + "\n")
 			}
@@ -7024,6 +8593,15 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 	}
 	if len(memories) > 0 {
 		writeMemoryPromptPackets(&sb, memories)
+	}
+	if facts := buildRunFactsPromptFromLedger(); facts != "" {
+		sb.WriteString(facts)
+	}
+	if progress := buildProgressArtifactPrompt(); progress != "" {
+		sb.WriteString(progress)
+	}
+	if resume := buildProjectResumePrompt(cfg); resume != "" {
+		sb.WriteString(resume)
 	}
 	if cfg.Memory.Enabled {
 		sb.WriteString("\n\nYou have a memory tool for this workspace. Call memory with action=recall (a short query) before repeating work to check what is already known, and action=remember to save a reusable lesson, working command, user preference, or confirmed target detail. Only the highest-scoring entries are auto-injected above, so recall when you need more; keep remembered entries short and factual and never store secrets. ")
@@ -7034,6 +8612,216 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 		sb.WriteString(userProfile)
 	}
 	return sb.String()
+}
+
+func buildProgressArtifactPrompt() string {
+	path := progressPath("")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return ""
+	}
+	const maxProgressPromptChars = 900
+	if len([]rune(text)) > maxProgressPromptChars {
+		text = "[latest progress excerpt; use progress action=read for the full file]\n" + tailRunes(text, maxProgressPromptChars)
+	}
+	return "\n\nWorkspace progress artifact (" + filepath.ToSlash(path) + "):\n" + text + "\n"
+}
+
+func buildProjectResumePrompt(cfg settings.Settings) string {
+	wd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(wd) == "" {
+		return ""
+	}
+	wd = tools.NormalizeHostPath(wd)
+	var sb strings.Builder
+	sb.WriteString("\n\nProject resume packet (use this before starting over):\n")
+	lab := normaliseAppLabContext(cfg.Context.Lab)
+	var labels []string
+	if lab.Name != "" {
+		labels = append(labels, "lab="+lab.Name)
+	}
+	if lab.Target != "" {
+		labels = append(labels, "target="+lab.Target)
+	}
+	if lab.Hostname != "" {
+		labels = append(labels, "hostname="+lab.Hostname)
+	}
+	if lab.AccessPreference != "" {
+		labels = append(labels, "access="+lab.AccessPreference)
+	}
+	if len(labels) > 0 {
+		sb.WriteString("- Active project: " + strings.Join(labels, "; ") + "\n")
+	}
+	if strings.TrimSpace(lab.Notes) != "" {
+		sb.WriteString("- Operator notes: " + truncateRunes(strings.TrimSpace(lab.Notes), 500) + "\n")
+	}
+	if files := projectResumeFiles(wd, lab); len(files) > 0 {
+		sb.WriteString("- Available project evidence files:\n")
+		for _, line := range files {
+			sb.WriteString("  - " + line + "\n")
+		}
+	}
+	if excerpt := projectResumeWriteupExcerpt(wd, lab); excerpt != "" {
+		sb.WriteString("- Current writeup/state excerpt:\n")
+		sb.WriteString(indentPromptBlock(excerpt, "  ") + "\n")
+	}
+	sb.WriteString("- Resume rule: before rescanning or re-exploiting, reconcile the latest user target/IP against this packet, read the writeup/progress/evidence files that are already listed, then create or update a fresh todo plan. Only start over when the user says the box reset or live checks prove the old state is stale.\n")
+	return sb.String()
+}
+
+func projectResumeFiles(root string, lab settings.LabContext) []string {
+	type candidate struct {
+		path string
+		info os.FileInfo
+	}
+	var candidates []candidate
+	add := func(path string) {
+		if len(candidates) >= 18 || strings.TrimSpace(path) == "" {
+			return
+		}
+		path = tools.NormalizeHostPath(path)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			return
+		}
+		candidates = append(candidates, candidate{path: path, info: info})
+	}
+	for _, name := range []string{
+		filepath.Join(".mauler", "project-recap.md"),
+		lab.Name + ".md",
+		"Connected.md",
+		"README.md",
+		"notes.md",
+		filepath.Join(".mauler", "progress.md"),
+	} {
+		add(filepath.Join(root, name))
+	}
+	for _, dir := range []string{"notes", "scans", "loot", "scripts", "screenshots"} {
+		entries, err := os.ReadDir(filepath.Join(root, dir))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			if ext != ".md" && ext != ".txt" && ext != ".nmap" && ext != ".xml" && ext != ".py" && ext != ".php" && ext != ".png" && ext != ".jpg" && ext != ".jpeg" {
+				continue
+			}
+			add(filepath.Join(root, dir, entry.Name()))
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].info.ModTime().After(candidates[j].info.ModTime())
+	})
+	if len(candidates) > 12 {
+		candidates = candidates[:12]
+	}
+	out := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		rel, err := filepath.Rel(root, c.path)
+		if err != nil {
+			rel = c.path
+		}
+		out = append(out, fmt.Sprintf("%s (%s, %s)", filepath.ToSlash(rel), byteCountLabel(c.info.Size()), c.info.ModTime().Format("2006-01-02 15:04")))
+	}
+	return out
+}
+
+func projectResumeWriteupExcerpt(root string, lab settings.LabContext) string {
+	var paths []string
+	if strings.TrimSpace(lab.Name) != "" {
+		paths = append(paths, filepath.Join(root, lab.Name+".md"))
+	}
+	paths = append([]string{filepath.Join(root, ".mauler", "project-recap.md")}, paths...)
+	paths = append(paths, filepath.Join(root, "Connected.md"), filepath.Join(root, "README.md"))
+	for _, path := range paths {
+		data, err := os.ReadFile(tools.NormalizeHostPath(path))
+		if err != nil || strings.TrimSpace(string(data)) == "" {
+			continue
+		}
+		text := strings.TrimSpace(string(data))
+		if len([]rune(text)) > 1400 {
+			text = tailRunes(text, 1400)
+		}
+		return text
+	}
+	return ""
+}
+
+func indentPromptBlock(text, prefix string) string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		lines = append(lines, prefix+line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func byteCountLabel(size int64) string {
+	if size >= 1024*1024 {
+		return fmt.Sprintf("%.1fMB", float64(size)/(1024*1024))
+	}
+	if size >= 1024 {
+		return fmt.Sprintf("%.1fkB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%dB", size)
+}
+
+func buildShellRoutingPrompt(cfg settings.Settings) string {
+	var sb strings.Builder
+	sb.WriteString("Shell routing: platform-aware shell; Windows defaults to PowerShell, Linux/WSL to bash. Use matching syntax/paths; on PowerShell avoid bash-only /dev/null and complex bash pipelines. ")
+	if !strings.EqualFold(cfg.Tools.ShellBackend, "wsl") {
+		return sb.String()
+	}
+	if distro := strings.TrimSpace(cfg.Tools.ShellDistro); distro != "" {
+		sb.WriteString("Active shell: WSL distro " + distro + "; run Linux/Kali commands directly with bash syntax and Linux paths. Do not prefix shell commands with wsl or wsl.exe. ")
+	} else {
+		sb.WriteString("Active shell: default WSL distro; run Linux commands directly with bash syntax and Linux paths. Do not prefix shell commands with wsl or wsl.exe. ")
+	}
+	if hint := workspaceShellPathHint(); hint != "" {
+		sb.WriteString(hint + " ")
+	}
+	sb.WriteString("HTB/Kali target work: use http_probe for independent HTTP/webshell/curl/wget probes when it can express the request; use shell for exact WSL/Kali one-shot commands, pipelines, scans, curl flags, nc, nmap, ffuf, gobuster, and saved artifacts because it uses WSL/Kali /etc/hosts, VPN routing, and tools. Use terminal_send only for a real live terminal session, prompt, SSH shell, REPL, listener, or command you need to watch/interact with. fetch_url/browser run from Windows and may not share WSL DNS, hosts, VPN routes, or Kali tooling; use them for public research or visible Windows browsing. ")
+	sb.WriteString("Reverse shells: call start_listener before triggering callbacks; trigger the callback through http_probe/shell/webshell, not through the busy listener terminal; use terminal_read/terminal_send after connection. Long scans: use realistic timeouts or background jobs and inspect saved scan files. ")
+	return sb.String()
+}
+
+func buildOpsModePrompt(cfg settings.Settings) string {
+	var sb strings.Builder
+	switch normaliseOpsProfile(cfg.Context.Lab.OpsProfile) {
+	case "htb":
+		sb.WriteString("Ops profile: HTB/CTF. Assist the authorised box workflow from WSL/Kali: recon, foothold, user, privilege escalation, root, and writeup. Flag discovery is allowed as evidence for the exercise, but verify live target state before relying on old notes or public PoCs. ")
+	default:
+		sb.WriteString("Ops profile: Pentesting. Assist authorised attack/testing and evidence capture only. Track assets, services, suspected vulnerabilities, requests/responses, PoC verification, screenshots, impact notes, and report-ready evidence. Do not perform remediation, patching, hardening, or client-system fixes unless the user explicitly changes the task. Do not frame objectives as user/root flags. ")
+	}
+	sb.WriteString(buildEvidencePolicyPrompt(cfg))
+	sb.WriteString("Ops mode: treat prior run memories, old writeups, CVE names, and public PoCs as hypotheses until live target evidence confirms them. First reconcile the requested target IP/hostname with the writeup and /etc/hosts, then verify services and versions from the target. Do not choose an exploit only because a memory or old note mentions it, and do not write or paste a large public exploit before a small proof check shows the endpoint and parameters match this host. ")
+	sb.WriteString("Ops mode: when a CVE, public exploit, or named product vulnerability is central and web research is allowed, do one fresh current-source pass before committing: search current year/date plus product/version/CVE, fetch a primary/high-quality source, and compare publication/update dates against target version. If web tools are unavailable, state that the exploit choice is based only on local evidence/memory. ")
+	if masterSkillRegistryHint() != "" {
+		sb.WriteString("Ops mode: for complex recon, exploitation, foothold, privilege escalation, or report/evidence tasks, call skill with mode=view, name `master`, and a focused query early in the run. Use the relevant workflow steps from that skill instead of repeatedly guessing commands. ")
+	}
+	sb.WriteString("Ops mode: routing is stateful. If a terminal is connected, terminal_send is for commands inside that connected session only; independent webshell URLs, curl checks, and HTTP requests must go through http_probe or shell. If a terminal is listening, do not type the callback trigger into it; trigger through http_probe/shell/webshell and watch with terminal_read. ")
+	sb.WriteString("Ops mode: if a probe returns the same response twice, stop repeating it; record the evidence, vary one thing, use http_probe for repeated HTTP checks, or summarize the blocker. ")
+	return sb.String()
+}
+
+func buildEvidencePolicyPrompt(cfg settings.Settings) string {
+	policy := normaliseEvidencePolicy(cfg.Context.Lab.EvidencePolicy, cfg.Context.Lab.OpsProfile)
+	switch policy {
+	case "discovery_first":
+		return "Evidence policy: discovery-first. Build the attack path from live target evidence first: scans, banners, HTTP responses, source, files, logs, and artifacts. Public CVE/vendor/tool documentation and exploit repos are allowed after the service/product/version or endpoint is observed locally. Do not use exact-machine writeups, walkthroughs, flag posts, copied solution paths, or spoiler pages for discovery. If a spoiler/reference is encountered, label it as untrusted reference, do not follow it blindly, and reproduce every claim against the target before recording it. If blocked after a serious attempt, ask the user before using exact-machine spoilers unless the user already requested them. "
+	case "reference_allowed":
+		return "Evidence policy: reference-allowed. Public references, PoCs, and exact-machine writeups may be consulted, but they are not proof. Use them to cross-check or unblock, mark exact-machine sources as reference/spoiler, and reproduce important claims against the live target before acting or writing notes. "
+	case "fastest_path":
+		return "Evidence policy: fastest-path. Prioritize getting the authorised task done efficiently. Public references, PoCs, walkthroughs, and exact-machine notes may guide the route, but still verify commands/results on the target before reporting success or writing durable notes. "
+	default:
+		return "Evidence policy: research-assisted. Use target-local evidence as the primary proof path. Public CVE/vendor documentation, exploit repos, tool docs, advisories, and quality research are allowed to guide testing. Avoid exact-machine walkthroughs/spoilers as the first discovery source; if used, treat them as reference and verify on-target before acting. "
+	}
 }
 
 func writeMemoryPromptPackets(sb *strings.Builder, memories []MemoryEntry) {
@@ -7080,9 +8868,9 @@ func writeMemoryPromptLine(sb *strings.Builder, memory MemoryEntry) {
 	sb.WriteString("- ")
 	sb.WriteString(memoryPromptPrefix(memory))
 	if memory.Title != "" {
-		sb.WriteString(memory.Title + ": ")
+		sb.WriteString(truncateRunes(strings.TrimSpace(memory.Title), 140) + ": ")
 	}
-	sb.WriteString(strings.TrimSpace(memory.Content))
+	sb.WriteString(truncateRunes(strings.TrimSpace(memory.Content), maxMemoryPromptContentRunes(memory)))
 	meta := []string{}
 	if memory.Kind != "" && normaliseMemoryKind(memory.Kind) != "note" {
 		meta = append(meta, "kind="+normaliseMemoryKind(memory.Kind))
@@ -7097,7 +8885,11 @@ func writeMemoryPromptLine(sb *strings.Builder, memory MemoryEntry) {
 		meta = append(meta, fmt.Sprintf("importance=%d", memory.Importance))
 	}
 	if len(memory.Tags) > 0 {
-		meta = append(meta, "tags="+strings.Join(memory.Tags, ","))
+		tags := memory.Tags
+		if len(tags) > 6 {
+			tags = tags[:6]
+		}
+		meta = append(meta, "tags="+strings.Join(tags, ","))
 	}
 	if len(meta) > 0 {
 		sb.WriteString(" [" + strings.Join(meta, "; ") + "]")
@@ -7105,12 +8897,23 @@ func writeMemoryPromptLine(sb *strings.Builder, memory MemoryEntry) {
 	sb.WriteString("\n")
 }
 
+func maxMemoryPromptContentRunes(memory MemoryEntry) int {
+	switch memoryLayer(memory) {
+	case "session_recall", "previous_run":
+		return 360
+	case "evidence":
+		return 420
+	default:
+		return 500
+	}
+}
+
 func masterSkillRegistryHint() string {
 	skill, err := loadSkill("master")
 	if err != nil || strings.TrimSpace(skill.SourcePath) == "" {
 		return ""
 	}
-	return "A master workflow skill is already registered as skill `master`; when the task mentions master_skill, master skill, navigator, methodology, or workflow guidance, call skill_view with name `master` instead of searching the workspace for master_skill.md or master_skills.md. "
+	return "A master workflow skill is already registered as skill `master`; when the task mentions master_skill, master skill, navigator, methodology, or workflow guidance, call skill with mode=view and name `master` instead of searching the workspace for master_skill.md or master_skills.md. "
 }
 
 func formatEnabledToolSummary(cfg settings.ToolsConfig) string {
@@ -7120,13 +8923,13 @@ func formatEnabledToolSummary(cfg settings.ToolsConfig) string {
 	effective := settings.EffectiveEnabledTools(cfg)
 	has := func(name string) bool { return toolEnabled(effective, name) }
 	var groups []string
-	if has("read_file") || has("read_many") || has("read_chunks") || has("file_outline") || has("read_pdf") {
+	if has("read") {
 		groups = append(groups, "read and inspect files")
 	}
-	if has("write_file") || has("edit_file") {
+	if has("write") || has("edit") {
 		groups = append(groups, "write and edit files")
 	}
-	if has("shell") || has("bash") {
+	if has("shell") {
 		groups = append(groups, "run shell commands")
 	}
 	if has("glob") || has("grep") {
@@ -7135,13 +8938,66 @@ func formatEnabledToolSummary(cfg settings.ToolsConfig) string {
 	if has("web_search") || has("fetch_url") {
 		groups = append(groups, "search and fetch the web")
 	}
-	if has("browser_open") || has("browser_snapshot") || has("browser_click") || has("browser_type") || has("browser_extract") || has("browser_screenshot") {
+	if has("browser") {
 		groups = append(groups, "use browser automation")
 	}
 	if len(groups) == 0 {
 		return "No usable tools are enabled for this run; answer directly and say what permission is needed if implementation is required. "
 	}
 	return fmt.Sprintf("Enabled tools for this run let you %s. If the user asks you to implement, patch, write, edit, or run something and those tools are enabled, use a tool call instead of telling the user to copy/paste code. ", strings.Join(groups, ", "))
+}
+
+func buildEnvironmentRoutingPrompt(cfg settings.Settings) string {
+	env := normaliseAppEnvironment(cfg.Environment)
+	lab := normaliseAppLabContext(cfg.Context.Lab)
+	var parts []string
+	add := func(label, value string) {
+		if strings.TrimSpace(value) != "" {
+			parts = append(parts, label+"="+strings.TrimSpace(value))
+		}
+	}
+	add("main_os", env.MainOS)
+	add("ai_shell", env.AIShellBackend)
+	add("ai_wsl_distro", env.AIShellDistro)
+	add("ai_wsl_user", env.AIShellUser)
+	add("target_work_backend", env.TargetWorkBackend)
+	add("listener_backend", env.ListenerBackend)
+	add("listener_command", env.ListenerCommand)
+	add("lhost_source", env.LHOSTSource)
+	add("manual_lhost", env.ManualLHOST)
+	add("lab_name", lab.Name)
+	add("target", lab.Target)
+	add("hostname", lab.Hostname)
+	add("vpn_interface", lab.VPNInterface)
+	add("access_preference", lab.AccessPreference)
+	if len(parts) == 0 && strings.TrimSpace(env.ReverseShellGuidance) == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\nEnvironment and lab routing (authoritative for shell decisions):\n")
+	if len(parts) > 0 {
+		sb.WriteString("- " + strings.Join(parts, "; ") + "\n")
+	}
+	if env.PreferTerminalTools {
+		sb.WriteString("- Prefer terminal tools only for target work with uncertain duration or interaction that belongs in a live terminal session; reserve shell for deterministic one-shots and http_probe for independent HTTP/webshell checks.\n")
+		sb.WriteString("- After code execution, establish one persistent foothold and continue enumeration inside it instead of re-running the exploit chain per command.\n")
+		sb.WriteString("- For reverse shells, use start_listener first, trigger the callback through http_probe/shell/webshell or another non-listener channel, then use terminal_read/terminal_send.\n")
+	}
+	if strings.TrimSpace(env.ReverseShellGuidance) != "" {
+		sb.WriteString("- Reverse shell guidance: " + strings.TrimSpace(env.ReverseShellGuidance) + "\n")
+	}
+	switch lab.AccessPreference {
+	case "webshell":
+		sb.WriteString("- Current access preference is webshell. Prioritize webshell/upload/web command execution paths and do not revert to reverse-shell RCE unless the user changes this preference or webshell is proven impossible with evidence.\n")
+	case "reverse_shell":
+		sb.WriteString("- Current access preference is reverse_shell. Use the configured listener backend and LHOST source for callbacks.\n")
+	case "bind_shell":
+		sb.WriteString("- Current access preference is bind_shell. Prefer target-bound shells and verify firewall/routing before retrying reverse callbacks.\n")
+	}
+	if strings.TrimSpace(lab.Notes) != "" {
+		sb.WriteString("- Lab notes: " + truncateRunes(strings.TrimSpace(lab.Notes), 600) + "\n")
+	}
+	return sb.String()
 }
 
 func buildWorkspaceContextPrompt() string {
@@ -7177,8 +9033,14 @@ func buildWorkspaceContextPrompt() string {
 			sb.WriteString("- Additional open folders for browsing/reference: " + strings.Join(extras, "; ") + "\n")
 		}
 		var lab []string
+		if cfg.Context.Lab.Name != "" {
+			lab = append(lab, "lab="+cfg.Context.Lab.Name)
+		}
 		if cfg.Context.Lab.Target != "" {
 			lab = append(lab, "target="+cfg.Context.Lab.Target)
+		}
+		if cfg.Context.Lab.Hostname != "" {
+			lab = append(lab, "hostname="+cfg.Context.Lab.Hostname)
 		}
 		if cfg.Context.Lab.VPNInterface != "" {
 			lab = append(lab, "vpn/interface="+cfg.Context.Lab.VPNInterface)
@@ -7197,12 +9059,20 @@ func buildWorkspaceContextPrompt() string {
 		if cfg.Context.Lab.LatestArtifact != "" {
 			lab = append(lab, "latest_artifact="+cfg.Context.Lab.LatestArtifact)
 		}
+		if cfg.Context.Lab.AccessPreference != "" {
+			lab = append(lab, "access_preference="+cfg.Context.Lab.AccessPreference)
+		}
 		if len(lab) > 0 {
 			sb.WriteString("- Lab/run context: " + strings.Join(lab, "; ") + "\n")
 		}
 	}
 	sb.WriteString("All relative file paths in tool calls resolve from this root. ")
 	sb.WriteString("Open folders are for browsing/reference only unless the user or tool call uses an absolute path. ")
+	if cfg != nil && strings.EqualFold(cfg.Tools.ShellBackend, "wsl") {
+		if wslRoot := tools.WindowsPathToWSL(wd); wslRoot != "" && wslRoot != wd {
+			sb.WriteString("For WSL shell commands, this same workspace is " + wslRoot + "; do not invent /root/" + filepath.Base(wd) + " unless `pwd` shows that exact path. ")
+		}
+	}
 	sb.WriteString("The user may switch projects between chats; ignore stale project names, memories, or prior file paths that conflict with this root and its entries. ")
 	sb.WriteString("Before reading assumed project files, discover what actually exists with glob/grep or use the files shown above. ")
 	sb.WriteString("If a file read reports that a path does not exist, adapt to the current workspace instead of retrying paths from another project.\n")
@@ -7392,7 +9262,7 @@ func looksIncomplete(text string) bool {
 		"let me update", "let me add", "let me find", "let me explore",
 		"let me check", "let me inspect", "let me read", "let me search",
 		"let me fetch", "let me look", "let me try", "let me run",
-		"let me first", "let me next",
+		"let me follow", "let me enumerate", "let me first", "let me next",
 		// "now …" continuations
 		"now let me", "now i'll", "now i will", "now create", "now write",
 		"now build", "now update", "now find", "now explore", "now check",
@@ -7421,6 +9291,7 @@ func looksIncomplete(text string) bool {
 			"i'll start by", "i will start by", "i'll begin by", "i will begin by",
 			"first i'll", "first i will", "first, i'll", "first, i will",
 			"let me first", "let me start by", "let me begin by",
+			"let me follow", "let me enumerate",
 			"my plan", "here's my plan", "here is my plan",
 			"i'll proceed", "i will proceed", "then i'll", "then i will",
 		}
@@ -7531,6 +9402,8 @@ func looksAboutToAct(text string) bool {
 		"let me write", "i'll write", "i will write", "now write",
 		"let me create", "i'll create", "now create",
 		"let me run", "i'll run", "now run",
+		"let me send", "i'll send", "i will send", "now send",
+		"let me press", "i'll press", "i will press", "now press",
 		"let me apply", "i'll apply", "now apply",
 		"let me update", "i'll update", "now update",
 		"let me fix", "i'll fix", "i will fix", "now fix",
@@ -7548,6 +9421,7 @@ func looksAboutToAct(text string) bool {
 		"let me look", "i'll look", "now look",
 		"let me search", "i'll search", "now search",
 		"let me fetch", "i'll fetch", "now fetch",
+		"let me follow", "i'll follow", "now follow",
 		"let me begin", "let me start", "let me proceed", "let me first",
 		"i'll start", "i'll begin", "i'll proceed", "i will start", "i will begin",
 		"i need to fix", "i need to rewrite", "i need to repair",
@@ -7574,10 +9448,12 @@ func buildDirectivePrompt(lastText string) string {
 	intentPhrases := []string{
 		"let me write", "let me create", "let me build", "let me update", "let me add",
 		"let me fix", "let me rewrite", "let me repair",
+		"let me send", "let me press",
 		"let me find", "let me explore", "let me check", "let me inspect", "let me read", "let me search", "let me fetch",
-		"let me look", "let me discover", "let me enumerate", "let me test", "let me verify", "let me start", "let me begin",
+		"let me look", "let me discover", "let me enumerate", "let me follow", "let me test", "let me verify", "let me start", "let me begin",
 		"right — let me", "right - let me", "right, let me",
 		"now i'll write", "now i'll create", "now i'll fix", "now i'll rewrite", "i'll now write", "i will write", "i will now",
+		"now i'll send", "i'll send", "i will send", "i'll press", "i will press",
 		"now write", "now create", "now fix", "now rewrite", "now find", "now discover", "now enumerate", "now test", "now verify", "now explore", "now check", "now inspect",
 		"i'll write", "i'll create", "i'll fix", "i'll rewrite", "i'll repair", "i'll find", "i'll explore", "i'll check", "i'll inspect",
 		"i need to fix", "i need to rewrite", "i need to repair",
@@ -7595,11 +9471,20 @@ func buildDirectivePrompt(lastText string) string {
 	}
 
 	if intent != "" {
+		if isTerminalInputIntent(intent) {
+			return fmt.Sprintf(
+				"You have stated your intent (%q) but have not called any tools. "+
+					"Do NOT write any more explanatory text. "+
+					"Call terminal_send RIGHT NOW with the exact key or command. Use {\"key\":\"enter\"} for Enter. "+
+					"The tool call must be your very next action.",
+				intent,
+			)
+		}
 		if isInspectionIntent(intent) {
 			return fmt.Sprintf(
 				"You have stated your intent (%q) but have not called any tools. "+
 					"Do NOT write any more explanatory text. "+
-					"Call the appropriate inspection/research tool RIGHT NOW: glob, grep, read_file, read_many, read_pdf, shell, web_search, or fetch_url. "+
+					"Call the appropriate inspection/research tool RIGHT NOW: glob, grep, read, shell, web_search, fetch_url, or task. "+
 					"The tool call must be your very next action.",
 				intent,
 			)
@@ -7607,14 +9492,24 @@ func buildDirectivePrompt(lastText string) string {
 		return fmt.Sprintf(
 			"You have stated your intent (%q) but have not called any tools. "+
 				"Do NOT write any more explanatory text. "+
-				"Call write_file or edit_file RIGHT NOW with the actual file content. "+
+				"Call write or edit RIGHT NOW with the actual file content. "+
 				"The tool call must be your very next action.",
 			intent,
 		)
 	}
 	return "You have been describing what you will do without calling any tools. " +
-		"Stop narrating. Call the appropriate tool (write_file, edit_file, shell, etc.) immediately — " +
+		"Stop narrating. Call the appropriate tool (write, edit, shell, etc.) immediately — " +
 		"your next response must contain a tool call, not text."
+}
+
+func isTerminalInputIntent(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "terminal") ||
+		strings.Contains(lower, "press enter") ||
+		strings.Contains(lower, "send enter") ||
+		strings.Contains(lower, "send an enter") ||
+		strings.Contains(lower, "send a newline") ||
+		strings.Contains(lower, "hit enter")
 }
 
 func buildMalformedToolMarkupPrompt(rawText string, toolDefs []llm.ToolDef) string {
@@ -7630,6 +9525,74 @@ func buildMalformedToolMarkupPrompt(rawText string, toolDefs []llm.ToolDef) stri
 		strings.Join(names, ", "),
 		tail,
 	)
+}
+
+func buildToolProtocolRecoveryPrompt(rawText string, toolDefs []llm.ToolDef, hallucinatedResult bool) string {
+	if hallucinatedResult {
+		names := enabledToolNames(toolDefs)
+		tail := strings.TrimSpace(rawText)
+		if len(tail) > 600 {
+			tail = tail[len(tail)-600:]
+		}
+		return fmt.Sprintf(
+			"You wrote text that looked like a tool/system result, but no real tool call was parsed or executed. "+
+				"Do not invent stdout, stderr, files, or tool results. Do not explain. Make exactly one valid structured tool call now using one of the enabled tools: %s.\n\n"+
+				"Invalid tail for reference:\n%s",
+			strings.Join(names, ", "),
+			tail,
+		)
+	}
+	return buildMalformedToolMarkupPrompt(rawText, toolDefs)
+}
+
+func containsHallucinatedToolResult(text string) bool {
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "<start_of_turn>system") || strings.Contains(lower, "<|start|>system") || strings.Contains(lower, "<|start>system") {
+		return true
+	}
+	if strings.Contains(lower, "<tool_result") || strings.Contains(lower, "<|tool_result") || strings.Contains(lower, "role: tool") || strings.Contains(lower, `"role":"tool"`) {
+		return true
+	}
+	return false
+}
+
+func singleMentionedToolDefs(text string, toolDefs []llm.ToolDef) []llm.ToolDef {
+	if strings.TrimSpace(text) == "" || len(toolDefs) == 0 {
+		return nil
+	}
+	lower := strings.ToLower(text)
+	var matches []llm.ToolDef
+	for _, def := range toolDefs {
+		name := strings.TrimSpace(def.Function.Name)
+		if name == "" {
+			continue
+		}
+		if inlineTextMentionsTool(lower, strings.ToLower(name)) {
+			matches = append(matches, def)
+		}
+	}
+	if len(matches) == 1 {
+		return matches
+	}
+	return nil
+}
+
+func inlineTextMentionsTool(lowerText, lowerName string) bool {
+	quoted := regexp.QuoteMeta(lowerName)
+	patterns := []string{
+		`<call:\s*` + quoted + `\b`,
+		`call\s*:\s*` + quoted + `\b`,
+		`<function\s*=\s*` + quoted + `\b`,
+		`<(?:` + quoted + `)\b`,
+		`\b(?:name|tool|function)\s*=\s*["']?` + quoted + `\b`,
+		`"(?:name|tool|function)"\s*:\s*"` + quoted + `"`,
+	}
+	for _, pattern := range patterns {
+		if regexp.MustCompile(pattern).MatchString(lowerText) {
+			return true
+		}
+	}
+	return false
 }
 
 func visibleTextBeforeInlineToolMarkup(text string) string {
@@ -7654,6 +9617,23 @@ func enabledToolNames(toolDefs []llm.ToolDef) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func toolProtocolToolNames(toolDefs []llm.ToolDef) string {
+	return strings.Join(enabledToolNames(toolDefs), ", ")
+}
+
+func toolCallAdvertised(toolDefs []llm.ToolDef, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, def := range toolDefs {
+		if strings.EqualFold(strings.TrimSpace(def.Function.Name), name) {
+			return true
+		}
+	}
+	return false
 }
 
 func toolProtocolDebugDetail(rawText, visibleText string, calls []llm.ToolCallDef, toolDefs []llm.ToolDef) string {
@@ -7703,7 +9683,12 @@ func sanitizeVisibleModelText(text string) string {
 	if text == "" {
 		return ""
 	}
+	text = stripVisibleRepairMarkers(text)
+	text = stripVisibleThinkTags(text)
 	trimmed := strings.TrimSpace(text)
+	if agent.IsRepairPlaceholder(trimmed) {
+		return ""
+	}
 	lowerTrimmed := strings.ToLower(trimmed)
 	for _, prefix := range []string{"thought<", "analysis<", "final<"} {
 		if strings.HasPrefix(lowerTrimmed, prefix) {
@@ -7715,6 +9700,7 @@ func sanitizeVisibleModelText(text string) string {
 		text = text[:idx]
 	}
 	text = stripGemmaChannelBlocks(text)
+	text = stripVisibleThinkTags(text)
 	for _, pair := range [][2]string{
 		{"<|channel|>thought <channel|>", ""},
 		{"<|channel>thought <channel|>", ""},
@@ -7742,7 +9728,45 @@ func sanitizeVisibleModelText(text string) string {
 	channelRe := regexp.MustCompile(`(?i)<\|?channel\|?>?\s*(thought|analysis|final|commentary)\s*`)
 	text = channelRe.ReplaceAllString(text, "")
 	text = stripBareChannelPrefix(text)
+	text = stripVisibleRepairMarkers(text)
+	text = stripVisibleThinkTags(text)
 	return strings.TrimLeft(text, " \t\r\n")
+}
+
+func stripVisibleRepairMarkers(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if agent.IsRepairPlaceholder(line) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+func stripVisibleThinkTags(text string) string {
+	for {
+		lower := strings.ToLower(text)
+		start := strings.Index(lower, "<think")
+		if start < 0 {
+			return text
+		}
+		tagEndRel := strings.Index(lower[start:], ">")
+		if tagEndRel < 0 {
+			return strings.TrimSpace(text[:start])
+		}
+		afterOpen := start + tagEndRel + 1
+		closeRel := strings.Index(lower[afterOpen:], "</think>")
+		if closeRel < 0 {
+			return strings.TrimSpace(text[:start])
+		}
+		closeEnd := afterOpen + closeRel + len("</think>")
+		text = strings.TrimSpace(text[:start]) + "\n" + strings.TrimSpace(text[closeEnd:])
+	}
 }
 
 func stripGemmaChannelBlocks(text string) string {
@@ -7893,6 +9917,51 @@ func validInlineToolCalls(calls []llm.ToolCallDef, toolDefs []llm.ToolDef) []llm
 		}
 	}
 	return out
+}
+
+func parseConstrainedToolArgsContent(text string, toolDef llm.ToolDef) []llm.ToolCallDef {
+	if strings.TrimSpace(toolDef.Function.Name) == "" {
+		return nil
+	}
+	var candidates []string
+	candidates = append(candidates, fencedJSONBlocks(text)...)
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") {
+		candidates = append(candidates, trimmed)
+	}
+	if obj := firstJSONObject(text); len(obj) > 0 {
+		if data, err := json.Marshal(obj); err == nil {
+			candidates = append(candidates, string(data))
+		}
+	}
+	for _, candidate := range candidates {
+		var args map[string]interface{}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(candidate)), &args); err != nil || len(args) == 0 {
+			continue
+		}
+		if _, hasName := args["name"]; hasName {
+			continue
+		}
+		if _, hasTool := args["tool"]; hasTool {
+			continue
+		}
+		raw, err := json.Marshal(args)
+		if err != nil {
+			continue
+		}
+		call := llm.ToolCallDef{
+			ID:   "schema_1",
+			Type: "function",
+			Function: llm.FunctionCall{
+				Name:      toolDef.Function.Name,
+				Arguments: raw,
+			},
+		}
+		if valid := validInlineToolCalls([]llm.ToolCallDef{call}, []llm.ToolDef{toolDef}); len(valid) == 1 {
+			return valid
+		}
+	}
+	return nil
 }
 
 func invalidInlineToolCall(call llm.ToolCallDef) bool {
@@ -8590,23 +10659,17 @@ func inferInlineToolName(args map[string]interface{}, allowed map[string]bool) s
 		if allowed["shell"] {
 			return "shell"
 		}
-		if allowed["bash"] {
-			return "bash"
-		}
 	}
 	if _, ok := args["query"]; ok && allowed["session_search"] {
 		return "session_search"
 	}
 	if val, ok := args["path"]; ok {
 		path := fmt.Sprint(val)
-		if strings.HasSuffix(strings.ToLower(path), ".pdf") && allowed["read_pdf"] {
-			return "read_pdf"
+		if strings.HasSuffix(strings.ToLower(path), ".pdf") && allowed["read"] {
+			return "read"
 		}
-		if allowed["read_file"] {
-			return "read_file"
-		}
-		if allowed["read_pdf"] {
-			return "read_pdf"
+		if allowed["read"] {
+			return "read"
 		}
 	}
 	if val, ok := args["pattern"]; ok {
@@ -8672,11 +10735,11 @@ func inlineFunctionArgs(name, arg string) map[string]interface{} {
 		return nil
 	}
 	switch name {
-	case "shell", "bash":
+	case "shell":
 		return map[string]interface{}{"command": plain}
 	case "session_search":
 		return map[string]interface{}{"query": plain, "limit": 10}
-	case "read_file", "read_pdf":
+	case "read":
 		return map[string]interface{}{"path": plain}
 	case "glob":
 		return map[string]interface{}{"pattern": plain}
@@ -8728,11 +10791,11 @@ func inlineToolArgs(name, body string) map[string]interface{} {
 			return nil
 		}
 		switch name {
-		case "shell", "bash":
+		case "shell":
 			args["command"] = plain
 		case "session_search":
 			args["query"] = plain
-		case "read_file", "read_pdf":
+		case "read":
 			args["path"] = plain
 		case "glob":
 			args["pattern"] = plain
@@ -8810,6 +10873,8 @@ func isOperationalTargetTask(lower string) bool {
 		"htb", "hackthebox", "ctf", "kali", "wsl", "pentest", "penetration test",
 		"target ip", "target url", ".htb", "foothold", "privesc", "privilege escalation",
 		"user flag", "root flag", "nmap", "ffuf", "gobuster", "burp", "freepbx",
+		"/etc/hosts", "hosts file", "host header", "resolve", "resolves", "dns",
+		"ping", "http reachability", "webshell", "web shell", "current box ip", "box ip",
 	)
 }
 
@@ -8923,8 +10988,9 @@ func looksConversational(text string) bool {
 //     yet been called; tool definitions are still sent for KV-cache efficiency.
 //   - "auto"  → model decides (default during any task turn or after tool use).
 //
-// We deliberately avoid "required" because local models can stall or loop when
-// forced to produce a tool call they don't need.
+// Normal mid-task turns stay "auto". The agent loop can still apply a one-shot
+// "required" latch after repeated narration-only recovery turns, where the
+// model has already said it needs to act but keeps ending without a tool call.
 func toolChoiceFor(firstUserText string, autoContinues int, totalToolCallsMade int) string {
 	// Mid-task turns: always let the model decide freely.
 	if autoContinues > 0 || totalToolCallsMade > 0 {
@@ -8952,16 +11018,14 @@ func toolDefsAndChoiceForTurn(registry *tools.Registry, cfg settings.ToolsConfig
 	enabled := settings.EffectiveEnabledTools(cfg)
 	if shouldHideHostResearchTools(cfg, firstUserText) {
 		enabled = cloneToolEnabledMap(enabled)
-		for _, name := range []string{
-			"web_search", "fetch_url",
-			"browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_extract", "browser_screenshot", "browser_close", "browser_agent",
-		} {
+		for _, name := range []string{"web_search", "fetch_url", "browser"} {
 			enabled[name] = false
 		}
-		enabled["subagent_research"] = false
+		enabled["task"] = false
 	}
-	defs := registry.ToEnabledToolDefs(enabled)
-	if enabled[reasoningEffortToolName] {
+	selected := selectToolsForTurn(cfg, firstUserText, autoContinues, totalToolCallsMade)
+	defs := registry.ToEnabledToolDefsFor(enabled, selected)
+	if enabled[reasoningEffortToolName] && selected[reasoningEffortToolName] {
 		defs = appendReasoningEffortToolDef(defs)
 	}
 	// A "required" choice with no tools to call is invalid and strict
@@ -9006,7 +11070,7 @@ func documentationRecoveryPrompt(prompt, stopReason, stopDetail string) string {
 	if stopDetail != "" {
 		sb.WriteString("Stop detail: " + truncateRunes(stopDetail, 240) + " ")
 	}
-	sb.WriteString("Do not perform more web, browser, or shell research now. Use read_file/glob/grep if needed, then call write_file or edit_file to update the requested documentation with the verified facts gathered so far. If the named file is missing, create it in the active workspace using the requested name or the closest existing writeup name from the prompt. Original user request: ")
+	sb.WriteString("Do not perform more web, browser, or shell research now. Use read/glob/grep if needed, then call write or edit to update the requested documentation with the verified facts gathered so far. If the named file is missing, create it in the active workspace using the requested name or the closest existing writeup name from the prompt. Original user request: ")
 	sb.WriteString(truncateRunes(prompt, 300))
 	return sb.String()
 }
@@ -9025,6 +11089,8 @@ func looksShellCentricTask(text string) bool {
 		"htb", "hackthebox", "hack the box",
 		"hack the target", "hacking the target", "target and get user", "get user and root",
 		"pentest", "penetration test", "lab target", "target ip", "target url",
+		"current box ip", "box ip", "/etc/hosts", "hosts file", "resolve", "resolves", "dns", "ping",
+		"http reachability", "webshell", "web shell",
 		"wsl", "kali", "vpn", "tun0", "sudo", "nmap", "gobuster", "ffuf", "feroxbuster", "dirsearch", "nikto", "searchsploit",
 		"user.txt", "root.txt", "user flag", "root flag", "get user", "get root", "foothold", "privilege escalation", "privesc", "recon", "enumerate", "enumeration",
 		"dvwa", "command injection", "cmd injection", "sql injection", "sqli", "xss", "lfi", "rfi", "ssrf",
@@ -9113,5 +11179,5 @@ func extractPath(tc llm.ToolCallDef) string {
 }
 
 func isWriteTool(name string) bool {
-	return name == "write_file" || name == "edit_file"
+	return name == "write_file" || name == "edit_file" || name == "write" || name == "edit"
 }

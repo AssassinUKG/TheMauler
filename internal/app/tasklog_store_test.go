@@ -32,7 +32,7 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 		t.Fatal(err)
 	}
 	run.Summary = "replaced"
-	run.Tools = append(run.Tools, TaskToolEvent{Name: "write_file", Status: "done", Timestamp: "2026-06-15T10:00:40+01:00"})
+	run.Tools = append(run.Tools, TaskToolEvent{Name: "write", Status: "done", Timestamp: "2026-06-15T10:00:40+01:00"})
 	if err := saveTaskRunDB(db, run, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,53 @@ func TestTaskRunDBRetentionAndClear(t *testing.T) {
 	}
 	if len(runs) != 0 {
 		t.Fatalf("clear left runs: %#v", runs)
+	}
+}
+
+func TestClearTaskRunsAlsoClearsLegacyJSON(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	app := &App{db: db}
+	legacy := []TaskRun{{
+		ID:        "task-legacy",
+		Prompt:    "old run",
+		Status:    "stopped",
+		StartedAt: "2026-06-15T12:00:00+01:00",
+	}}
+	if err := saveTaskRuns(legacy); err != nil {
+		t.Fatalf("save legacy json: %v", err)
+	}
+	if err := migrateTaskRunsJSONToDB(db); err != nil {
+		t.Fatalf("migrate legacy json: %v", err)
+	}
+	if err := app.ClearTaskRuns(); err != nil {
+		t.Fatalf("clear task runs: %v", err)
+	}
+	jsonRuns, err := loadTaskRuns()
+	if err != nil {
+		t.Fatalf("load legacy json: %v", err)
+	}
+	if len(jsonRuns) != 0 {
+		t.Fatalf("legacy task-runs json retained stale runs: %#v", jsonRuns)
+	}
+	freshDB, err := store.Open(filepath.Join(t.TempDir(), "fresh-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer freshDB.Close()
+	if err := migrateTaskRunsJSONToDB(freshDB); err != nil {
+		t.Fatalf("fresh migration: %v", err)
+	}
+	runs, err := loadTaskRunsDB(freshDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("stale task-runs json was re-imported: %#v", runs)
 	}
 }
 

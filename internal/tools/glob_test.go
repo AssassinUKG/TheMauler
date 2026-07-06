@@ -97,7 +97,7 @@ func TestGlobMasterSkillNoMatchHintsRegisteredSkill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "skill_view") || !strings.Contains(out, "name\":\"master") {
+	if !strings.Contains(out, "skill") || !strings.Contains(out, `"mode":"view"`) || !strings.Contains(out, "name\":\"master") {
 		t.Fatalf("expected registered master skill hint, got %q", out)
 	}
 }

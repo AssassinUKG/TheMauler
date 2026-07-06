@@ -92,6 +92,12 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   }, [selectedProfile, selected])
 
   useEffect(() => {
+    if (selected?.provider && profilesFile?.providers?.[selected.provider]) {
+      setSelectedProviderName(selected.provider)
+    }
+  }, [selectedProfile, selected?.provider, profilesFile?.providers])
+
+  useEffect(() => {
     if (!selectedProviderName && activeProfile?.provider) setSelectedProviderName(activeProfile.provider)
   }, [activeProfile?.provider, selectedProviderName])
 
@@ -238,7 +244,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
             addMatrixLog('loop', `Running mini agent loop for ${label}`, 'run')
             const loop = await RunMiniAgentLoopBenchmark(rowProfile, provider)
             setMatrixRows(rows => rows.map(row => row.run.id === result.id ? { ...row, loop } : row))
-            addMatrixLog('loop', `${label}: loop ${loop.pass ? 'pass' : 'fail'} (${loop.tool_calls ?? 0} tools, ${Math.round((loop.duration_ms ?? 0) / 1000)}s)`, loop.pass ? 'ok' : 'warn')
+            addMatrixLog('loop', `${label}: loop ${loop.pass ? 'pass' : 'fail'} score ${loop.stability_score ?? 0}, success ${loop.tool_success_rate ?? 0}% (${loop.tool_calls ?? 0} tools, ${Math.round((loop.duration_ms ?? 0) / 1000)}s)`, loop.pass ? 'ok' : 'warn')
           } catch (e) {
             const failed: ProfileBenchmarkResult = {
               status: 'warn',
@@ -511,7 +517,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
                 <div><span>1</span><strong>Load</strong><em>request ctx 8k or 16k</em></div>
                 <div><span>2</span><strong>Verify</strong><em>record actual context</em></div>
                 <div><span>3</span><strong>Text</strong><em>256-token speed prompt</em></div>
-                <div><span>4</span><strong>Tool</strong><em>required read_file call</em></div>
+                <div><span>4</span><strong>Tool</strong><em>required read call</em></div>
                 <div><span>5</span><strong>Loop</strong><em>read/write/verify mini task</em></div>
               </div>
             </section>
@@ -577,7 +583,7 @@ function MatrixTable({ rows }: { rows: MatrixRow[] }) {
               <span>{run.status}</span>
               <span>{run.tokens_per_second ? run.tokens_per_second.toFixed(1) : '0.0'}</span>
               <span title="structured/repaired">{toolCase ? `${toolCase.structured_tools ?? 0}/${toolCase.repaired_tools ?? 0}` : 'n/a'}</span>
-              <span title={row.loop?.fail_reason || ''}>{row.loop ? (row.loop.pass ? `pass ${row.loop.tool_calls}` : `fail ${row.loop.tool_calls}`) : 'pending'}</span>
+              <span title={loopReliabilityTitle(row.loop)}>{row.loop ? loopReliabilityLabel(row.loop) : 'pending'}</span>
               <span>{run.ttf_ms ? `${run.ttf_ms} ms` : 'n/a'}</span>
               <span>{run.total_ms ? `${(run.total_ms / 1000).toFixed(1)}s` : 'n/a'}</span>
               <span title={[run.summary, ...(run.notes ?? [])].join('\n')}>{run.summary || run.notes?.[0] || '-'}</span>
@@ -692,7 +698,13 @@ function AgentEvalPanel({ report }: { report: AgentEvalReport | null }) {
         {report.results.map(result => (
           <div className={`agent-eval-card ${result.pass ? 'ok' : 'warn'}`} key={result.name}>
             <div className="agent-eval-title"><strong>{result.name}</strong><span>{result.status}</span></div>
-            <div className="agent-eval-metrics">{result.tool_calls} tools / {result.auto_continues} continues / {Math.round((result.duration_ms || 0) / 1000)}s</div>
+            <div className="agent-eval-metrics">{result.tool_calls} tools / score {result.stability_score ?? 0} / success {result.tool_success_rate ?? 0}% / repeats {result.repeat_tool_rate ?? 0}% / {Math.round((result.duration_ms || 0) / 1000)}s</div>
+            <div className="agent-eval-dimensions">
+              <span className={result.status_pass ? 'ok' : 'warn'}>status</span>
+              <span className={result.artifact_pass ? 'ok' : 'warn'}>artifact</span>
+              <span className={result.hygiene_pass ? 'ok' : 'warn'}>hygiene</span>
+              <span className={result.false_done ? 'warn' : 'ok'}>false-done</span>
+            </div>
             {result.fail_reason && <div className="agent-eval-fail">{result.fail_reason}</div>}
           </div>
         ))}
@@ -863,7 +875,7 @@ function matrixSpeedScenario(): BenchmarkSpecInput {
 function matrixToolScenario(): BenchmarkSpecInput {
   return {
     name: 'Tool call',
-    system: 'You are testing tool protocol reliability. Use the available read_file tool exactly once.',
+    system: 'You are testing tool protocol reliability. Use the available read tool exactly once.',
     user: 'Read the file notes.txt and answer with one short sentence about what it contains.',
     max_tokens: 128,
     temperature: 0,
@@ -914,14 +926,36 @@ function buildMatrixSummary(rows: MatrixRow[]) {
   return {
     rows: rows.length,
     bestText: bestTextRow ? `${shortModelName(bestTextRow.run.model_id || '')} ${bestTextRow.run.tokens_per_second?.toFixed(1)} tok/s` : 'n/a',
-    bestLoop: bestLoopRow ? `${shortModelName(bestLoopRow.run.model_id || '')} ${bestLoopRow.loop?.tool_calls ?? 0} tools` : 'n/a',
+    bestLoop: bestLoopRow ? `${shortModelName(bestLoopRow.run.model_id || '')} score ${bestLoopRow.loop?.stability_score ?? 0}` : 'n/a',
     toolOK: rows.length ? `${toolOK}/${rows.length}` : '0/0',
     failures,
   }
 }
 
+function loopReliabilityLabel(loop?: AgentEvalResult) {
+  if (!loop) return 'pending'
+  const status = loop.pass ? 'pass' : 'fail'
+  return `${status} s${loop.stability_score ?? 0} ${loop.tool_success_rate ?? 0}%`
+}
+
+function loopReliabilityTitle(loop?: AgentEvalResult) {
+  if (!loop) return ''
+  return [
+    loop.fail_reason || '',
+    `tools=${loop.tool_calls ?? 0}`,
+    `success=${loop.tool_success_rate ?? 0}%`,
+    `repeats=${loop.repeat_tool_rate ?? 0}%`,
+    `repeated_inputs=${loop.repeated_tool_inputs ?? 0}`,
+    `repeated_skips=${loop.repeated_skips ?? 0}`,
+    `verifier_prompts=${loop.verifier_prompts ?? 0}`,
+    `max_routed_tools=${loop.max_routed_tools ?? 0}`,
+    `prompt_warnings=${loop.prompt_warnings ?? 0}`,
+    `false_done=${Boolean(loop.false_done)}`,
+  ].filter(Boolean).join('\n')
+}
+
 function matrixRowsToCSV(rows: MatrixRow[]) {
-  const header = ['model', 'requested_ctx', 'actual_ctx', 'status', 'text_tps', 'tool_structured', 'tool_repaired', 'loop_pass', 'loop_tools', 'loop_duration_ms', 'ttft_ms', 'total_ms', 'summary']
+  const header = ['model', 'requested_ctx', 'actual_ctx', 'status', 'text_tps', 'tool_structured', 'tool_repaired', 'loop_pass', 'loop_tools', 'loop_success_rate', 'loop_repeat_rate', 'loop_stability_score', 'loop_max_routed_tools', 'loop_prompt_warnings', 'loop_false_done', 'loop_duration_ms', 'ttft_ms', 'total_ms', 'summary']
   const lines = rows.map(row => {
     const toolCase = row.run.scenarios?.find(sc => sc.name === 'Tool call')
     return [
@@ -934,6 +968,12 @@ function matrixRowsToCSV(rows: MatrixRow[]) {
       toolCase?.repaired_tools ?? '',
       row.loop ? String(row.loop.pass) : '',
       row.loop?.tool_calls ?? '',
+      row.loop?.tool_success_rate ?? '',
+      row.loop?.repeat_tool_rate ?? '',
+      row.loop?.stability_score ?? '',
+      row.loop?.max_routed_tools ?? '',
+      row.loop?.prompt_warnings ?? '',
+      row.loop ? String(Boolean(row.loop.false_done)) : '',
       row.loop?.duration_ms ?? '',
       row.run.ttf_ms ?? '',
       row.run.total_ms ?? '',

@@ -1,6 +1,11 @@
 package app
 
-import "sync"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"sync"
+)
 
 // terminalScrollback is a fixed-capacity rolling buffer of terminal lines. It is
 // populated by pipeShellOutput for every live shell session and snapshotted by
@@ -52,6 +57,27 @@ func (s *terminalScrollback) tail(n int) []string {
 	return out
 }
 
+// since returns lines appended after a previously captured length. If the buffer
+// rolled over, it returns the surviving tail rather than old unrelated lines.
+func (s *terminalScrollback) since(before int, limit int) []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if before < 0 {
+		before = 0
+	}
+	if before > len(s.lines) {
+		before = len(s.lines)
+	}
+	out := append([]string{}, s.lines[before:]...)
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
 // length reports how many lines are currently buffered.
 func (s *terminalScrollback) length() int {
 	if s == nil {
@@ -60,4 +86,44 @@ func (s *terminalScrollback) length() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.lines)
+}
+
+// search returns matching scrollback lines with stable line numbers from the
+// current buffer. pattern is treated as a regexp when valid, otherwise as a
+// case-insensitive literal substring.
+func (s *terminalScrollback) search(pattern string, limit int) []string {
+	if s == nil {
+		return nil
+	}
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return nil
+	}
+	if limit <= 0 || limit > maxTerminalReadLines {
+		limit = maxTerminalReadLines
+	}
+	var re *regexp.Regexp
+	if compiled, err := regexp.Compile(pattern); err == nil {
+		re = compiled
+	}
+	needle := strings.ToLower(pattern)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, limit)
+	for i, line := range s.lines {
+		matched := false
+		if re != nil {
+			matched = re.MatchString(line)
+		} else {
+			matched = strings.Contains(strings.ToLower(line), needle)
+		}
+		if !matched {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%d: %s", i+1, line))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }

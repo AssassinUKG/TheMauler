@@ -12,11 +12,72 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 36px;
-  padding: 5px 10px;
+  min-height: 54px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--c-panel);
   flex-shrink: 0;
+}
+
+.file-viewer-left {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  flex: 1;
+}
+
+.open-file-strip {
+  min-width: 0;
+  display: flex;
+  gap: 5px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.open-file-pill {
+  max-width: 220px;
+  min-width: 80px;
+  height: 28px;
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 7px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg2);
+  color: var(--text-dim);
+}
+
+.open-file-pill.active {
+  color: var(--text-bright);
+  border-color: var(--accent);
+  background: var(--c-card-hover);
+}
+
+.open-file-pill span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.open-file-pill i {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-style: normal;
+  line-height: 1;
+}
+
+.open-file-pill i:hover {
+  color: var(--text-bright);
+  background: var(--red);
 }
 
 .file-viewer-title {
@@ -59,6 +120,18 @@
   border-radius: 5px;
   font-size: 12px;
   padding: 3px 8px;
+}
+
+.file-viewer-actions .file-close-btn {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--c-card);
+}
+
+.file-viewer-actions .file-close-btn:hover {
+  border-color: var(--red);
+  color: var(--text-bright);
+  background: var(--red);
 }
 
 .file-viewer-actions select {
@@ -231,12 +304,12 @@
 
 /* Run button */
 .run-btn {
-  background: #1a4a1a !important;
-  border-color: #2d7a2d !important;
+  background: var(--c-card) !important;
+  border-color: var(--green) !important;
   color: var(--green) !important;
 }
 .run-btn:hover {
-  background: #205220 !important;
+  background: var(--c-card-hover) !important;
 }
 
 /* Artifact output panel */

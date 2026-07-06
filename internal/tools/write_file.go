@@ -48,6 +48,11 @@ func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) 
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("write_file: bad params: %w", err)
 	}
+	cleanPath, err := cleanCompactPathArgFor("write_file", p.Path)
+	if err != nil {
+		return "", fmt.Errorf("write_file: %w", err)
+	}
+	p.Path = cleanPath
 	if p.Path == "" {
 		return "", fmt.Errorf("write_file: path is required")
 	}

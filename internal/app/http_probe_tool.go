@@ -14,6 +14,8 @@ import (
 
 	"mauler/internal/ledger"
 	"mauler/internal/llm"
+	"mauler/internal/settings"
+	"mauler/internal/tools"
 )
 
 type httpProbeTool struct{ app *App }
@@ -23,7 +25,7 @@ func (t *httpProbeTool) Name() string { return "http_probe" }
 func (t *httpProbeTool) Destructive() bool { return false }
 
 func (t *httpProbeTool) Description() string {
-	return "Run a bounded HTTP probe pipeline through the configured shell backend and return a compact summary plus a raw artifact path. Use instead of many repeated curl calls when checking base paths, redirects, headers, server/version, and common access errors."
+	return "Run a bounded HTTP probe pipeline through the configured shell backend and return a compact summary plus a raw artifact path saved in the workspace root. Use instead of many repeated curl calls when checking base paths, redirects, headers, server/version, common access errors, cookies/auth headers, or small path lists. Inspect the saved artifact with grep/read if the raw response matters, instead of rerunning the same live probe."
 }
 
 func (t *httpProbeTool) Schema() json.RawMessage {
@@ -31,7 +33,7 @@ func (t *httpProbeTool) Schema() json.RawMessage {
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "url": {"type": "string", "description": "Base URL to probe, e.g. http://connected.htb/"},
+    "url": {"type": "string", "description": "Base URL to probe, e.g. http://boxname.htb/"},
     "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional paths to probe relative to url. Defaults to /, /admin/, /robots.txt."},
     "max_paths": {"type": "integer", "minimum": 1, "maximum": 12, "description": "Maximum paths to probe. Default 8."},
     "timeout": {"type": "integer", "minimum": 2, "maximum": 30, "description": "Per-request curl max-time seconds. Default 10."},
@@ -66,18 +68,27 @@ func (t *httpProbeTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 	if timeout <= 0 || timeout > 30 {
 		timeout = 10
 	}
-	artifactPath, err := httpProbeArtifactPath(base)
+	artifactPath, shellArtifactPath, err := httpProbeArtifactPath(base, t.app.cfg.Tools)
 	if err != nil {
 		return "", err
 	}
-	command := buildHTTPProbeCommand(base, paths, args.Headers, timeout, artifactPath)
+	command := buildHTTPProbeCommand(base, paths, args.Headers, timeout, shellArtifactPath, artifactPath)
 	cmdArgs, _ := marshalToolArgsNoHTMLEscape(map[string]any{
 		"command": command,
 		"timeout": min(300, max(30, timeout*len(paths)+15)),
 		"verbose": false,
 	})
 	out, runErr := t.app.registry.Run(ctx, llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: cmdArgs}})
+	artifactOK, artifactErr := ensureHTTPProbeArtifact(artifactPath, out)
 	summary := summarizeHTTPProbeOutput(out, artifactPath)
+	if artifactErr != nil {
+		summary = strings.TrimSpace(summary) + "\nArtifact unavailable: " + artifactErr.Error()
+	}
+	var artifacts []string
+	if artifactOK {
+		artifacts = []string{artifactPath}
+		t.app.emit("mauler:workspace_changed", filepath.Dir(artifactPath))
+	}
 	t.app.recordLedger(ledger.Event{
 		Kind:      "pipeline",
 		Source:    "tool",
@@ -86,7 +97,7 @@ func (t *httpProbeTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 		Message:   base,
 		Detail:    strings.Join(paths, ", "),
 		Output:    summary,
-		Artifacts: []string{artifactPath},
+		Artifacts: artifacts,
 		Metadata: map[string]string{
 			"paths":   fmt.Sprintf("%d", len(paths)),
 			"timeout": fmt.Sprintf("%d", timeout),
@@ -96,6 +107,26 @@ func (t *httpProbeTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 		return summary, runErr
 	}
 	return summary, nil
+}
+
+func ensureHTTPProbeArtifact(artifactPath, capturedOutput string) (bool, error) {
+	if strings.TrimSpace(artifactPath) == "" {
+		return false, fmt.Errorf("empty artifact path")
+	}
+	if info, err := os.Stat(artifactPath); err == nil && info.Size() > 0 {
+		return true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
+		return false, err
+	}
+	body := strings.TrimRight(capturedOutput, "\r\n")
+	if body == "" {
+		body = "[http_probe produced no captured shell output]"
+	}
+	if err := os.WriteFile(artifactPath, []byte(body+"\n"), 0o640); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func normaliseProbePaths(paths []string, maxPaths int) []string {
@@ -130,24 +161,39 @@ func normaliseProbePaths(paths []string, maxPaths int) []string {
 	return out
 }
 
-func httpProbeArtifactPath(base string) (string, error) {
+func httpProbeArtifactPath(base string, cfg settings.ToolsConfig) (string, string, error) {
 	u, _ := url.Parse(base)
 	host := strings.TrimSpace(u.Hostname())
 	if host == "" {
 		host = "target"
 	}
 	safe := regexp.MustCompile(`[^a-zA-Z0-9._-]+`).ReplaceAllString(host, "_")
-	dir := filepath.Join(".mauler_artifacts", "http_probe")
+	dir := "."
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("%s_%s.txt", safe, time.Now().Format("20060102_150405")))), nil
+	hostPath, err := filepath.Abs(filepath.Join(dir, fmt.Sprintf("http_probe_%s_%s.txt", safe, time.Now().Format("20060102_150405"))))
+	if err != nil {
+		return "", "", err
+	}
+	displayPath := filepath.ToSlash(hostPath)
+	shellPath := displayPath
+	if strings.EqualFold(strings.TrimSpace(cfg.ShellBackend), "wsl") {
+		shellPath = tools.WindowsPathToWSL(displayPath)
+		if strings.TrimSpace(shellPath) == "" {
+			return "", "", fmt.Errorf("http_probe: could not convert artifact path %q to WSL path", displayPath)
+		}
+	}
+	return displayPath, shellPath, nil
 }
 
-func buildHTTPProbeCommand(base string, paths, headers []string, timeout int, artifactPath string) string {
+func buildHTTPProbeCommand(base string, paths, headers []string, timeout int, shellArtifactPath, displayArtifactPath string) string {
+	if strings.TrimSpace(shellArtifactPath) == "" {
+		shellArtifactPath = displayArtifactPath
+	}
 	var sb strings.Builder
 	sb.WriteString("set -o pipefail 2>/dev/null || true; ")
-	sb.WriteString("out=" + terminalShellQuote(artifactPath) + "; mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; ")
+	sb.WriteString("out=" + terminalShellQuote(shellArtifactPath) + "; mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; ")
 	for _, p := range paths {
 		target := joinProbeURL(base, p)
 		sb.WriteString("printf '%s\\n' " + terminalShellQuote("=== "+p+" "+target+" ===") + " | tee -a \"$out\" >/dev/null; ")
@@ -163,7 +209,7 @@ func buildHTTPProbeCommand(base string, paths, headers []string, timeout int, ar
 		sb.WriteString(terminalShellQuote(target))
 		sb.WriteString(" 2>&1 | tee -a \"$out\"; printf '\\n' | tee -a \"$out\" >/dev/null; ")
 	}
-	sb.WriteString("printf '%s\\n' " + terminalShellQuote("__MAULER_HTTP_PROBE_ARTIFACT__="+artifactPath))
+	sb.WriteString("printf '%s\\n' " + terminalShellQuote("__MAULER_HTTP_PROBE_ARTIFACT__="+displayArtifactPath))
 	return sb.String()
 }
 

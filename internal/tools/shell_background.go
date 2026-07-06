@@ -222,6 +222,7 @@ func startBackgroundShellJob(command string, verbose bool) (string, error) {
 	})
 
 	var sb strings.Builder
+	sb.WriteString(shellResultContract("shell", backend, "started", -1, wd, id, "poll shell job after backoff", ""))
 	fmt.Fprintf(&sb, "Started background job %s on the %s backend: %s\n", id, backend, command)
 	fmt.Fprintf(&sb, "Output is streaming to %s.\n", logPath)
 	fmt.Fprintf(&sb, "Poll after %s with {\"job\":\"%s\"}; use {\"job\":\"%s\",\"verbose\":true} for a larger output tail.",
@@ -258,8 +259,9 @@ func pollBackgroundShellJob(id string, verbose bool) (string, error) {
 			}
 			elapsedTotal := now.Sub(job.started).Round(time.Second)
 			job.mu.Unlock()
-			return fmt.Sprintf("[background job %s: %s, %s elapsed] poll skipped: too early; wait %s before polling again. Backoff schedule: 1s, 2s, 3s, 5s, 8s, 13s, then 30s.",
-				id, state, elapsedTotal, wait), nil
+			body := fmt.Sprintf("[background job %s: %s, %s elapsed] poll skipped: too early; wait %s before polling again. Backoff schedule: 1s, 2s, 3s, 5s, 8s, 13s, then 30s.",
+				id, state, elapsedTotal, wait)
+			return shellResultContract("shell", "background", state, -1, "", id, "wait then poll shell job", body), nil
 		}
 	}
 	done := job.done
@@ -304,7 +306,14 @@ func pollBackgroundShellJob(id string, verbose bool) (string, error) {
 		ElapsedSec: int(elapsed.Seconds()), NextPollSec: nextPollSec, Verbose: verbose,
 		ExitCode: exitCode, Done: done,
 	})
-	return text + "\n\n" + footer, nil
+	nextTool := "poll shell job after backoff"
+	if done {
+		nextTool = "proceed"
+		if exitCode != 0 {
+			nextTool = "inspect error or change command"
+		}
+	}
+	return shellResultContract("shell", "background", state, exitCode, "", id, nextTool, text+"\n\n"+footer), nil
 }
 
 func backgroundJobPollInterval(polls int) time.Duration {

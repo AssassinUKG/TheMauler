@@ -44,9 +44,30 @@ func TestBuildSystemPromptPointsMasterRequestsAtSkillView(t *testing.T) {
 
 	prompt := buildSystemPrompt(cfg, AgentMode{Name: "Ops"}, nil, nil)
 
-	for _, want := range []string{"registered as skill `master`", "call skill_view with name `master`", "instead of searching the workspace for master_skill.md"} {
+	for _, want := range []string{"registered as skill `master`", "call skill with mode=view and name `master`", "instead of searching the workspace for master_skill.md"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSaveMasterSkillSourceUsesTheMaulerAdapterContract(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	source := filepath.Join(t.TempDir(), "master_skill.md")
+	mustWrite(t, source, "# Master\n\nUse this workflow.")
+	skill, _, err := saveMasterSkillSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"TheMauler's system prompt",
+		"focused query",
+		"terminal_send",
+		"evidence policy",
+		"Do not load or summarize the entire external source",
+	} {
+		if !strings.Contains(skill.Body, want) {
+			t.Fatalf("master adapter body missing %q:\n%s", want, skill.Body)
 		}
 	}
 }
@@ -108,7 +129,7 @@ func TestRelevantSkillsAnnotatesUnavailableRequirements(t *testing.T) {
 		Description:   "Use for shell probe work",
 		Version:       "1.0.0",
 		Tags:          []string{"probe"},
-		RequiredTools: []string{"shell", "write_file"},
+		RequiredTools: []string{"shell", "write"},
 		ShellBackend:  "wsl",
 		NeedsWrite:    true,
 		Body:          "Run the probe.",

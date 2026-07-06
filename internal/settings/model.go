@@ -84,6 +84,11 @@ type ToolsConfig struct {
 	Toolsets                 map[string][]string `toml:"toolsets" json:"toolsets"`
 	EnabledTools             map[string]bool     `toml:"enabled_tools" json:"enabled_tools"`
 	SafeRules                []ToolSafeRule      `toml:"safe_rules" json:"safe_rules"`
+	// ToolGrammarConstraint, when true, sends a GBNF grammar that forces valid
+	// tool-call JSON for non-native (repair-text/mixed) local models. Off by
+	// default; experimental and backend-specific — verify against the running
+	// llama.cpp build before relying on it.
+	ToolGrammarConstraint bool `toml:"tool_grammar_constraint" json:"tool_grammar_constraint"`
 }
 
 // ToolSafeRule allows a previously approved exact tool request to run without
@@ -116,7 +121,7 @@ type AgentsConfig struct {
 	MaxRunSeconds         int                        `toml:"max_run_seconds" json:"max_run_seconds"` // 0 = unlimited
 	EscalationProfile     string                     `toml:"escalation_profile" json:"escalation_profile"`
 	RequirePlan           bool                       `toml:"require_plan" json:"require_plan"`
-	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (3)
+	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (2)
 	ReasoningEffort       string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | minimal | low | medium | high
 	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
 }
@@ -128,10 +133,45 @@ type WorkspaceFolder struct {
 }
 
 type LabContext struct {
-	Target         string `toml:"target" json:"target"`
-	VPNInterface   string `toml:"vpn_interface" json:"vpn_interface"`
-	LatestArtifact string `toml:"latest_artifact" json:"latest_artifact"`
-	OpsProfile     string `toml:"ops_profile" json:"ops_profile"`
+	ID               string `toml:"id" json:"id"`
+	Name             string `toml:"name" json:"name"`
+	Target           string `toml:"target" json:"target"`
+	Hostname         string `toml:"hostname" json:"hostname"`
+	VPNInterface     string `toml:"vpn_interface" json:"vpn_interface"`
+	LatestArtifact   string `toml:"latest_artifact" json:"latest_artifact"`
+	OpsProfile       string `toml:"ops_profile" json:"ops_profile"`
+	EvidencePolicy   string `toml:"evidence_policy" json:"evidence_policy"`     // discovery_first | research_assisted | reference_allowed | fastest_path
+	AccessPreference string `toml:"access_preference" json:"access_preference"` // auto | webshell | reverse_shell | bind_shell | none
+	Notes            string `toml:"notes" json:"notes"`
+}
+
+type LabProfile struct {
+	ID               string `toml:"id" json:"id"`
+	Name             string `toml:"name" json:"name"`
+	WorkspaceDir     string `toml:"workspace_dir" json:"workspace_dir"`
+	Target           string `toml:"target" json:"target"`
+	Hostname         string `toml:"hostname" json:"hostname"`
+	VPNInterface     string `toml:"vpn_interface" json:"vpn_interface"`
+	LatestArtifact   string `toml:"latest_artifact" json:"latest_artifact"`
+	OpsProfile       string `toml:"ops_profile" json:"ops_profile"`
+	EvidencePolicy   string `toml:"evidence_policy" json:"evidence_policy"`
+	AccessPreference string `toml:"access_preference" json:"access_preference"`
+	Notes            string `toml:"notes" json:"notes"`
+}
+
+type EnvironmentConfig struct {
+	MainOS               string `toml:"main_os" json:"main_os"`                   // auto | windows | linux | macos
+	AIShellBackend       string `toml:"ai_shell_backend" json:"ai_shell_backend"` // auto | powershell | cmd | bash | wsl
+	AIShellDistro        string `toml:"ai_shell_distro" json:"ai_shell_distro"`
+	AIShellUser          string `toml:"ai_shell_user" json:"ai_shell_user"`
+	TargetWorkBackend    string `toml:"target_work_backend" json:"target_work_backend"` // ai_shell | windows_powershell | wsl | bash
+	ListenerBackend      string `toml:"listener_backend" json:"listener_backend"`       // windows_powershell | ai_shell | wsl | bash | manual
+	ListenerCommand      string `toml:"listener_command" json:"listener_command"`
+	LHOSTSource          string `toml:"lhost_source" json:"lhost_source"` // selected_vpn_interface | manual | auto
+	ManualLHOST          string `toml:"manual_lhost" json:"manual_lhost"`
+	PreferTerminalTools  bool   `toml:"prefer_terminal_tools" json:"prefer_terminal_tools"`
+	ReverseShellGuidance string `toml:"reverse_shell_guidance" json:"reverse_shell_guidance"`
+	UserCorrectionPolicy string `toml:"user_correction_policy" json:"user_correction_policy"` // latest_user_wins | normal
 }
 
 // ContextConfig holds context window and compaction settings.
@@ -146,6 +186,8 @@ type ContextConfig struct {
 	WorkspaceDir                string            `toml:"workspace_dir" json:"workspace_dir"`
 	OpenFolders                 []WorkspaceFolder `toml:"open_folders" json:"open_folders"`
 	Lab                         LabContext        `toml:"lab" json:"lab"`
+	ActiveLabProfile            string            `toml:"active_lab_profile" json:"active_lab_profile"`
+	LabProfiles                 []LabProfile      `toml:"lab_profiles" json:"lab_profiles"`
 }
 
 // MemoryConfig holds durable project-memory settings.
@@ -178,6 +220,26 @@ type ImageConfig struct {
 	WSLPathTranslate bool   `toml:"wsl_path_translate" json:"wsl_path_translate"`
 }
 
+// TelegramConfig holds remote bot settings. The bot runs through the channel
+// bus, so side chats, control commands, and work requests stay separate from
+// the active project run.
+type TelegramConfig struct {
+	Enabled           bool     `toml:"enabled" json:"enabled"`
+	Token             string   `toml:"token" json:"token"`
+	BotUsername       string   `toml:"bot_username" json:"bot_username"`
+	RequireMention    bool     `toml:"require_mention" json:"require_mention"`
+	AllowFrom         []string `toml:"allow_from" json:"allow_from"`
+	DefaultProject    string   `toml:"default_project" json:"default_project"`
+	DefaultProfile    string   `toml:"default_profile" json:"default_profile"`
+	DefaultMode       string   `toml:"default_mode" json:"default_mode"`
+	DefaultToolset    string   `toml:"default_toolset" json:"default_toolset"`
+	SendProgress      bool     `toml:"send_progress" json:"send_progress"`
+	ProgressIntervalS int      `toml:"progress_interval_s" json:"progress_interval_s"`
+	VoiceReplies      string   `toml:"voice_replies" json:"voice_replies"`           // off | on_voice | always
+	TranscriptionMode string   `toml:"transcription_mode" json:"transcription_mode"` // disabled | local | openai_compatible
+	TranscriptionURL  string   `toml:"transcription_url" json:"transcription_url"`
+}
+
 // UIConfig holds display and layout settings.
 type UIConfig struct {
 	Theme               string  `toml:"theme" json:"theme"` // mauler-ops | slate | light | dark legacy
@@ -208,16 +270,18 @@ type LoggingConfig struct {
 
 // Settings is the global (non-profile) configuration.
 type Settings struct {
-	ActiveProfile string        `toml:"active_profile" json:"active_profile"`
-	Tools         ToolsConfig   `toml:"tools" json:"tools"`
-	Agents        AgentsConfig  `toml:"agents" json:"agents"`
-	Context       ContextConfig `toml:"context" json:"context"`
-	Memory        MemoryConfig  `toml:"memory" json:"memory"`
-	Skills        SkillsConfig  `toml:"skills" json:"skills"`
-	Image         ImageConfig   `toml:"image" json:"image"`
-	UI            UIConfig      `toml:"ui" json:"ui"`
-	Logging       LoggingConfig `toml:"logging" json:"logging"`
-	LogLevel      string        `toml:"log_level" json:"log_level"`
+	ActiveProfile string            `toml:"active_profile" json:"active_profile"`
+	Tools         ToolsConfig       `toml:"tools" json:"tools"`
+	Agents        AgentsConfig      `toml:"agents" json:"agents"`
+	Environment   EnvironmentConfig `toml:"environment" json:"environment"`
+	Context       ContextConfig     `toml:"context" json:"context"`
+	Memory        MemoryConfig      `toml:"memory" json:"memory"`
+	Skills        SkillsConfig      `toml:"skills" json:"skills"`
+	Image         ImageConfig       `toml:"image" json:"image"`
+	Telegram      TelegramConfig    `toml:"telegram" json:"telegram"`
+	UI            UIConfig          `toml:"ui" json:"ui"`
+	Logging       LoggingConfig     `toml:"logging" json:"logging"`
+	LogLevel      string            `toml:"log_level" json:"log_level"`
 }
 
 // ProfilesFile is the top-level structure of profiles.toml.

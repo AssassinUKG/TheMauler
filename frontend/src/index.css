@@ -14,6 +14,9 @@
   --c-card-hover: #1d2a25;   /* card hover / active */
   --c-list: #0d1211;         /* scrolling list backgrounds */
   --c-terminal: #080d10;     /* terminal panel */
+  --c-sidebar: #0f1413;      /* left navigation/session sidebar */
+  --c-sidebar-card: #151b19;
+  --c-sidebar-hover: #203029;
   --border: #2b3a35;
   --text: #c9d7d0;
   --text-dim: #7f9289;
@@ -52,6 +55,9 @@
   --c-card-hover: #242424;
   --c-list: #141414;
   --c-terminal: #111820;
+  --c-sidebar: #181818;
+  --c-sidebar-card: #202020;
+  --c-sidebar-hover: #2d2d30;
   --border: #3e3e42;
   --text: #d4d4d4;
   --text-dim: #858585;
@@ -79,6 +85,9 @@
   --c-card-hover: #ececec;
   --c-list: #f7f7f7;
   --c-terminal: #eef2f6;
+  --c-sidebar: #ffffff;
+  --c-sidebar-card: #f7f7f7;
+  --c-sidebar-hover: #ececec;
   --border: #cccccc;
   --text: #1e1e1e;
   --text-dim: #6e6e6e;

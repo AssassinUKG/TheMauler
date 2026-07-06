@@ -59,7 +59,7 @@ func effortToThinking(effort string, profile settings.Profile) effortPlan {
 	case "low":
 		return effortPlan{enableThinking: false, maxTokensCap: 0, coding: true}
 	case "high":
-		return effortPlan{enableThinking: true, maxTokensCap: 0, coding: false}
+		return effortPlan{enableThinking: profile.Thinking, maxTokensCap: 0, coding: false}
 	default:
 		return effortPlan{enableThinking: profile.Thinking, maxTokensCap: 0, coding: false}
 	}

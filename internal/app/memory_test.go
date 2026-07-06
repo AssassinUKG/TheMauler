@@ -165,6 +165,64 @@ func TestMemoryJSONExportImportRoundTrip(t *testing.T) {
 	}
 }
 
+func TestClearMemoryEntriesAlsoClearsLegacyJSON(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	restoreWorkingDir(t)
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	setMemoryDB(db)
+	t.Cleanup(func() { setMemoryDB(nil) })
+
+	cfg := settings.DefaultSettings()
+	app := &App{cfg: &cfg}
+	if _, err := app.SaveMemoryEntry(MemoryEntry{
+		Title:      "Old target note",
+		Content:    "Target: 10.129.12.172",
+		Tags:       []string{"target-10-129-12-172", "htb"},
+		Kind:       "fact",
+		Confidence: "confirmed",
+		Source:     "previous_run",
+		Importance: 4,
+	}); err != nil {
+		t.Fatalf("save memory: %v", err)
+	}
+	jsonEntries, err := loadMemoryJSON()
+	if err != nil {
+		t.Fatalf("load legacy json: %v", err)
+	}
+	if len(jsonEntries) != 1 {
+		t.Fatalf("legacy json should mirror saved memory, got %#v", jsonEntries)
+	}
+
+	if err := app.ClearMemoryEntries(); err != nil {
+		t.Fatalf("clear memory: %v", err)
+	}
+	jsonEntries, err = loadMemoryJSON()
+	if err != nil {
+		t.Fatalf("load legacy json after clear: %v", err)
+	}
+	if len(jsonEntries) != 0 {
+		t.Fatalf("legacy json retained stale memories after clear: %#v", jsonEntries)
+	}
+
+	freshDB, err := store.Open(filepath.Join(t.TempDir(), "fresh-state.db"))
+	if err != nil {
+		t.Fatalf("open fresh store: %v", err)
+	}
+	defer freshDB.Close()
+	setMemoryDB(freshDB)
+	entries, err := loadMemory()
+	if err != nil {
+		t.Fatalf("load after restart: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("stale JSON was re-imported after clear: %#v", entries)
+	}
+}
+
 func TestMemoryPromptPrefixLabelsUnverifiedEntries(t *testing.T) {
 	cases := []struct {
 		confidence string
@@ -247,6 +305,59 @@ func TestMemoryTargetRefsIgnoreProductVersions(t *testing.T) {
 	}
 }
 
+func TestPlanMemoryRetrievalWithholdsOpsMemoryForRepoInspection(t *testing.T) {
+	entries := []MemoryEntry{
+		{
+			ID:         "ops",
+			Title:      "Run memory: 10.129.23.41",
+			Content:    "Target 10.129.23.41 user flag path and webshell notes",
+			Tags:       []string{"htb", "target-10-129-23-41", "milestone"},
+			Kind:       "fact",
+			Confidence: "confirmed",
+			Source:     "auto_distill",
+			Importance: 5,
+		},
+		{
+			ID:         "repo",
+			Title:      "Telemetry files",
+			Content:    "model_call telemetry is recorded in internal/app/model_call_metrics.go",
+			Tags:       []string{"telemetry"},
+			Kind:       "fact",
+			Confidence: "confirmed",
+			Source:     "user",
+			Importance: 3,
+		},
+	}
+	plan := planMemoryRetrieval(entries, "Inspect this repo and find where model-call telemetry is recorded. Do not edit anything.", 4)
+	got := planEntries(entries, plan)
+	for _, entry := range got {
+		if entry.ID == "ops" {
+			t.Fatalf("repo inspection should not auto-inject unrelated ops memory: %#v", got)
+		}
+	}
+	if len(got) != 1 || got[0].ID != "repo" {
+		t.Fatalf("expected telemetry memory only, got %#v", got)
+	}
+}
+
+func TestPlanMemoryRetrievalKeepsOpsMemoryForMatchingTarget(t *testing.T) {
+	entries := []MemoryEntry{{
+		ID:         "ops",
+		Title:      "Run memory: 10.129.23.41",
+		Content:    "Target 10.129.23.41 user flag path and webshell notes",
+		Tags:       []string{"htb", "target-10-129-23-41", "milestone"},
+		Kind:       "fact",
+		Confidence: "confirmed",
+		Source:     "auto_distill",
+		Importance: 5,
+	}}
+	plan := planMemoryRetrieval(entries, "Continue HTB target 10.129.23.41 and use the webshell.", 4)
+	got := planEntries(entries, plan)
+	if len(got) != 1 || got[0].ID != "ops" {
+		t.Fatalf("matching target ops task should keep ops memory, got %#v", got)
+	}
+}
+
 func TestPlanMemoryRetrievalKeepsLayerSlots(t *testing.T) {
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	restoreWorkingDir(t)
@@ -300,10 +411,9 @@ func TestSelectRelevantMemoryReturnsRetrievalPlan(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-
 	selection := selectRelevantMemory(cfg, "fix the LM Studio provider URL")
 	if len(selection.Entries) != 1 {
-		t.Fatalf("expected one injected memory, got %#v", selection.Entries)
+		t.Fatalf("expected one injected memory, got entries=%#v withheld=%#v conflicts=%#v plan=%#v", selection.Entries, selection.Withheld, selection.Conflicts, selection.Plan)
 	}
 	if selection.Plan.Intent != "code" || len(selection.Plan.Selected) != 1 {
 		t.Fatalf("unexpected retrieval plan: %#v", selection.Plan)
@@ -378,5 +488,20 @@ func TestBuildSystemPromptSeparatesSessionAndEvidencePointers(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestStripJSONBOM(t *testing.T) {
+	withBOM := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`[{"id":"a"}]`)...)
+	var entries []MemoryEntry
+	if err := json.Unmarshal(stripJSONBOM(withBOM), &entries); err != nil {
+		t.Fatalf("BOM should be stripped before unmarshal: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != "a" {
+		t.Fatalf("unexpected entries: %#v", entries)
+	}
+	// no BOM is a no-op
+	if got := stripJSONBOM([]byte(`[]`)); string(got) != "[]" {
+		t.Fatalf("no-BOM input mutated: %q", got)
 	}
 }

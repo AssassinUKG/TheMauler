@@ -61,6 +61,138 @@ func TestCompactDropsOrphanedToolResultAtBoundary(t *testing.T) {
 	}
 }
 
+func TestRepairMessagesDropsInvalidRole(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleSystem, "system"),
+		llm.NewTextMessage("developer", "bad"),
+		llm.NewTextMessage(llm.RoleUser, "task"),
+	})
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected invalid role to be dropped, got %#v", msgs)
+	}
+	if len(actions) != 1 || actions[0].Action != "drop_invalid_role" {
+		t.Fatalf("expected drop_invalid_role action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesDropsLeadingAssistant(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleSystem, "system"),
+		llm.NewTextMessage(llm.RoleAssistant, "stale answer"),
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		llm.NewTextMessage(llm.RoleAssistant, "ok"),
+	})
+
+	if len(msgs) != 3 || msgs[1].Role != llm.RoleUser {
+		t.Fatalf("expected leading assistant to be dropped, got %#v", msgs)
+	}
+	if !hasRepairAction(actions, "drop_leading_assistant") {
+		t.Fatalf("expected drop_leading_assistant action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesMergesConsecutiveUserMessages(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "first"),
+		llm.NewTextMessage(llm.RoleUser, "second"),
+	})
+
+	if len(msgs) != 1 || messageContentText(msgs[0]) != "first\nsecond" {
+		t.Fatalf("expected merged user messages, got %#v", msgs)
+	}
+	if !hasRepairAction(actions, "merge_consecutive_user") {
+		t.Fatalf("expected merge_consecutive_user action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesStripsToolCallsWithoutResults(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCallDef{testToolCall("call-1", "read")}},
+	})
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected assistant message to remain as repaired text, got %#v", msgs)
+	}
+	if len(msgs[1].ToolCalls) != 0 {
+		t.Fatalf("expected unmatched tool call to be stripped, got %#v", msgs[1].ToolCalls)
+	}
+	if !strings.Contains(messageContentText(msgs[1]), "Tool calls were removed") {
+		t.Fatalf("expected replacement content, got %q", messageContentText(msgs[1]))
+	}
+	if !hasRepairAction(actions, "strip_unmatched_tool_call") {
+		t.Fatalf("expected strip_unmatched_tool_call action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesDropsOrphanToolResult(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleTool, ToolCallID: "missing", Name: "read", Content: "orphan"},
+	})
+
+	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser {
+		t.Fatalf("expected orphan tool result to be dropped, got %#v", msgs)
+	}
+	if !hasRepairAction(actions, "drop_orphaned_tool_result") {
+		t.Fatalf("expected drop_orphaned_tool_result action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesFillsEmptyUserAndAssistantContent(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, ""),
+		llm.NewTextMessage(llm.RoleAssistant, " "),
+	})
+
+	if messageContentText(msgs[0]) != RepairPlaceholder || messageContentText(msgs[1]) != RepairPlaceholder {
+		t.Fatalf("expected placeholders, got %#v", msgs)
+	}
+	if countRepairActions(actions, "fill_empty_content") != 2 {
+		t.Fatalf("expected two fill_empty_content actions, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesKeepsMatchedMultipleToolResults(t *testing.T) {
+	input := []llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleAssistant, Content: "running tools", ToolCalls: []llm.ToolCallDef{
+			testToolCall("call-1", "read"),
+			testToolCall("call-2", "grep"),
+		}},
+		{Role: llm.RoleTool, ToolCallID: "call-1", Name: "read", Content: "read output"},
+		{Role: llm.RoleTool, ToolCallID: "call-2", Name: "grep", Content: "grep output"},
+		llm.NewTextMessage(llm.RoleAssistant, "done"),
+	}
+	msgs, actions := RepairMessages(input)
+
+	if len(actions) != 0 {
+		t.Fatalf("expected clean multi-tool transcript to need no repair, got %#v", actions)
+	}
+	if len(msgs) != len(input) || len(msgs[1].ToolCalls) != 2 {
+		t.Fatalf("expected all matched tool calls/results to remain, got %#v", msgs)
+	}
+}
+
+func TestRepairStructureRecountsAfterRepair(t *testing.T) {
+	h := NewHistory(4096)
+	h.Append(llm.NewTextMessage(llm.RoleUser, "task"))
+	h.Append(llm.NewTextMessage(llm.RoleUser, "second"))
+	before := h.TokenCount()
+
+	actions := h.RepairStructure()
+	if len(actions) == 0 {
+		t.Fatalf("expected repair actions")
+	}
+	if len(h.Messages()) != 1 {
+		t.Fatalf("expected history to be repaired in place, got %#v", h.Messages())
+	}
+	if h.TokenCount() <= 0 || h.TokenCount() > before+10 {
+		t.Fatalf("expected token count to be recounted, before=%d after=%d", before, h.TokenCount())
+	}
+}
+
 func TestClearOldToolResultsKeepsRecentAndShrinksContext(t *testing.T) {
 	h := NewHistory(4096)
 	h.Append(llm.NewTextMessage(llm.RoleSystem, "system"))
@@ -89,6 +221,31 @@ func TestClearOldToolResultsKeepsRecentAndShrinksContext(t *testing.T) {
 	}
 }
 
+func testToolCall(id, name string) llm.ToolCallDef {
+	return llm.ToolCallDef{
+		ID:   id,
+		Type: "function",
+		Function: llm.FunctionCall{
+			Name:      name,
+			Arguments: json.RawMessage(`{}`),
+		},
+	}
+}
+
+func hasRepairAction(actions []RepairAction, action string) bool {
+	return countRepairActions(actions, action) > 0
+}
+
+func countRepairActions(actions []RepairAction, action string) int {
+	count := 0
+	for _, got := range actions {
+		if got.Action == action {
+			count++
+		}
+	}
+	return count
+}
+
 func TestClearOldToolResultsPreservesCompactEvidence(t *testing.T) {
 	h := NewHistory(4096)
 	h.Append(llm.NewTextMessage(llm.RoleSystem, "system"))
@@ -109,6 +266,44 @@ func TestClearOldToolResultsPreservesCompactEvidence(t *testing.T) {
 	// The bulky read_file results should still be cleared.
 	if stats.Cleared < 1 {
 		t.Fatalf("expected bulky results to clear, cleared=%d", stats.Cleared)
+	}
+}
+
+func TestMicrocompactThinkingDropsOldThinkBlocks(t *testing.T) {
+	h := NewHistory(4096)
+	h.Append(llm.NewTextMessage(llm.RoleSystem, "system"))
+	h.Append(llm.NewTextMessage(llm.RoleAssistant, "<think>"+strings.Repeat("hidden ", 200)+"</think>\nVisible result"))
+	h.Append(llm.NewTextMessage(llm.RoleAssistant, "<think>recent reasoning</think>\nRecent visible"))
+
+	before := h.TokenCount()
+	stats := h.MicrocompactThinking(1)
+	if stats.Compacted != 1 {
+		t.Fatalf("expected one old thinking trace compacted, got %d", stats.Compacted)
+	}
+	if h.TokenCount() >= before {
+		t.Fatalf("expected token estimate to shrink: before=%d after=%d", before, h.TokenCount())
+	}
+	msgs := h.Messages()
+	if strings.Contains(messageContentText(msgs[1]), "hidden") || !strings.Contains(messageContentText(msgs[1]), "Visible result") {
+		t.Fatalf("old thinking trace was not stripped while preserving visible text: %q", messageContentText(msgs[1]))
+	}
+	if !strings.Contains(messageContentText(msgs[2]), "recent reasoning") {
+		t.Fatalf("recent thinking trace should be preserved")
+	}
+}
+
+func TestMicrocompactThinkingDoesNotTouchToolCalls(t *testing.T) {
+	h := NewHistory(4096)
+	h.Append(llm.Message{
+		Role:    llm.RoleAssistant,
+		Content: "<think>tool planning</think>",
+		ToolCalls: []llm.ToolCallDef{{
+			ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
+		}},
+	})
+	stats := h.MicrocompactThinking(0)
+	if stats.Compacted != 0 {
+		t.Fatalf("assistant tool-call messages must not be microcompacted")
 	}
 }
 

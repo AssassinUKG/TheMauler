@@ -16,7 +16,7 @@ func TestVerifyWriteFileMutationConfirmsExactContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := verifyMutationResult(toolCallForTest("write_file", map[string]any{
+	out := verifyMutationResult(toolCallForTest("write", map[string]any{
 		"path":    path,
 		"content": "hello",
 	}))
@@ -32,12 +32,12 @@ func TestVerifyWriteFileMutationDetectsContentMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := verifyMutationResult(toolCallForTest("write_file", map[string]any{
+	out := verifyMutationResult(toolCallForTest("write", map[string]any{
 		"path":    path,
 		"content": "expected",
 	}))
 
-	if !strings.Contains(out, "Verification failed") || !strings.Contains(out, "differs from write_file input") {
+	if !strings.Contains(out, "Verification failed") || !strings.Contains(out, "differs from write input") {
 		t.Fatalf("expected mismatch warning, got %q", out)
 	}
 }
@@ -48,7 +48,7 @@ func TestVerifyWriteFileMutationConfirmsAppendSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := verifyMutationResult(toolCallForTest("write_file", map[string]any{
+	out := verifyMutationResult(toolCallForTest("write", map[string]any{
 		"path":    path,
 		"content": "after\n",
 		"append":  true,
@@ -65,10 +65,10 @@ func TestVerifyEditFileMutationConfirmsNewString(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := verifyMutationResult(toolCallForTest("edit_file", map[string]any{
+	out := verifyMutationResult(toolCallForTest("edit", map[string]any{
 		"path":       path,
-		"old_string": "beta",
-		"new_string": "BETA",
+		"old": "beta",
+		"new": "BETA",
 	}))
 
 	if !strings.Contains(out, "Verification: edit confirmed") {
@@ -82,10 +82,10 @@ func TestVerifyEditFileMutationDetectsMissingNewString(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := verifyMutationResult(toolCallForTest("edit_file", map[string]any{
+	out := verifyMutationResult(toolCallForTest("edit", map[string]any{
 		"path":       path,
-		"old_string": "beta",
-		"new_string": "BETA",
+		"old": "beta",
+		"new": "BETA",
 	}))
 
 	if !strings.Contains(out, "Verification failed") || !strings.Contains(out, "new_string was not found") {

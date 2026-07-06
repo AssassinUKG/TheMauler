@@ -21,13 +21,15 @@ type verifyEditParams struct {
 	Path      string `json:"path"`
 	OldString string `json:"old_string"`
 	NewString string `json:"new_string"`
+	Old       string `json:"old"`
+	New       string `json:"new"`
 }
 
 func verifyMutationResult(tc llm.ToolCallDef) string {
 	switch tc.Function.Name {
-	case "write_file":
+	case "write_file", "write":
 		return verifyWriteFileMutation(tc)
-	case "edit_file":
+	case "edit_file", "edit":
 		return verifyEditFileMutation(tc)
 	default:
 		return ""
@@ -35,9 +37,13 @@ func verifyMutationResult(tc llm.ToolCallDef) string {
 }
 
 func verifyWriteFileMutation(tc llm.ToolCallDef) string {
+	toolName := "write"
+	if tc.Function.Name == "write_file" {
+		toolName = "write_file"
+	}
 	var p verifyWriteParams
 	if err := json.Unmarshal(tc.Function.Arguments, &p); err != nil {
-		return fmt.Sprintf("Verification failed: could not parse write_file arguments: %v", err)
+		return fmt.Sprintf("Verification failed: could not parse %s arguments: %v", toolName, err)
 	}
 	vf, verifyErr := readVerifiedFile(p.Path)
 	if verifyErr != "" {
@@ -52,7 +58,7 @@ func verifyWriteFileMutation(tc llm.ToolCallDef) string {
 			status = fmt.Sprintf("Verification: append confirmed for %s (%d bytes).", vf.displayPath, vf.size)
 		}
 	} else if string(vf.data) != p.Content {
-		status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but file content differs from write_file input (%d bytes).", vf.displayPath, vf.size, len(p.Content))
+		status = fmt.Sprintf("Verification failed: %s exists (%d bytes), but file content differs from %s input (%d bytes).", vf.displayPath, vf.size, toolName, len(p.Content))
 	} else {
 		status = fmt.Sprintf("Verification: write confirmed for %s (%d bytes).", vf.displayPath, vf.size)
 	}
@@ -60,9 +66,19 @@ func verifyWriteFileMutation(tc llm.ToolCallDef) string {
 }
 
 func verifyEditFileMutation(tc llm.ToolCallDef) string {
+	toolName := "edit"
+	if tc.Function.Name == "edit_file" {
+		toolName = "edit_file"
+	}
 	var p verifyEditParams
 	if err := json.Unmarshal(tc.Function.Arguments, &p); err != nil {
-		return fmt.Sprintf("Verification failed: could not parse edit_file arguments: %v", err)
+		return fmt.Sprintf("Verification failed: could not parse %s arguments: %v", toolName, err)
+	}
+	if p.OldString == "" {
+		p.OldString = p.Old
+	}
+	if p.NewString == "" {
+		p.NewString = p.New
 	}
 	vf, verifyErr := readVerifiedFile(p.Path)
 	if verifyErr != "" {

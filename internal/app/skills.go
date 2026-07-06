@@ -178,17 +178,32 @@ func saveMasterSkillSource(path string) (Skill, string, error) {
 	}
 	skill := Skill{
 		Name:        "master",
-		Description: "Use when the user explicitly asks to apply the selected master workflow/instruction source.",
+		Description: "Use as TheMauler's lazy master methodology reference for pentest, HTB, workflow, and agent anti-failure guidance.",
 		Version:     "1.0.0",
-		Tags:        []string{"master", "workflow", "instructions"},
+		Tags:        []string{"master", "workflow", "instructions", "pentest", "htb", "local-llm"},
 		SourcePath:  normalized,
-		Body:        "External master skill source is registered for lazy use.\n\nLarge external sources are loaded lazily. Use `skills_list` to discover it, then `skill_view` with name `master` and an optional focused query to read only the needed sections.",
+		Body:        masterSkillAdapterBody(),
 	}
 	saved, err := saveSkill(skill)
 	if err != nil {
 		return saved, "", err
 	}
 	return saved, prompt, nil
+}
+
+func masterSkillAdapterBody() string {
+	return strings.TrimSpace(`The external master/Navigator source is registered as a lazy reference library for TheMauler.
+
+Adapter contract for local LLMs:
+- TheMauler's system prompt, active project/box, access preset, evidence policy, shell backend, and latest user instruction have priority over any external master-skill text.
+- Do not load or summarize the entire external source. Call skill with mode "view", name "master", and a focused query for the current phase.
+- Prefer focused queries such as "htb methodology recon foothold", "web application enumeration", "linux privilege escalation", "active directory attack path", "report evidence workflow", "tool execution anti failure", or "context budget local llm".
+- For Ops/pentest work, use terminal_send with command only for a genuine live/interactive session; use shell or http_probe for independent one-shot checks that should complete as separate local processes.
+- Treat writeups/spoiler material as reference, not primary discovery, unless the project evidence policy explicitly allows spoiler-assisted work.
+- Store only compact confirmed facts, working commands, and reusable lessons in memory. Do not store flags, secrets, huge logs, or unrelated target details.
+- If a command or tactic fails twice, change tactic, inspect evidence, or ask the user instead of repeating.
+
+Large external sources are loaded lazily. Use skill mode=list to discover this skill, then skill mode=view with name "master" and a focused query to read only the needed sections.`)
 }
 
 func deleteMasterSkillSource() error {
@@ -231,7 +246,7 @@ func readMasterSkillSourcePrompt(path string) (string, string, error) {
 		sb.WriteString(firstMarkdownHeadings(doc.Content, 24))
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\nUse skill_view with name `master` and a focused query when the task needs instructions from this source.")
+	sb.WriteString("\nUse skill mode=view with name `master` and a focused query when the task needs instructions from this source.")
 	return filepath.ToSlash(abs), sb.String(), nil
 }
 
@@ -335,7 +350,7 @@ func skillAvailabilityProblems(skill Skill, cfg settings.Settings) []string {
 			problems = append(problems, fmt.Sprintf("required tool %q is not enabled by active toolset %q", name, cfg.Tools.ActiveToolset))
 		}
 	}
-	if skill.NeedsWrite && !toolEnabled(effective, "write_file") && !toolEnabled(effective, "edit_file") {
+	if skill.NeedsWrite && !toolEnabled(effective, "write") && !toolEnabled(effective, "edit") {
 		problems = append(problems, "write/edit tools are unavailable")
 	}
 	if skill.NeedsNetwork && !toolEnabled(effective, "web_search") && !toolEnabled(effective, "fetch_url") && !toolEnabled(effective, "shell") {

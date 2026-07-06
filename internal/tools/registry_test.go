@@ -12,16 +12,15 @@ import (
 func TestToEnabledToolDefsFiltersDisabledTools(t *testing.T) {
 	registry := New()
 	defs := registry.ToEnabledToolDefs(map[string]bool{
-		"read_file":  true,
+		"read":       true,
 		"web_search": true,
-		"bash":       false,
 	})
 
 	seen := map[string]bool{}
 	for _, def := range defs {
 		seen[def.Function.Name] = true
 	}
-	if !seen["read_file"] || !seen["read_pdf"] || !seen["web_search"] {
+	if !seen["read"] || !seen["web_search"] {
 		t.Fatalf("enabled tools missing: %#v", seen)
 	}
 	if seen["bash"] {
@@ -29,34 +28,84 @@ func TestToEnabledToolDefsFiltersDisabledTools(t *testing.T) {
 	}
 }
 
-func TestShellDisabledAlsoDisablesBashAlias(t *testing.T) {
+func TestBashToolIsNotRegistered(t *testing.T) {
 	registry := New()
-	defs := registry.ToEnabledToolDefs(map[string]bool{
-		"shell": false,
-		"bash":  true,
-	})
-
-	seen := map[string]bool{}
-	for _, def := range defs {
-		seen[def.Function.Name] = true
-	}
-	if seen["shell"] || seen["bash"] {
-		t.Fatalf("shell alias tools should both be hidden when shell is disabled: %#v", seen)
+	if _, ok := registry.Get("bash"); ok {
+		t.Fatalf("bash tool should not be registered")
 	}
 }
 
-func TestBashFallsBackToShellSettingWhenBashUnset(t *testing.T) {
+func TestMissingEnabledMapEntriesAreHidden(t *testing.T) {
 	registry := New()
 	defs := registry.ToEnabledToolDefs(map[string]bool{
-		"shell": false,
+		"shell": true,
 	})
 
 	seen := map[string]bool{}
 	for _, def := range defs {
 		seen[def.Function.Name] = true
 	}
-	if seen["bash"] {
-		t.Fatalf("bash should honour shell=false when bash is absent: %#v", seen)
+	if !seen["shell"] || seen["read"] {
+		t.Fatalf("only explicit enabled entries should be advertised: %#v", seen)
+	}
+}
+
+type verboseSchemaTool struct{}
+
+func (t *verboseSchemaTool) Name() string { return "verbose_schema" }
+func (t *verboseSchemaTool) Description() string {
+	return strings.Repeat("Use this detailed model-facing description carefully. ", 20)
+}
+func (t *verboseSchemaTool) Destructive() bool { return false }
+func (t *verboseSchemaTool) Schema() json.RawMessage {
+	return json.RawMessage(`{
+		"title":"Verbose Schema",
+		"description":"top-level schema prose",
+		"type":"object",
+		"required":["path"],
+		"properties":{
+			"path":{
+				"title":"Path",
+				"description":"path prose that should not be sent in model schema",
+				"type":"string",
+				"default":"x",
+				"examples":["a","b"]
+			},
+			"options":{
+				"description":"nested prose",
+				"type":"object",
+				"properties":{
+					"limit":{"description":"limit prose","type":"integer"}
+				}
+			}
+		}
+	}`)
+}
+func (t *verboseSchemaTool) Run(_ context.Context, _ json.RawMessage) (string, error) {
+	return "ok", nil
+}
+
+func TestToolDefsUseCompactPromptSchemas(t *testing.T) {
+	registry := &Registry{tools: map[string]Tool{}}
+	registry.Register(&verboseSchemaTool{})
+
+	defs := registry.ToToolDefs()
+	if len(defs) != 1 {
+		t.Fatalf("defs len = %d, want 1", len(defs))
+	}
+	if len([]rune(defs[0].Function.Description)) > maxLLMToolDescriptionRunes+20 {
+		t.Fatalf("description was not capped: %d runes", len([]rune(defs[0].Function.Description)))
+	}
+	raw := string(defs[0].Function.Parameters)
+	for _, notWant := range []string{"description", "title", "examples", "default", "top-level schema prose", "nested prose"} {
+		if strings.Contains(raw, notWant) {
+			t.Fatalf("compact schema still contains %q:\n%s", notWant, raw)
+		}
+	}
+	for _, want := range []string{`"type":"object"`, `"required":["path"]`, `"path"`, `"limit"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("compact schema lost required structure %q:\n%s", want, raw)
+		}
 	}
 }
 
@@ -191,5 +240,52 @@ func TestRegistryRunCoercesNestedStringifiedSchemaTypes(t *testing.T) {
 	}
 	if options["recursive"] != true || options["limit"] != float64(3) {
 		t.Fatalf("nested schema values were not coerced: %#v", options)
+	}
+}
+
+func TestMetadataForDefaultTools(t *testing.T) {
+	registry := New()
+	shell, ok := registry.Get("shell")
+	if !ok {
+		t.Fatal("missing shell tool")
+	}
+	meta := MetadataFor(shell)
+	if meta.AccessClass != "exec" || meta.RequiresShell == "" || !meta.UnrestrictedReady {
+		t.Fatalf("unexpected shell metadata: %#v", meta)
+	}
+	read, ok := registry.Get("read")
+	if !ok {
+		t.Fatal("missing read tool")
+	}
+	meta = MetadataFor(read)
+	if meta.AccessClass != "read" || meta.LatencyClass != "instant" {
+		t.Fatalf("unexpected read metadata: %#v", meta)
+	}
+}
+
+func TestRegistrySpecsAreSortedAndGated(t *testing.T) {
+	registry := New()
+	specs := registry.SpecsFor(map[string]bool{"read": true, "shell": false}, map[string]bool{
+		"read":  true,
+		"shell": true,
+	})
+	var names []string
+	for _, spec := range specs {
+		names = append(names, spec.Name)
+		if spec.Name == "read" {
+			if spec.Metadata.AccessClass != "read" || len(spec.Schema) == 0 {
+				t.Fatalf("read spec missing metadata/schema: %#v", spec)
+			}
+		}
+	}
+	if strings.Join(names, ",") != "read" {
+		t.Fatalf("unexpected gated specs: %#v", names)
+	}
+	spec, ok := registry.Spec("shell")
+	if !ok {
+		t.Fatal("missing shell spec")
+	}
+	if spec.Metadata.AccessClass != "exec" || !spec.Metadata.Resumable {
+		t.Fatalf("unexpected shell spec metadata: %#v", spec.Metadata)
 	}
 }

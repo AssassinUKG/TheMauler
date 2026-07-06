@@ -96,7 +96,7 @@ func deriveRunMilestones(run *TaskRun) []string {
 			if version := detectProductVersion(text, "freepbx"); version != "" {
 				out = append(out, "Identified FreePBX version: "+version+".")
 			}
-		case lowerName == "write_file" || lowerName == "edit_file":
+		case lowerName == "write" || lowerName == "edit" || lowerName == "write_file" || lowerName == "edit_file":
 			if path := firstNonEmpty(jsonField(tool.Input, "path"), jsonField(tool.Input, "file")); path != "" {
 				out = append(out, "Updated file: "+path+".")
 			} else {

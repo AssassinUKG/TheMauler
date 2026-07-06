@@ -49,6 +49,49 @@ func TestTodoLifecycle(t *testing.T) {
 	}
 }
 
+func TestTodoWriteRepairsNestedItemsAndNumericIDs(t *testing.T) {
+	withTempHome(t)
+	write := &TodoWrite{}
+	if _, err := write.Run(context.Background(), json.RawMessage(`{"action":"replace","items":[["Inspect run","Patch loop"]]}`)); err != nil {
+		t.Fatalf("replace nested items: %v", err)
+	}
+	items, err := LoadTodos()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(items) != 2 || items[0].Text != "Inspect run" {
+		t.Fatalf("unexpected todo_write replace result: %#v", items)
+	}
+	if _, err := write.Run(context.Background(), json.RawMessage(`{"action":"done","id":"1","detail":"checked"}`)); err != nil {
+		t.Fatalf("done numeric id: %v", err)
+	}
+	items, err = LoadTodos()
+	if err != nil {
+		t.Fatalf("load after done: %v", err)
+	}
+	if items[0].Status != "done" || items[0].Detail != "checked" {
+		t.Fatalf("numeric id was not normalised: %#v", items[0])
+	}
+}
+
+func TestTodoWriteResolvesPlanAliasToActiveItem(t *testing.T) {
+	withTempHome(t)
+	write := &TodoWrite{}
+	if _, err := write.Run(context.Background(), json.RawMessage(`{"action":"replace","id":"connected_privesc","items":["Update /etc/hosts","Verify webshell"]}`)); err != nil {
+		t.Fatalf("replace with plan alias: %v", err)
+	}
+	if _, err := write.Run(context.Background(), json.RawMessage(`{"action":"update","id":"connected_privesc","status":"in_progress","detail":"Update /etc/hosts"}`)); err != nil {
+		t.Fatalf("update via plan alias: %v", err)
+	}
+	items, err := LoadTodos()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if items[0].ID != "todo-1" || items[0].Status != "in_progress" || items[0].Detail != "Update /etc/hosts" {
+		t.Fatalf("plan alias did not resolve to active item: %#v", items)
+	}
+}
+
 func TestTodoClear(t *testing.T) {
 	withTempHome(t)
 	if err := SaveTodos([]TodoItem{{ID: "todo-1", Text: "x", Status: "pending"}}); err != nil {
@@ -116,9 +159,7 @@ func TestTodoMigratesLegacyJSONIntoSQLite(t *testing.T) {
 
 func TestRegistryIncludesTodoTools(t *testing.T) {
 	registry := New()
-	for _, name := range []string{"todo_create", "todo_update", "todo_done", "todo_blocked", "todo_list", "todo_clear"} {
-		if _, ok := registry.Get(name); !ok {
-			t.Fatalf("registry missing %s", name)
-		}
+	if _, ok := registry.Get("todo_write"); !ok {
+		t.Fatalf("registry missing todo_write")
 	}
 }

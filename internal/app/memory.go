@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -64,7 +65,7 @@ func (a *App) ExportMemoryJSON() (string, error) {
 
 func (a *App) ImportMemoryJSON(raw string) (int, error) {
 	var entries []MemoryEntry
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+	if err := json.Unmarshal(stripJSONBOM([]byte(raw)), &entries); err != nil {
 		return 0, err
 	}
 	if err := saveMemory(entries); err != nil {
@@ -97,6 +98,7 @@ func (a *App) SaveMemoryEntry(entry MemoryEntry) (MemoryEntry, error) {
 	entry.Source = normaliseMemorySource(entry.Source)
 	entry.Importance = clampInt(entry.Importance, 1, 5, 3)
 	entry.Tags = normaliseTags(entry.Tags)
+	entry.Tags = addLabMemoryTags(entry.Tags, cfg.Context.Lab, entry)
 	if cfg.Memory.MaxEntryChars > 0 && len(entry.Content) > cfg.Memory.MaxEntryChars {
 		entry.Content = entry.Content[:cfg.Memory.MaxEntryChars]
 	}
@@ -447,9 +449,10 @@ func planMemoryRetrieval(entries []MemoryEntry, prompt string, limit int) memory
 	if limit <= 0 {
 		limit = 8
 	}
-	ranked := rankMemoryCandidates(entries, prompt, 0)
 	terms := sortedKeywordTerms(prompt)
 	intent := memoryRetrievalIntent(prompt)
+	ranked := rankMemoryCandidates(entries, prompt, 0)
+	ranked = filterAutoInjectMemoryByIntent(ranked, intent, terms, prompt)
 	slots := memoryRetrievalSlots(intent, limit)
 	selected := make([]MemoryEntry, 0, limit)
 	used := map[string]bool{}
@@ -495,6 +498,73 @@ func planMemoryRetrieval(entries []MemoryEntry, prompt string, limit int) memory
 		})
 	}
 	return plan
+}
+
+func filterAutoInjectMemoryByIntent(entries []MemoryEntry, intent string, terms []string, prompt string) []MemoryEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]MemoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if autoInjectMemoryAllowed(entry, intent, terms, prompt) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func autoInjectMemoryAllowed(entry MemoryEntry, intent string, terms []string, prompt string) bool {
+	layer := memoryLayer(entry)
+	kind := normaliseMemoryKind(entry.Kind)
+	if kind == "preference" || kind == "constraint" || entry.Pinned {
+		return true
+	}
+	if intent == "recall" || intent == "ops" {
+		return true
+	}
+	if memoryLooksOpsScoped(entry) && !memoryOverlapsPromptTarget(entry, prompt) {
+		return false
+	}
+	if layer == "previous_run" || layer == "unverified" || layer == "evidence" || layer == "session_recall" {
+		return firstMemoryTermHit(entry, terms) != ""
+	}
+	if layer == "confirmed" && (intent == "code" || intent == "research") {
+		return true
+	}
+	return firstMemoryTermHit(entry, terms) != "" || intent == "research"
+}
+
+func memoryLooksOpsScoped(entry MemoryEntry) bool {
+	if len(memoryTargetRefs(entry)) > 0 {
+		return true
+	}
+	for _, tag := range entry.Tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "htb" || tag == "ctf" || tag == "ops" || tag == "milestone" || tag == "evidence" {
+			return true
+		}
+	}
+	text := strings.ToLower(entry.Title + "\n" + entry.Content)
+	source := normaliseMemorySource(entry.Source)
+	if source != "user" && source != "manual" {
+		for _, tag := range entry.Tags {
+			tag = strings.ToLower(strings.TrimSpace(tag))
+			if strings.HasPrefix(tag, "target-") || strings.HasPrefix(tag, "host-") || strings.HasPrefix(tag, "lab-") {
+				return true
+			}
+		}
+	}
+	return containsAny(text, "htb", "ctf", "target:", "target ", "root flag", "user flag", "foothold", "webshell", "reverse shell", "10.")
+}
+
+func memoryOverlapsPromptTarget(entry MemoryEntry, prompt string) bool {
+	refs := memoryTargetRefs(entry)
+	if len(refs) == 0 {
+		return false
+	}
+	promptRefs := map[string]bool{}
+	addTargetRefs(promptRefs, prompt)
+	return targetRefsOverlap(refs, promptRefs)
 }
 
 func planEntries(entries []MemoryEntry, plan memoryRetrievalPlan) []MemoryEntry {
@@ -705,6 +775,11 @@ func filterMemoryInjectionConflicts(entries []MemoryEntry, cfg settings.Settings
 			conflicts = append(conflicts, fmt.Sprintf("%s references %s while current target context is %s", memoryLabel(entry), strings.Join(sortedRefKeys(refs), ","), strings.Join(sortedRefKeys(current), ",")))
 			continue
 		}
+		if shouldWithholdSpoilerMemory(entry, cfg, prompt) {
+			withheld = append(withheld, entry)
+			conflicts = append(conflicts, fmt.Sprintf("%s looks like exact-machine spoiler/writeup reference and evidence policy is %s", memoryLabel(entry), normaliseEvidencePolicy(cfg.Context.Lab.EvidencePolicy, cfg.Context.Lab.OpsProfile)))
+			continue
+		}
 		filtered = append(filtered, entry)
 	}
 	return filtered, withheld, conflicts
@@ -713,8 +788,33 @@ func filterMemoryInjectionConflicts(entries []MemoryEntry, cfg settings.Settings
 func currentTargetRefs(cfg settings.Settings, prompt string) map[string]bool {
 	refs := map[string]bool{}
 	addTargetRefs(refs, cfg.Context.Lab.Target)
+	addTargetRefs(refs, cfg.Context.Lab.Hostname)
 	addTargetRefs(refs, prompt)
 	return refs
+}
+
+func shouldWithholdSpoilerMemory(entry MemoryEntry, cfg settings.Settings, prompt string) bool {
+	if !memoryLooksLikeSpoiler(entry) {
+		return false
+	}
+	lowerPrompt := strings.ToLower(prompt)
+	if containsAny(lowerPrompt, "spoiler", "writeup", "walkthrough", "use reference", "fastest path", "cheat") {
+		return false
+	}
+	switch normaliseEvidencePolicy(cfg.Context.Lab.EvidencePolicy, cfg.Context.Lab.OpsProfile) {
+	case "discovery_first", "research_assisted":
+		return true
+	default:
+		return false
+	}
+}
+
+func memoryLooksLikeSpoiler(entry MemoryEntry) bool {
+	if hasTag(entry, "spoiler") || hasTag(entry, "writeup") || hasTag(entry, "walkthrough") || hasTag(entry, "flag") {
+		return true
+	}
+	text := strings.ToLower(strings.Join([]string{entry.Title, entry.Content, strings.Join(entry.Tags, " ")}, "\n"))
+	return containsAny(text, "walkthrough", "write-up", "writeup", "spoiler", "flag path", "root flag", "user flag", "exact box")
 }
 
 func memoryTargetRefs(entry MemoryEntry) map[string]bool {
@@ -903,6 +1003,10 @@ var memoryStopWords = map[string]bool{
 	"just": true, "like": true, "make": true, "need": true, "please": true,
 	"should": true, "that": true, "there": true, "this": true, "what": true,
 	"when": true, "with": true, "work": true, "would": true,
+	"then": true, "attack": true, "diff": true, "different": true,
+	"run": true, "runs": true, "prompt": true, "status": true, "stopped": true,
+	"memory": true, "model": true, "file": true, "files": true, "inspect": true,
+	"summarize": true, "summarise": true, "involved": true, "anything": true,
 }
 
 func scoreMemory(entry MemoryEntry, terms map[string]bool, prompt string) float64 {
@@ -942,6 +1046,16 @@ func scoreMemory(entry MemoryEntry, terms map[string]bool, prompt string) float6
 	score += usageBoost(entry.LastUsedAt)
 	if strings.Contains(strings.ToLower(prompt), title) && title != "" {
 		score += 2
+	}
+	if refs := memoryTargetRefs(entry); len(refs) > 0 {
+		promptRefs := map[string]bool{}
+		addTargetRefs(promptRefs, prompt)
+		if targetRefsOverlap(refs, promptRefs) {
+			score += 5
+		}
+	}
+	if memoryLooksLikeSpoiler(entry) {
+		score -= 3
 	}
 	return score
 }
@@ -1083,6 +1197,66 @@ func normaliseTags(tags []string) []string {
 	return out
 }
 
+func addLabMemoryTags(tags []string, lab settings.LabContext, entry MemoryEntry) []string {
+	kind := normaliseMemoryKind(entry.Kind)
+	source := normaliseMemorySource(entry.Source)
+	if kind == "preference" && source == "user" {
+		return tags
+	}
+	next := append([]string{}, tags...)
+	if id := strings.TrimSpace(lab.ID); id != "" {
+		next = append(next, "lab-"+slugMemoryTag(id))
+	}
+	if target := strings.TrimSpace(lab.Target); target != "" && !hasAnyTargetTag(entry) {
+		for ref := range refsFromText(target) {
+			next = append(next, "target-"+slugMemoryTag(ref))
+			break
+		}
+	}
+	if host := strings.TrimSpace(lab.Hostname); host != "" && !hasAnyHostTag(entry) {
+		for ref := range refsFromText(host) {
+			if strings.Contains(ref, ".") {
+				next = append(next, "host-"+slugMemoryTag(ref))
+				break
+			}
+		}
+	}
+	return normaliseTags(next)
+}
+
+func refsFromText(text string) map[string]bool {
+	refs := map[string]bool{}
+	addTargetRefs(refs, text)
+	return refs
+}
+
+func hasAnyTargetTag(entry MemoryEntry) bool {
+	for _, tag := range entry.Tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if strings.HasPrefix(tag, "target-") || strings.HasPrefix(tag, "target:") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAnyHostTag(entry MemoryEntry) bool {
+	for _, tag := range entry.Tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if strings.HasPrefix(tag, "host-") || strings.HasPrefix(tag, "host:") {
+			return true
+		}
+	}
+	return false
+}
+
+func slugMemoryTag(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, ".", "-")
+	value = strings.ReplaceAll(value, "_", "-")
+	return strings.Trim(value, "-")
+}
+
 func normaliseMemoryKind(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "preference", "constraint", "fact", "workflow", "decision", "note":
@@ -1158,7 +1332,14 @@ func saveMemory(entries []MemoryEntry) error {
 	db, cleanup, err := memoryStore()
 	if err == nil {
 		defer cleanup()
-		return saveMemoryDB(db, entries)
+		if err := saveMemoryDB(db, entries); err != nil {
+			return err
+		}
+		// Keep the legacy JSON file in sync with the SQLite store. The loader
+		// still uses memory.json as a migration source when the DB is empty, so
+		// an intentional clear must also blank the JSON copy or old memories will
+		// be re-imported on the next app start.
+		return saveMemoryJSON(entries)
 	}
 	return saveMemoryJSON(entries)
 }
@@ -1233,6 +1414,9 @@ ORDER BY updated_at DESC, id ASC`)
 	}
 	for i := range entries {
 		entries[i].Tags = tags[entries[i].ID]
+	}
+	if entries == nil {
+		return []MemoryEntry{}, nil
 	}
 	return entries, nil
 }
@@ -1337,10 +1521,21 @@ func loadMemoryJSON() ([]MemoryEntry, error) {
 		return nil, err
 	}
 	var entries []MemoryEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	if err := json.Unmarshal(stripJSONBOM(data), &entries); err != nil {
 		return nil, err
 	}
+	if entries == nil {
+		return []MemoryEntry{}, nil
+	}
 	return entries, nil
+}
+
+// stripJSONBOM removes a leading UTF-8 byte-order mark. Windows editors/tools can
+// write memory.json with a BOM, which encoding/json rejects ("invalid character
+// '?'") — that silently broke every memory recall (and the JSON→DB migration)
+// until this was added.
+func stripJSONBOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 }
 
 func saveMemoryJSON(entries []MemoryEntry) error {

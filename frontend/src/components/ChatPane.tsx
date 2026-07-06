@@ -1,8 +1,23 @@
 import { useRef, useEffect, useState, useCallback, useMemo, type KeyboardEvent } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Undo, EncodeFileBase64, PickSaveFilePath, SaveFileContent, GetWorkingDir, type ChatAttachment } from '../wailsjs/go'
-import type { ChatMessage, RunStatePayload, ToolCountdown } from '../App'
+import {
+  Undo,
+  EncodeFileBase64,
+  PickSaveFilePath,
+  SaveFileContent,
+  GetWorkingDir,
+  GetHistoryStats,
+  GetChannelBusStatus,
+  ListChannelWorkQueue,
+  GetSharedTerminalState,
+  type ChatAttachment,
+  type HistoryStats,
+  type TodoItem,
+  type ChannelWorkItem,
+  type TerminalStateSnapshot,
+} from '../wailsjs/go'
+import type { AgentActivity, ChatMessage, RunStatePayload, ToolCountdown } from '../App'
 import './ChatPane.css'
 
 interface Props {
@@ -10,19 +25,19 @@ interface Props {
   streaming: boolean
   streamBuffer: string
   thinkingBuffer: string
-  profiles: string[]
   activeProfile: string
   autonomous: boolean
   pendingInterrupt: boolean
   toolCountdown: ToolCountdown | null
   runState: RunStatePayload | null
+  todos: TodoItem[]
+  activity: AgentActivity[]
   onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[]) => void
   onCancelPending: () => void
   onCancelTool: (name: string) => void
   onStopAgent: () => void
   onClearChat: () => void
   onArtifact: (code: string, lang: string) => void
-  onProfileChange: (name: string) => void
   onAutonomousChange: (enabled: boolean) => void
 }
 
@@ -31,19 +46,19 @@ export function ChatPane({
   streaming,
   streamBuffer,
   thinkingBuffer,
-  profiles,
   activeProfile,
   autonomous,
   pendingInterrupt,
   toolCountdown,
   runState,
+  todos,
+  activity,
   onSubmitMessage,
   onCancelPending,
   onCancelTool,
   onStopAgent,
   onClearChat,
   onArtifact,
-  onProfileChange,
   onAutonomousChange,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -56,6 +71,12 @@ export function ChatPane({
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearch, setShowSearch] = useState(false)
   const [nowMs, setNowMs] = useState(Date.now())
+  const [workspaceRoot, setWorkspaceRoot] = useState('')
+  const [historyStats, setHistoryStats] = useState<HistoryStats | null>(null)
+  const [channelStatus, setChannelStatus] = useState<Record<string, string>>({})
+  const [channelQueue, setChannelQueue] = useState<ChannelWorkItem[]>([])
+  const [terminalState, setTerminalState] = useState<TerminalStateSnapshot | null>(null)
+  const [openPopover, setOpenPopover] = useState<'plan' | 'tools' | null>(null)
 
   const visibleMessages = useMemo(() => {
     if (!searchQuery.trim()) return messages
@@ -76,6 +97,46 @@ export function ChatPane({
     const id = window.setInterval(() => setNowMs(Date.now()), 500)
     return () => window.clearInterval(id)
   }, [toolCountdown])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadRunPacket = async () => {
+      const [cwd, stats] = await Promise.all([
+        GetWorkingDir().catch(() => ''),
+        GetHistoryStats().catch(() => null),
+      ])
+      if (cancelled) return
+      setWorkspaceRoot(cwd)
+      setHistoryStats(stats)
+    }
+    void loadRunPacket()
+    const id = window.setInterval(() => { void loadRunPacket() }, streaming ? 2000 : 8000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [messages.length, streaming, activeProfile])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadToolboxState = async () => {
+      const [status, queue, terminal] = await Promise.all([
+        GetChannelBusStatus().catch(() => ({} as Record<string, string>)),
+        ListChannelWorkQueue().then(items => items.slice(0, 5)).catch(() => [] as ChannelWorkItem[]),
+        GetSharedTerminalState().catch(() => null),
+      ])
+      if (cancelled) return
+      setChannelStatus(status)
+      setChannelQueue(queue)
+      setTerminalState(terminal)
+    }
+    void loadToolboxState()
+    const id = window.setInterval(() => { void loadToolboxState() }, openPopover === 'tools' || streaming ? 1500 : 6000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [openPopover, streaming])
 
   const handleSend = useCallback(async () => {
     const text = input.trim()
@@ -110,7 +171,7 @@ export function ChatPane({
   }, [input, images, attachments, messages, onSubmitMessage])
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault()
       void handleSend()
     }
@@ -300,12 +361,24 @@ export function ChatPane({
       <div className="chat-messages">
         {messages.length === 0 && !streaming && (
           <div className="chat-empty">
-            <div className="chat-empty-logo">M</div>
-            <div className="chat-empty-title">TheMauler</div>
-            <div className="chat-empty-sub">Local AI coding assistant</div>
+            <div className="chat-empty-head">
+              <span>$ TheMauler</span>
+              <strong>Ready for a local agent run</strong>
+            </div>
+            <div className="chat-empty-grid">
+              <div><span>Profile</span><strong>{activeProfile || 'none'}</strong></div>
+              <div><span>Mode</span><strong>{autonomous ? 'Autonomous' : 'Manual'}</strong></div>
+              <div><span>Workspace</span><strong title={workspaceRoot}>{shortPath(workspaceRoot) || 'unknown'}</strong></div>
+              <div><span>Context</span><strong>{formatContext(historyStats)}</strong></div>
+            </div>
+            <div className="chat-empty-actions">
+              <div><strong>Start</strong><span>Ask a task, drop files, or open artifacts from Workspace.</span></div>
+              <div><strong>Inspect</strong><span>Use the right panel for files, facts, commands, and activity.</span></div>
+              <div><strong>Control</strong><span>Profile, autonomy, state, and context are pinned above the composer.</span></div>
+            </div>
             <div className="chat-empty-shortcuts">
-              <div className="chat-shortcut"><kbd>Ctrl+Enter</kbd><span>Send message</span></div>
-              <div className="chat-shortcut"><kbd>Enter</kbd><span>New line</span></div>
+              <div className="chat-shortcut"><kbd>Enter</kbd><span>Send message</span></div>
+              <div className="chat-shortcut"><kbd>Ctrl+Enter</kbd><span>New line</span></div>
               <div className="chat-shortcut"><kbd>Ctrl+F</kbd><span>Search chat</span></div>
               <div className="chat-shortcut"><kbd>Ctrl+K</kbd><span>Clear chat</span></div>
               <div className="chat-shortcut"><kbd>Ctrl+,</kbd><span>Settings</span></div>
@@ -314,30 +387,29 @@ export function ChatPane({
           </div>
         )}
         {visibleMessages.map(msg => (
-          <MessageBubble key={msg.id} msg={msg} onCodeBlock={handleCodeBlock} onImageClick={setLightboxImage} />
+          <MessageBubble
+            key={msg.id}
+            msg={msg}
+            onCodeBlock={handleCodeBlock}
+            onImageClick={setLightboxImage}
+            onReadResult={(id) => {
+              setInput(`Use read_tool_result to read result_id=${id} offset=0 limit=8000`)
+              setTimeout(() => inputRef.current?.focus(), 0)
+            }}
+          />
         ))}
 
         {/* Live stream bubble */}
         {streaming && (
-          <div className="msg msg-assistant msg-streaming">
-            <div className="msg-role">Assistant</div>
-            {thinkingBuffer && (
-              <ThinkingBlock text={thinkingBuffer} live />
-            )}
+          <div className="chat-live-strip">
+            <div className="chat-live-main">
+              <span>Live Run</span>
+              <strong>{liveRunLabel(runState?.state || 'working', toolCountdown?.name)}</strong>
+              <p>{liveRunDetail(runState?.detail, streamBuffer, thinkingBuffer, activity, toolCountdown)}</p>
+            </div>
             {toolCountdown && (
               <ToolCountdownCard countdown={toolCountdown} nowMs={nowMs} onCancel={onCancelTool} />
             )}
-            {streamBuffer ? (
-              <div className="msg-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamBuffer}</ReactMarkdown>
-              </div>
-            ) : !thinkingBuffer ? (
-              <div className="msg-body agent-live-status">
-                <div className="agent-live-title">{formatRunState(runState?.state || 'working')}</div>
-                <div className="agent-live-detail">{runState?.detail || 'Waiting for model text or tool output...'}</div>
-                <div className="thinking-dots"><span /><span /><span /></div>
-              </div>
-            ) : null}
           </div>
         )}
 
@@ -369,26 +441,54 @@ export function ChatPane({
             <button onClick={onCancelPending}>Cancel</button>
           </div>
         )}
-        <div className="chat-modebar">
-          <label className="chat-mode-control">
-            <span>Profile</span>
-            <select
-              value={activeProfile}
-              onChange={e => onProfileChange(e.target.value)}
-              disabled={streaming}
+        <div className="chat-run-footer">
+          <div className="run-popover-wrap">
+            <button
+              type="button"
+              className={`run-popover-trigger ${openPopover === 'plan' ? 'active' : ''}`}
+              onClick={() => setOpenPopover(v => v === 'plan' ? null : 'plan')}
+              title="Show the active task plan"
             >
-              {profiles.map(name => <option key={name} value={name}>{name}</option>)}
-            </select>
-          </label>
-          <label className={`autonomous-toggle ${autonomous ? 'active' : ''}`} title="Autonomous mode lets the agent run tools without confirmation prompts.">
+              Plan <strong>{todoSummary(todos)}</strong>
+            </button>
+            {openPopover === 'plan' && (
+              <PlanPopover todos={todos} />
+            )}
+          </div>
+          <div className="run-popover-wrap">
+            <button
+              type="button"
+              className={`run-popover-trigger ${openPopover === 'tools' ? 'active' : ''}`}
+              onClick={() => setOpenPopover(v => v === 'tools' ? null : 'tools')}
+              title="Show current tool/run state"
+            >
+              Tools <strong>{toolSummary(activity, toolCountdown)}</strong>
+            </button>
+            {openPopover === 'tools' && (
+              <ToolboxPopover
+                activity={activity}
+                countdown={toolCountdown}
+                runState={runState}
+                profile={activeProfile}
+                context={formatContext(historyStats)}
+                workspace={workspaceRoot}
+                autonomous={autonomous}
+                channelStatus={channelStatus}
+                channelQueue={channelQueue}
+                terminalState={terminalState}
+              />
+            )}
+          </div>
+          <label className={`run-autonomy ${autonomous ? 'active' : ''}`} title="Autonomous mode lets the agent run tools without confirmation prompts.">
             <input
               type="checkbox"
               checked={autonomous}
               onChange={e => onAutonomousChange(e.target.checked)}
               disabled={streaming}
             />
-            Autonomous
+            <span>{autonomous ? 'Auto' : 'Manual'}</span>
           </label>
+          {toolCountdown && <RunPill label="Tool" value={`${toolCountdown.name} ${formatDuration(Math.ceil(Math.max(0, toolCountdown.deadline - nowMs) / 1000))}`} tone="live" />}
         </div>
         <div className="chat-input-card">
           {attachments.length > 0 && (
@@ -407,26 +507,26 @@ export function ChatPane({
             onPaste={handlePaste}
             onDrop={e => void handleDrop(e)}
             onDragOver={e => e.preventDefault()}
-            placeholder="Ask anything... drop a file to attach. Ctrl+Enter sends."
-            rows={3}
+            placeholder="Ask anything... drop a file to attach. Enter sends; Ctrl+Enter adds a new line."
+            rows={4}
             disabled={false}
             spellCheck
             lang="en"
             autoCapitalize="sentences"
           />
           <div className="chat-input-actions">
-            {streaming && (
-              <button className="danger" onClick={onStopAgent}>Stop</button>
-            )}
-            <button onClick={() => void Undo()} title="Undo last file change (Ctrl+Z)">Undo</button>
+            <button className="composer-stop-btn danger" onClick={onStopAgent} disabled={!streaming} title={streaming ? 'Stop the current run' : 'No run is active'}>
+              Stop
+            </button>
+            <button className="composer-undo-btn" onClick={() => void Undo()} title="Undo last file change (Ctrl+Z)">Undo</button>
             <button className="chat-clear-btn" onClick={onClearChat} title="Clear chat history (Ctrl+K)" disabled={streaming}>Clear</button>
             <button
-              className="primary"
+              className={`primary composer-send-btn ${streaming ? 'interrupt' : ''}`}
               onClick={() => void handleSend()}
               disabled={(!input.trim() && images.length === 0 && attachments.length === 0) || pendingInterrupt}
               title={streaming ? 'Interrupt the current run and send this draft' : 'Send'}
             >
-              {streaming ? 'Interrupt & Send' : 'Send'}
+              <span>{streaming ? 'Interrupt & Send' : 'Send'}</span>
             </button>
           </div>
         </div>
@@ -435,9 +535,205 @@ export function ChatPane({
   )
 }
 
+function todoSummary(todos: TodoItem[]): string {
+  if (todos.length === 0) return 'none'
+  const done = todos.filter(t => t.status === 'done').length
+  const blocked = todos.filter(t => t.status === 'blocked').length
+  if (blocked > 0) return `${done}/${todos.length}, ${blocked} blocked`
+  return `${done}/${todos.length}`
+}
+
+function toolSummary(activity: AgentActivity[], countdown: ToolCountdown | null): string {
+  if (countdown) return countdown.name
+  const running = activity.find(item => item.status === 'running')
+  if (running) return running.name
+  const last = activity[0]
+  return last ? `${last.name} ${last.status}` : 'idle'
+}
+
+function PlanPopover({ todos }: { todos: TodoItem[] }) {
+  const current = todos.find(t => t.status === 'in_progress') || todos.find(t => t.status === 'blocked') || todos.find(t => t.status !== 'done')
+  return (
+    <div className="composer-popover composer-plan-popover">
+      <div className="composer-popover-head">
+        <span>Active Plan</span>
+        <strong>{todoSummary(todos)}</strong>
+      </div>
+      <p className="composer-popover-note">Plan state is not evidence. Confirm important claims in Facts, logs, files, or terminal output.</p>
+      {current && (
+        <div className={`plan-current plan-current-${current.status}`}>
+          <span>Now</span>
+          <strong>{current.text}</strong>
+          {current.detail && <small>{current.detail}</small>}
+        </div>
+      )}
+      <div className="plan-popover-list">
+        {todos.length === 0 ? (
+          <div className="empty-popover-row">No active plan yet.</div>
+        ) : todos.map(item => (
+          <div key={item.id} className={`plan-popover-item plan-${item.status}`}>
+            <span>{item.status}</span>
+            <strong>{item.text}</strong>
+            {item.detail && <small>{item.detail}</small>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ToolboxPopover({
+  activity,
+  countdown,
+  runState,
+  profile,
+  context,
+  workspace,
+  autonomous,
+  channelStatus,
+  channelQueue,
+  terminalState,
+}: {
+  activity: AgentActivity[]
+  countdown: ToolCountdown | null
+  runState: RunStatePayload | null
+  profile: string
+  context: string
+  workspace: string
+  autonomous: boolean
+  channelStatus: Record<string, string>
+  channelQueue: ChannelWorkItem[]
+  terminalState: TerminalStateSnapshot | null
+}) {
+  const queued = Number(channelStatus.queued_work || channelQueue.length || 0)
+  return (
+    <div className="composer-popover composer-tools-popover">
+      <div className="composer-popover-head">
+        <span>Toolbox</span>
+        <strong>{formatRunState(runState?.state || 'ready')} · {terminalState?.state || 'terminal unknown'}</strong>
+      </div>
+      <div className="toolbox-grid">
+        <div><span>Profile</span><strong>{profile || 'none'}</strong></div>
+        <div><span>Mode</span><strong>{autonomous ? 'Autonomous' : 'Manual'}</strong></div>
+        <div><span>Workspace</span><strong title={workspace}>{shortPath(workspace) || 'unknown'}</strong></div>
+        <div><span>Context</span><strong>{context}</strong></div>
+        <div><span>Terminal</span><strong title={terminalState?.summary}>{terminalState?.state || 'unknown'}</strong></div>
+        <div><span>Channel</span><strong>{queued} queued</strong></div>
+        <div><span>Telegram</span><strong title={channelStatus.telegram_status}>{channelStatus.telegram_running === 'true' ? 'running' : 'off'}</strong></div>
+        <div><span>Agent</span><strong>{channelStatus.agent_running === 'true' ? 'running' : 'idle'}</strong></div>
+      </div>
+      {countdown && (
+        <div className="toolbox-active">
+          <span>Running tool</span>
+          <strong>{countdown.name}</strong>
+        </div>
+      )}
+      {terminalState?.summary && (
+        <div className="toolbox-active toolbox-terminal">
+          <span>Terminal summary</span>
+          <strong>{terminalState.summary}</strong>
+        </div>
+      )}
+      {channelQueue.length > 0 && (
+        <div className="toolbox-activity toolbox-queue">
+          {channelQueue.map(item => (
+            <div key={item.id} className="toolbox-activity-row tool-running">
+              <span>{item.status}</span>
+              <strong>{item.route.lane}</strong>
+              <small>{truncateMiddle(item.envelope.text, 46)}</small>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="toolbox-activity">
+        {activity.length === 0 ? (
+          <div className="empty-popover-row">No recent tool activity.</div>
+        ) : activity.slice(0, 6).map(item => (
+          <div key={item.id} className={`toolbox-activity-row tool-${item.status}`}>
+            <span>{item.status}</span>
+            <strong>{item.name}</strong>
+            {typeof item.durationMs === 'number' && <small>{Math.max(0, Math.round(item.durationMs))}ms</small>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function formatRunState(state: string): string {
   if (!state) return 'Working'
   return state.replaceAll('_', ' ').replace(/\b\w/g, ch => ch.toUpperCase())
+}
+
+function liveRunLabel(state: string, tool?: string): string {
+  if (tool) return `Running ${tool}`
+  return formatRunState(state)
+}
+
+function liveRunDetail(
+  detail?: string,
+  streamBuffer?: string,
+  thinkingBuffer?: string,
+  activity: AgentActivity[] = [],
+  countdown: ToolCountdown | null = null,
+): string {
+  if (countdown) return `Running ${countdown.name}; full command/output is in the terminal and AI Commands split.`
+  if (detail?.trim()) return detail.trim()
+  if (streamBuffer?.trim()) return `Writing: ${truncateMiddle(streamBuffer.trim().replace(/\s+/g, ' '), 120)}`
+  if (thinkingBuffer?.trim()) return 'Thinking'
+  const running = activity.find(item => item.status === 'running')
+  if (running) return `Using ${running.name}; details are in AI Commands.`
+  const last = activity[0]
+  if (last) {
+    const status = last.status === 'done' ? 'finished' : last.status
+    return `${last.name} ${status}; next decision is being prepared.`
+  }
+  return 'Preparing the next action.'
+}
+
+function RunPill({
+  label,
+  value,
+  title,
+  tone,
+}: {
+  label: string
+  value: string
+  title?: string
+  tone?: 'idle' | 'live' | 'warn'
+}) {
+  return (
+    <div className={`run-pill ${tone ? `run-pill-${tone}` : ''}`} title={title || `${label}: ${value}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
+function formatContext(stats: HistoryStats | null): string {
+  if (!stats || stats.budget <= 0) return '-'
+  return `${compactNumber(stats.token_count)} / ${compactNumber(stats.budget)}`
+}
+
+function compactNumber(value: number): string {
+  if (!Number.isFinite(value)) return '-'
+  if (Math.abs(value) >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`
+  return String(Math.round(value))
+}
+
+function truncateMiddle(value: string, max: number): string {
+  const text = (value || '').trim()
+  if (text.length <= max) return text
+  const head = Math.max(8, Math.floor((max - 1) * 0.62))
+  const tail = Math.max(6, max - head - 1)
+  return `${text.slice(0, head)}…${text.slice(-tail)}`
+}
+
+function shortPath(path: string): string {
+  if (!path) return ''
+  const parts = path.split(/[\\/]/).filter(Boolean)
+  if (parts.length <= 2) return path
+  return `.../${parts.slice(-2).join('/')}`
 }
 
 function attachmentSubtitle(att: ChatAttachment): string {
@@ -480,7 +776,7 @@ function ToolCountdownCard({
   const elapsed = Math.max(0, nowMs - countdown.startedAt)
   const total = Math.max(1, countdown.timeoutSec * 1000)
   const pct = Math.min(100, Math.round((elapsed / total) * 100))
-  const isShell = countdown.name === 'shell' || countdown.name === 'bash'
+  const isShell = countdown.name === 'shell'
   return (
     <div className="tool-countdown-card">
       <div className="tool-countdown-row">
@@ -527,19 +823,22 @@ function MessageBubble({
   msg,
   onCodeBlock,
   onImageClick,
+  onReadResult,
 }: {
   msg: ChatMessage
   onCodeBlock: (code: string, lang: string) => void
   onImageClick: (src: string) => void
+  onReadResult: (id: string) => void
 }) {
   const [copied, setCopied] = useState(false)
   const [saved, setSaved] = useState(false)
   const COLLAPSE_THRESHOLD = 8
   const isToolMsg = msg.role === 'tool_call' || msg.role === 'tool_result'
   const prettyContent = isToolMsg ? tryPrettyJson(msg.content) : msg.content
+  const planOutput = msg.role === 'tool_result' && isPlanToolOutput(prettyContent)
   const guardedToolOutput = msg.role === 'tool_result' && prettyContent.startsWith('[Guardrail:')
   const lineCount = prettyContent.split('\n').length
-  const collapsible = isToolMsg && lineCount > COLLAPSE_THRESHOLD
+  const collapsible = isToolMsg && !planOutput && lineCount > COLLAPSE_THRESHOLD
   const [collapsed, setCollapsed] = useState(collapsible)
   const roleClass = `msg msg-${msg.role}${msg.queued ? ' msg-queued' : ''}${guardedToolOutput ? ' msg-guardrail' : ''}`
 
@@ -618,8 +917,10 @@ function MessageBubble({
             ))}
           </div>
         )}
-        {isToolMsg ? (
-          <pre className="tool-pre">{prettyContent}</pre>
+        {planOutput ? (
+          <PlanResultCard content={prettyContent} rawContent={msg.content} />
+        ) : isToolMsg ? (
+          <ToolMessageCard role={msg.role} content={prettyContent} rawContent={msg.content} guarded={guardedToolOutput} onReadResult={onReadResult} />
         ) : (
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -664,6 +965,161 @@ function MessageBubble({
       </div>
     </div>
   )
+}
+
+function isPlanToolOutput(content: string): boolean {
+  const text = content.trim().toLowerCase()
+  if (!text.includes('active task plan')) return false
+  return text.includes('[done]') || text.includes('[in_progress]') || text.includes('[pending]') || text.includes('todo-')
+}
+
+function PlanResultCard({ content, rawContent }: { content: string; rawContent: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const lines = content.split('\n').map(line => line.trim()).filter(Boolean)
+  const todoLines = lines.filter(line => /^\s*-\s*\[/.test(line) || line.includes('todo-'))
+  const done = todoLines.filter(line => line.includes('[done]')).length
+  const blocked = todoLines.filter(line => line.includes('[blocked]')).length
+  const current = todoLines.find(line => line.includes('[in_progress]')) || todoLines.find(line => line.includes('[pending]')) || todoLines[0]
+  const copy = () => void navigator.clipboard.writeText(rawContent)
+  return (
+    <div className="tool-card plan-result-card">
+      <div className="tool-card-head">
+        <div className="tool-card-title">
+          <span>Plan update</span>
+          <strong title={current || 'Active task plan updated'}>{current ? stripPlanBullet(current) : 'Active task plan updated'}</strong>
+        </div>
+        <div className="tool-card-actions">
+          <span className="tool-chip">{done}/{todoLines.length || '?'} done</span>
+          {blocked > 0 && <span className="tool-chip">{blocked} blocked</span>}
+          <button onClick={copy}>Copy</button>
+          <button onClick={() => setExpanded(v => !v)}>{expanded ? 'Hide plan' : 'Show plan'}</button>
+        </div>
+      </div>
+      <div className="plan-result-note">
+        Plan state moved to the composer Plan popup. Chat only keeps this compact update.
+      </div>
+      {expanded && (
+        <pre className="tool-raw">{rawContent}</pre>
+      )}
+    </div>
+  )
+}
+
+function stripPlanBullet(line: string): string {
+  return line.replace(/^\s*-\s*\[[^\]]+\]\s*/, '').trim()
+}
+
+function ToolMessageCard({
+  role,
+  content,
+  rawContent,
+  guarded,
+  onReadResult,
+}: {
+  role: ChatMessage['role']
+  content: string
+  rawContent: string
+  guarded: boolean
+  onReadResult: (id: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const parsed = parseToolPayload(content)
+  const command = parsed.command || parsed.cmd || parsed.path || parsed.query || ''
+  const status = toolStatus(content, role, guarded)
+  const summary = command || parsed.detail || parsed.error || firstMeaningfulLine(content) || role
+  const timeout = parsed.timeout ? `${parsed.timeout}s` : ''
+  const isResult = role === 'tool_result'
+  const resultIds = extractResultIds(content)
+  const copy = (value: string) => {
+    void navigator.clipboard.writeText(value)
+  }
+
+  return (
+    <div className={`tool-card tool-card-${status}`}>
+      <div className="tool-card-head">
+        <div className="tool-card-title">
+          <span>{isResult ? 'Result' : toolCallLabel(parsed, content)}</span>
+          <strong title={summary}>{summary}</strong>
+        </div>
+        <div className="tool-card-actions">
+          {timeout && <span className="tool-chip">{timeout}</span>}
+          <span className="tool-chip">{status}</span>
+          {resultIds.map(id => (
+            <button key={id} className="tool-result-link" onClick={() => onReadResult(id)} title={`Read ${id} with read_tool_result`}>
+              Read result
+            </button>
+          ))}
+          <button onClick={() => copy(command || rawContent)}>{command ? 'Copy cmd' : 'Copy'}</button>
+          <button onClick={() => setExpanded(v => !v)}>{expanded ? 'Hide raw' : 'Raw'}</button>
+        </div>
+      </div>
+      {command && (
+        <pre className="tool-command-line">{command}</pre>
+      )}
+      {isResult && (
+        <pre className="tool-result-preview">{compactToolOutput(content)}</pre>
+      )}
+      {expanded && (
+        <pre className="tool-raw">{rawContent}</pre>
+      )}
+    </div>
+  )
+}
+
+function extractResultIds(text: string): string[] {
+  const ids = new Set<string>()
+  const re = /\bresult_id[=:]\s*"?([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)"?/g
+  for (const match of text.matchAll(re)) {
+    ids.add(match[1].replace(/[.,;)\]]+$/, ''))
+  }
+  return Array.from(ids).slice(0, 3)
+}
+
+function parseToolPayload(text: string): Record<string, string> {
+  const t = text.trim()
+  if (t.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(t) as Record<string, unknown>
+      const out: Record<string, string> = {}
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          out[key] = String(value)
+        }
+      }
+      return out
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+function toolCallLabel(parsed: Record<string, string>, content: string): string {
+  if (parsed.command) return 'shell'
+  if (parsed.path) return 'file'
+  if (parsed.query || parsed.pattern) return 'search'
+  const first = firstMeaningfulLine(content)
+  if (first.includes('{')) return 'tool call'
+  return first.slice(0, 28) || 'tool call'
+}
+
+function toolStatus(content: string, role: ChatMessage['role'], guarded: boolean): string {
+  if (guarded) return 'guarded'
+  const lower = content.toLowerCase()
+  if (lower.includes('exit code 0') || lower.includes('[wsl exit 0') || lower.includes('status: ok')) return 'ok'
+  if (lower.includes('exit code') || lower.includes('error:') || lower.includes('failed') || lower.includes('denied')) return 'error'
+  if (role === 'tool_call') return 'call'
+  return 'done'
+}
+
+function firstMeaningfulLine(text: string): string {
+  return text.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? ''
+}
+
+function compactToolOutput(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= 1800) return trimmed
+  return `${trimmed.slice(0, 1800)}\n...`
 }
 
 function ThinkingBlock({ text, live = false }: { text: string; live?: boolean }) {

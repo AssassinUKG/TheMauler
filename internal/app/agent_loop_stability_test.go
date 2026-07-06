@@ -31,14 +31,45 @@ func TestCanonicalToolArgsFallsBackForNonObject(t *testing.T) {
 	}
 }
 
+func TestNormalizeShellCommandForDedup(t *testing.T) {
+	base := "curl -s --max-time 5 http://10.129.26.26/"
+	variants := []string{
+		base,
+		base + " | head -30",
+		base + " | head -100",
+		base + " | tail -n 20",
+		base + " | cat",
+	}
+	want := normalizeShellCommandForDedup(base)
+	for _, variant := range variants {
+		if got := normalizeShellCommandForDedup(variant); got != want {
+			t.Fatalf("normalizeShellCommandForDedup(%q) = %q, want %q", variant, got, want)
+		}
+	}
+	if got := normalizeShellCommandForDedup("curl http://10.129.26.27/ | head -30"); got == want {
+		t.Fatalf("different target URL must not collide: %q", got)
+	}
+	if got := normalizeShellCommandForDedup("nmap -sV 10.129.26.26"); got != "nmap -sV 10.129.26.26" {
+		t.Fatalf("non-pager command changed: %q", got)
+	}
+}
+
+func TestCanonicalToolArgsNormalizesCommandPagerOnlyTail(t *testing.T) {
+	a := canonicalToolArgs(json.RawMessage(`{"command":"curl http://x/ | head -30","timeout":5}`))
+	b := canonicalToolArgs(json.RawMessage(`{"timeout":5,"command":"curl http://x/ | head -100"}`))
+	if a == "" || a != b {
+		t.Fatalf("canonical command args should ignore pager-only tails: %q vs %q", a, b)
+	}
+}
+
 func TestIdempotentReadKeyOnlyTracksReadTools(t *testing.T) {
-	if idempotentReadKey("write_file", json.RawMessage(`{"path":"a"}`)) != "" {
-		t.Fatal("write_file must not be tracked as an idempotent read")
+	if idempotentReadKey("write", json.RawMessage(`{"path":"a"}`)) != "" {
+		t.Fatal("write must not be tracked as an idempotent read")
 	}
-	if idempotentReadKey("read_file", json.RawMessage(`{"path":"a"}`)) == "" {
-		t.Fatal("read_file should produce a key")
+	if idempotentReadKey("read", json.RawMessage(`{"path":"a"}`)) == "" {
+		t.Fatal("read should produce a key")
 	}
-	if idempotentReadKey("read_file", json.RawMessage("")) != "" {
+	if idempotentReadKey("read", json.RawMessage("")) != "" {
 		t.Fatal("missing args (logging off) must produce no key")
 	}
 }
@@ -46,12 +77,12 @@ func TestIdempotentReadKeyOnlyTracksReadTools(t *testing.T) {
 func TestRepeatedIdenticalReadBlockFiresOnThirdCall(t *testing.T) {
 	args := `{"path":"main.go"}`
 	run := TaskRun{Tools: []TaskToolEvent{
-		{Name: "read_file", Input: args, Status: "done"},
-		{Name: "read_file", Input: `{ "path": "main.go" }`, Status: "done"}, // same call, reformatted
+		{Name: "read", Input: args, Status: "done"},
+		{Name: "read", Input: `{ "path": "main.go" }`, Status: "done"}, // same call, reformatted
 	}}
-	tc := readToolCall("read_file", args)
+	tc := readToolCall("read", args)
 	msg := repeatedIdenticalReadBlock(run, tc)
-	if msg == "" || !strings.Contains(msg, "read_file skipped") {
+	if msg == "" || !strings.Contains(msg, "read cache hit") {
 		t.Fatalf("third identical read should be blocked, got %q", msg)
 	}
 }
@@ -59,32 +90,36 @@ func TestRepeatedIdenticalReadBlockFiresOnThirdCall(t *testing.T) {
 func TestRepeatedIdenticalReadBlockAllowsSecondCall(t *testing.T) {
 	args := `{"path":"main.go"}`
 	run := TaskRun{Tools: []TaskToolEvent{
-		{Name: "read_file", Input: args, Status: "done"},
+		{Name: "read", Input: args, Status: "done"},
 	}}
-	if msg := repeatedIdenticalReadBlock(run, readToolCall("read_file", args)); msg != "" {
+	if msg := repeatedIdenticalReadBlock(run, readToolCall("read", args)); msg != "" {
 		t.Fatalf("a single re-read (e.g. after compaction) must be allowed, got %q", msg)
 	}
 }
 
 func TestRepeatedIdenticalReadBlockDistinguishesArgs(t *testing.T) {
 	run := TaskRun{Tools: []TaskToolEvent{
-		{Name: "read_file", Input: `{"path":"a.go"}`, Status: "done"},
-		{Name: "read_file", Input: `{"path":"a.go"}`, Status: "done"},
+		{Name: "read", Input: `{"path":"a.go"}`, Status: "done"},
+		{Name: "read", Input: `{"path":"a.go"}`, Status: "done"},
 	}}
-	if msg := repeatedIdenticalReadBlock(run, readToolCall("read_file", `{"path":"b.go"}`)); msg != "" {
+	if msg := repeatedIdenticalReadBlock(run, readToolCall("read", `{"path":"b.go"}`)); msg != "" {
 		t.Fatalf("a read of a different path must not be blocked, got %q", msg)
 	}
 }
 
-func TestRepeatedPreToolRecoveryIgnoredEscalatesAfterReadSkip(t *testing.T) {
+func TestRepeatedIdenticalReadRecoveryKeepsRunRecoveringAfterReadSkip(t *testing.T) {
 	args := `{"path":"main.go"}`
-	// A prior skip carrying the soft-recovery suffix means the model already got
-	// the nudge and repeated the call — the next attempt should hard-stop.
 	run := TaskRun{Tools: []TaskToolEvent{
-		{Name: "read_file", Input: args, Status: "skipped", Result: "read_file skipped: ...\nRecovery: this repeated command was skipped without stopping the run."},
+		{Name: "read", Input: args, Status: "done", Result: "package main\n"},
+		{Name: "read", Input: args, Status: "done", Result: "package main\n"},
+		{Name: "read", Input: args, Status: "skipped", Result: "read cache hit: ...\nRecovery: this repeated command was skipped without stopping the run."},
 	}}
-	if !repeatedPreToolRecoveryIgnored(run, readToolCall("read_file", args)) {
-		t.Fatal("an ignored duplicate-read nudge should escalate to a hard stop")
+	decision := evaluatePreToolRecoveryPolicy(run, readToolCall("read", args))
+	if decision.HardStop || decision.StopReason != "" || decision.ToolStatus != "skipped" || decision.RunState != "recovering" {
+		t.Fatalf("duplicate successful reads should keep recovering, got %#v", decision)
+	}
+	if !strings.Contains(decision.Message, "Cached result preview") {
+		t.Fatalf("duplicate read should return cached evidence, got %q", decision.Message)
 	}
 }
 
@@ -108,16 +143,33 @@ func TestToolChoiceForStaysAutoMidTaskAndConversational(t *testing.T) {
 
 func TestModelParamBillions(t *testing.T) {
 	cases := map[string]float64{
-		"qwen3.6-27b":                       27,
-		"gemma-4-26B-A4B-it-QAT-Q4_0.gguf":  26, // MoE: total, not active 4
-		"some-model-8b-instruct":            8,
-		"qwen3-2b":                          2,
-		"no-size-here":                      0,
-		"llama-3.1-q4_k_m":                  0, // quant token must not match
+		"qwen3.6-27b":                      27,
+		"gemma-4-26B-A4B-it-QAT-Q4_0.gguf": 26, // MoE: total, not active 4
+		"some-model-8b-instruct":           8,
+		"qwen3-2b":                         2,
+		"no-size-here":                     0,
+		"llama-3.1-q4_k_m":                 0, // quant token must not match
 	}
 	for id, want := range cases {
 		if got := modelParamBillions(id); got != want {
 			t.Errorf("modelParamBillions(%q) = %g, want %g", id, got, want)
 		}
+	}
+}
+
+func TestMostRepeatedScriptInvocation(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "shell", Input: `{"command":"python3 /tmp/x/exploit.py --command id"}`},
+		{Name: "shell", Input: `{"command":"python3 /tmp/x/exploit.py --command 'ls -la'"}`},
+		{Name: "shell", Input: `{"command":"python3 /tmp/x/exploit.py --command whoami"}`},
+		{Name: "shell", Input: `{"command":"cat /etc/passwd"}`},
+		{Name: "shell", Input: `{"command":"python3 /tmp/x/exploit.py --command 'find / -perm -4000'"}`},
+	}}
+	sig, n := mostRepeatedScriptInvocation(run)
+	if sig != "/tmp/x/exploit.py" || n != 4 {
+		t.Fatalf("got sig=%q n=%d, want /tmp/x/exploit.py 4", sig, n)
+	}
+	if _, n := mostRepeatedScriptInvocation(TaskRun{Tools: []TaskToolEvent{{Name: "shell", Input: `{"command":"ls"}`}}}); n != 0 {
+		t.Fatalf("expected 0 for no scripts, got %d", n)
 	}
 }

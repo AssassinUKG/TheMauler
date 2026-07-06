@@ -5,7 +5,10 @@ import {
   GetLabStatus,
   GetSettings,
   GetSpecPlan,
+  ListLedgerEvents,
+  ReadFileContent,
   type SpecPlan,
+  type LedgerEvent,
   ListMemory,
   ListTaskRuns,
   ListTodos,
@@ -32,6 +35,7 @@ interface Props {
   statsVersion: number
   taskRunVersion: number
   runStartedAt: number | null
+  onOpenFile?: (file: { path: string; name: string; content: string; lang: string }) => void
 }
 
 type StatusTone = 'ok' | 'warn' | 'bad' | 'pending' | 'muted'
@@ -63,6 +67,7 @@ interface OpsCommand {
   durationMs?: number
   output?: string
   tone: StatusTone
+  repeats?: number
 }
 
 interface OpsEvidence {
@@ -89,6 +94,7 @@ export function LiveOpsPage({
   statsVersion,
   taskRunVersion,
   runStartedAt,
+  onOpenFile,
 }: Props) {
   const [runs, setRuns] = useState<TaskRun[]>([])
   const [stats, setStats] = useState<HistoryStats | null>(null)
@@ -96,10 +102,11 @@ export function LiveOpsPage({
   const [memory, setMemory] = useState<MemoryEntry[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
+  const [ledgerEvents, setLedgerEvents] = useState<LedgerEvent[]>([])
   const [opsDraft, setOpsDraft] = useState<OpsDraft>({ target: '', vpn: '', artifact: '', opsProfile: 'pentesting' })
   const [savingOps, setSavingOps] = useState('')
   const [now, setNow] = useState(Date.now())
-  const [sideTab, setSideTab] = useState<'facts' | 'questions' | 'files' | 'risks' | 'review'>('facts')
+  const [opsView, setOpsView] = useState<'commands' | 'evidence' | 'timeline' | 'files'>('commands')
   const [specPlan, setSpecPlan] = useState<SpecPlan | null>(null)
 
   useEffect(() => {
@@ -110,13 +117,15 @@ export function LiveOpsPage({
       ListMemory().catch(() => [] as MemoryEntry[]),
       ListTodos().catch(() => [] as TodoItem[]),
       GetSettings().catch(() => null),
-    ]).then(([nextRuns, nextStats, nextLab, nextMemory, nextTodos, nextSettings]) => {
-      setRuns(nextRuns)
+      ListLedgerEvents(300).catch(() => [] as LedgerEvent[]),
+    ]).then(([nextRuns, nextStats, nextLab, nextMemory, nextTodos, nextSettings, nextLedger]) => {
+      setRuns(Array.isArray(nextRuns) ? nextRuns : [])
       setStats(nextStats)
       setLab(nextLab)
-      setMemory(nextMemory)
-      setTodos(nextTodos)
+      setMemory(Array.isArray(nextMemory) ? nextMemory : [])
+      setTodos(Array.isArray(nextTodos) ? nextTodos : [])
       setSettings(nextSettings)
+      setLedgerEvents(Array.isArray(nextLedger) ? nextLedger : [])
       if (nextLab) {
         setOpsDraft({
           target: nextLab.target || '',
@@ -157,7 +166,7 @@ export function LiveOpsPage({
   const kpis = useMemo(() => {
     const elapsed = streaming && runStartedAt ? now - runStartedAt : latestRun?.duration_ms
     const toolCount = streaming ? activity.length : latestTools.length
-    const edits = latestTools.filter(tool => ['write_file', 'edit_file'].includes(tool.name)).length
+    const edits = latestTools.filter(tool => ['write', 'edit'].includes(tool.name)).length
     const tests = latestTools.filter(tool => tool.name === 'shell' && /test|npm run build|go vet|go test/i.test(`${tool.input ?? ''} ${tool.result ?? ''}`)).length
     const recoveries = (latestRun?.events ?? []).filter(event => ['recovering', 'tool_error', 'continue', 'truncated'].includes(event.kind)).length
     const tokens = latestRun?.total_tokens && latestRun.total_tokens > 0
@@ -188,8 +197,9 @@ export function LiveOpsPage({
     if (latestRun?.model) next.push(`Model: ${latestRun.model}`)
     if (activeProfile) next.push(`Profile: ${activeProfile}`)
     for (const item of memoryFacts(memory).slice(0, 4)) next.push(item)
-    return next.map(item => toInsight(item)).slice(0, 8)
-  }, [activeProfile, lab, latestRun?.model, memory])
+    const ledgerFacts = deriveLedgerFacts(ledgerEvents).slice(0, 8)
+    return [...ledgerFacts, ...next.map(item => toInsight(item))].slice(0, 10)
+  }, [activeProfile, lab, latestRun?.model, memory, ledgerEvents])
 
   const openQuestions = useMemo(() => deriveOpenQuestions({
     activeTool,
@@ -212,11 +222,31 @@ export function LiveOpsPage({
   const evidence = useMemo(() => deriveEvidence({ activity, latestRun, lab, memory, profile: activeOpsProfile }), [activity, activeOpsProfile, lab, latestRun, memory])
   const artifacts = useMemo(() => deriveArtifacts({ activity, latestRun, lab }), [activity, lab, latestRun])
 
+  const openOpsPath = async (rawPath: string) => {
+    const path = normaliseDisplayPath(rawPath)
+    if (!path || !onOpenFile) return
+    const content = await ReadFileContent(path)
+    onOpenFile({
+      path,
+      name: basename(path),
+      content,
+      lang: languageFromPath(path),
+    })
+  }
+
   const risks = useMemo(() => deriveRisks({
     latestRun,
     stats,
     todos,
   }), [latestRun, stats, todos])
+  const overview = useMemo(() => deriveOpsOverview({
+    evidence,
+    commands,
+    artifacts,
+    touchedFiles,
+    latestRun,
+    risks,
+  }), [artifacts, commands, evidence, latestRun, risks, touchedFiles])
 
   const nextReview = useMemo(() => {
     const items: string[] = []
@@ -227,6 +257,9 @@ export function LiveOpsPage({
     if (items.length === 0) items.push(streaming ? 'Watch the trace for the next tool result' : 'Start a task or select a recent log')
     return items
   }, [activeTool, latestRun, stats, streaming])
+
+  const primaryNext = openQuestions[0]?.text || nextReview[0] || (streaming ? 'Watch tool output in the terminal' : 'Start or resume a run from Chat')
+  const primaryRisk = risks[0]?.text || 'No active blocker detected'
 
   const saveLab = async () => {
     setSavingOps('Saving lab context')
@@ -244,14 +277,14 @@ export function LiveOpsPage({
     }
   }
 
-  const forceOpsMode = async () => {
-    setSavingOps('Forcing Ops mode')
+  const forceAgentMode = async () => {
+    setSavingOps('Switching to Auto')
     try {
-      await SetAgentModeOverride('Ops')
+      await SetAgentModeOverride('Auto')
       if (settings) {
         setSettings({
           ...settings,
-          agents: { ...settings.agents, mode_override: 'Ops' },
+          agents: { ...settings.agents, mode_override: 'Auto' },
         })
       }
     } finally {
@@ -274,20 +307,11 @@ export function LiveOpsPage({
     }
   }
 
-  const applyDeepOps = async () => {
-    setSavingOps('Applying deep Ops')
+  const applyFullAgent = async () => {
+    setSavingOps('Applying full agent')
     try {
       await ApplySafetyPreset('unrestricted')
       const next = await GetSettings()
-      const ops = next.agents.presets.Ops || {
-        enabled: true,
-        profile: '',
-        context_budget: 32768,
-        autonomy: 'balanced',
-        toolset: 'unrestricted',
-        instructions: '',
-        tool_permissions: {},
-      }
       await UpdateSettings({
         ...next,
         tools: {
@@ -302,31 +326,8 @@ export function LiveOpsPage({
         },
         agents: {
           ...next.agents,
-          mode_override: 'Ops',
+          mode_override: 'Auto',
           max_tool_calls: Math.max(next.agents.max_tool_calls || 0, 200),
-          presets: {
-            ...next.agents.presets,
-            Ops: {
-              ...ops,
-              enabled: true,
-              toolset: 'unrestricted',
-              tool_permissions: {
-                ...ops.tool_permissions,
-                shell: true,
-                bash: true,
-                web_search: true,
-                fetch_url: true,
-                browser_open: true,
-                browser_snapshot: true,
-                browser_click: true,
-                browser_type: true,
-                browser_extract: true,
-                browser_screenshot: true,
-                browser_close: true,
-                browser_agent: true,
-              },
-            },
-          },
         },
       })
       setSettings(await GetSettings())
@@ -341,14 +342,14 @@ export function LiveOpsPage({
         <div className="ops-title-block">
           <div className="ops-live-line">
             <span className={`ops-live-dot ${streaming ? 'active' : ''}`} />
-            <span>{streaming ? 'Live Ops' : 'Last Run'}</span>
+            <span>{streaming ? 'Live Run' : 'Last Run'}</span>
           </div>
           <h1>{objective}</h1>
         </div>
         <div className="ops-top-actions">
-          <button type="button" onClick={forceOpsMode} disabled={savingOps !== '' || streaming}>Force Ops</button>
+          <button type="button" onClick={forceAgentMode} disabled={savingOps !== '' || streaming}>Agent</button>
           <button type="button" onClick={useAutoMode} disabled={savingOps !== '' || streaming}>Auto</button>
-          <button type="button" onClick={applyDeepOps} disabled={savingOps !== '' || streaming}>Deep Ops</button>
+          <button type="button" onClick={applyFullAgent} disabled={savingOps !== '' || streaming}>Full Agent</button>
           <div className="ops-state-card">
             <span className={`ops-state-dot ops-state-${state}`} />
             <div>
@@ -401,35 +402,93 @@ export function LiveOpsPage({
         {savingOps && <div className="ops-save-status">{savingOps}</div>}
       </section>
 
-      <div className="ops-layout">
-        <main className="ops-main">
-          <section className="ops-workbench">
-            <section className="ops-panel">
-              <div className="ops-panel-head">
-                <h2>Command Stream</h2>
-                <span>{commands.length} command{commands.length === 1 ? '' : 's'}</span>
-              </div>
-              <div className="ops-command-list">
-                {commands.length === 0 ? (
-                  <div className="ops-empty">Shell and tool commands stream here as the agent runs — newest first, click any row to expand its output.</div>
-                ) : commands.map(command => (
-                  <details key={command.id} className="ops-command" open={command.status === 'running'}>
-                    <summary>
-                      <span className={`ops-command-dot ${command.tone}`} />
-                      <code>{command.command}</code>
-                      <span className={`ops-badge ${command.tone}`}>{command.status}</span>
-                    </summary>
-                    <div className="ops-command-meta">
-                      <span>{command.tool}</span>
-                      <span>{new Date(command.timestamp).toLocaleTimeString()}</span>
-                      {command.durationMs != null && <span>{fmtDuration(command.durationMs)}</span>}
-                    </div>
-                    {command.output && <pre>{command.output}</pre>}
-                  </details>
-                ))}
-              </div>
-            </section>
+      <section className="ops-mission-strip">
+        <div className="ops-mission-card guide">
+          <span>At A Glance</span>
+          <strong>{overview.headline}</strong>
+          <p>{overview.detail}</p>
+        </div>
+        <div className="ops-mission-card">
+          <span>Now</span>
+          <strong>{activeTool ? `Running ${activeTool.name}` : stateLabel}</strong>
+          <p>{activeTool?.input ? summarize(activeTool.input) : objective}</p>
+        </div>
+        <div className="ops-mission-card">
+          <span>Next</span>
+          <strong>{primaryNext}</strong>
+          <p>{nextReview.slice(1, 3).join(' | ') || 'Use Chat to steer the next action.'}</p>
+        </div>
+        <div className={`ops-mission-card ${risks.length > 0 ? 'warn' : ''}`}>
+          <span>Blockers</span>
+          <strong>{primaryRisk}</strong>
+          <p>{risks[0]?.detail || 'No failed tool, stop reason, or context danger is active.'}</p>
+        </div>
+        <div className="ops-mission-card">
+          <span>Context</span>
+          <strong>{lab?.target || 'No target set'}</strong>
+          <p>{[lab?.hostname, lab?.vpn_interface, lab?.agent_root].filter(Boolean).join(' | ') || 'Set the box in Projects or Run Context.'}</p>
+        </div>
+      </section>
 
+      <section className="ops-context-ribbon">
+        <ContextRow label="Mode" value={agentMode || 'Auto'} />
+        <ContextRow label="Profile" value={activeProfile || '-'} />
+        <ContextRow label="Shell" value={[lab?.shell_backend || settings?.tools.shell_backend || '-', lab?.shell_distro, lab?.shell_user].filter(Boolean).join(' / ')} />
+        <ContextRow label="MTP" value={specSummary(specPlan)} />
+        <ContextRow label="Evidence" value={lab?.latest_artifact || 'None'} />
+      </section>
+
+      <div className="ops-detail-tabs" role="tablist">
+        {([
+          { key: 'commands', label: 'Commands', count: commands.length },
+          { key: 'evidence', label: 'Evidence', count: evidence.length },
+          { key: 'timeline', label: 'Timeline', count: traceItems.length },
+          { key: 'files', label: 'Files', count: touchedFiles.length + artifacts.length },
+        ] as const).map(tab => (
+          <button
+            key={tab.key}
+            role="tab"
+            className={opsView === tab.key ? 'active' : ''}
+            onClick={() => setOpsView(tab.key)}
+          >
+            {tab.label}
+            <span>{tab.count}</span>
+          </button>
+        ))}
+      </div>
+
+      <main className="ops-detail">
+        {opsView === 'commands' && (
+          <section className="ops-panel">
+            <div className="ops-panel-head">
+              <h2>Command Stream</h2>
+              <span>{commands.length} command{commands.length === 1 ? '' : 's'}</span>
+            </div>
+            <div className="ops-command-list">
+              {commands.length === 0 ? (
+                <div className="ops-empty">Commands stay light here. Live interaction belongs in Chat and Terminal.</div>
+              ) : commands.map(command => (
+                <details key={command.id} className="ops-command" open={command.status === 'running'}>
+                  <summary>
+                    <span className={`ops-command-dot ${command.tone}`} />
+                    <code>{command.command}</code>
+                    {command.repeats && command.repeats > 1 && <span className="ops-repeat-count">x{command.repeats}</span>}
+                    <span className={`ops-badge ${command.tone}`}>{command.status}</span>
+                  </summary>
+                  <div className="ops-command-meta">
+                    <span>{command.tool}</span>
+                    <span>{new Date(command.timestamp).toLocaleTimeString()}</span>
+                    {command.durationMs != null && <span>{fmtDuration(command.durationMs)}</span>}
+                  </div>
+                  {command.output && <pre>{command.output}</pre>}
+                </details>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {opsView === 'evidence' && (
+          <section className="ops-split-detail">
             <section className="ops-panel">
               <div className="ops-panel-head">
                 <h2>Evidence Board</h2>
@@ -449,52 +508,50 @@ export function LiveOpsPage({
                 ))}
               </div>
             </section>
-          </section>
-
-          <section className="ops-panel">
-            <div className="ops-panel-head">
-              <h2>Action Timeline</h2>
-              {activeTool && <span className="ops-active-tool">Running {activeTool.name}</span>}
-            </div>
-            <div className="ops-trace-table">
-              <div className="ops-trace-head">
-                <span>Time</span>
-                <span>Type</span>
-                <span>Action</span>
-                <span>Observation</span>
-                <span>Outcome</span>
-              </div>
-              {traceItems.length === 0 ? (
-                <div className="ops-empty">Phases, tool calls, and results land here in order as the run proceeds. Click a row to inspect inputs and output.</div>
-              ) : traceItems.map(item => (
-                <details key={item.id} className={`ops-trace-item tone-${item.tone}`}>
-                  <summary className="ops-trace-row">
-                    <span>{new Date(item.timestamp).toLocaleTimeString()}</span>
-                    <span className="ops-trace-type">{item.type}</span>
-                    <span>{item.action}</span>
-                    <span>{item.observation}</span>
-                    <span className={`ops-badge ${item.tone}`}>{item.outcome}</span>
-                  </summary>
-                  {item.detail && (
-                    <pre>{item.detail}</pre>
-                  )}
-                </details>
-              ))}
-            </div>
-          </section>
-
-          <section className="ops-workbench">
             <section className="ops-panel">
               <div className="ops-panel-head">
-                <h2>Artifacts</h2>
-                <span>{artifacts.length} path{artifacts.length === 1 ? '' : 's'}</span>
+                <h2>Facts & Questions</h2>
+                <span>{facts.length + openQuestions.length}</span>
               </div>
-              <InsightList empty="No artifacts found yet." items={artifacts} />
+              <InsightList empty="No facts yet." items={[...facts.slice(0, 6), ...openQuestions.slice(0, 4)]} onOpenPath={openOpsPath} />
             </section>
+          </section>
+        )}
 
+        {opsView === 'timeline' && (
+          <section className="ops-split-detail">
             <section className="ops-panel">
               <div className="ops-panel-head">
-                <h2>Latest Timeline</h2>
+                <h2>Action Timeline</h2>
+                {activeTool && <span className="ops-active-tool">Running {activeTool.name}</span>}
+              </div>
+              <div className="ops-trace-table">
+                <div className="ops-trace-head">
+                  <span>Time</span>
+                  <span>Type</span>
+                  <span>Action</span>
+                  <span>Observation</span>
+                  <span>Outcome</span>
+                </div>
+                {traceItems.length === 0 ? (
+                  <div className="ops-empty">Phases, tool calls, and results land here in order as the run proceeds.</div>
+                ) : traceItems.map(item => (
+                  <details key={item.id} className={`ops-trace-item tone-${item.tone}`}>
+                    <summary className="ops-trace-row">
+                      <span>{new Date(item.timestamp).toLocaleTimeString()}</span>
+                      <span className="ops-trace-type">{item.type}</span>
+                      <span>{item.action}</span>
+                      <span>{item.observation}</span>
+                      <span className={`ops-badge ${item.tone}`}>{item.outcome}</span>
+                    </summary>
+                    {item.detail && <pre>{item.detail}</pre>}
+                  </details>
+                ))}
+              </div>
+            </section>
+            <section className="ops-panel">
+              <div className="ops-panel-head">
+                <h2>Latest Log Events</h2>
                 {latestRun && <span>{new Date(latestRun.started_at).toLocaleString()}</span>}
               </div>
               <div className="ops-event-list">
@@ -513,53 +570,27 @@ export function LiveOpsPage({
               </div>
             </section>
           </section>
-        </main>
+        )}
 
-        <aside className="ops-side">
-          <section className="ops-panel">
-            <h2>Run Context</h2>
-            <div className="ops-context-grid">
-              <ContextRow label="Mode" value={agentMode || 'Auto'} />
-              <ContextRow label="Profile" value={activeProfile || '-'} />
-              <ContextRow label="Agent Root" value={lab?.agent_root || '-'} />
-              <ContextRow label="Target" value={lab?.target || 'Not set'} />
-              <ContextRow label="VPN" value={lab?.vpn_interface || 'Not set'} />
-              <ContextRow label="Ops Profile" value={profileCopy.label} />
-              <ContextRow label="MTP" value={specSummary(specPlan)} />
-              <ContextRow label="Report/Evidence" value={lab?.latest_artifact || 'None'} />
-            </div>
+        {opsView === 'files' && (
+          <section className="ops-split-detail">
+            <section className="ops-panel">
+              <div className="ops-panel-head">
+                <h2>Touched Files</h2>
+                <span>{touchedFiles.length}</span>
+              </div>
+              <InsightList empty="No files touched yet." items={touchedFiles} onOpenPath={openOpsPath} />
+            </section>
+            <section className="ops-panel">
+              <div className="ops-panel-head">
+                <h2>Artifacts</h2>
+                <span>{artifacts.length}</span>
+              </div>
+              <InsightList empty="No artifacts found yet." items={artifacts} onOpenPath={openOpsPath} />
+            </section>
           </section>
-
-          <section className="ops-panel ops-side-tabbed">
-            <div className="ops-side-tabs" role="tablist">
-              {([
-                { key: 'facts', label: 'Facts', count: facts.length },
-                { key: 'questions', label: 'Questions', count: openQuestions.length },
-                { key: 'files', label: 'Files', count: touchedFiles.length },
-                { key: 'risks', label: 'Risks', count: risks.length, tone: risks.length > 0 ? 'bad' : undefined },
-                { key: 'review', label: 'Review', count: nextReview.length },
-              ] as const).map(tab => (
-                <button
-                  key={tab.key}
-                  role="tab"
-                  className={sideTab === tab.key ? 'active' : ''}
-                  onClick={() => setSideTab(tab.key)}
-                >
-                  {tab.label}
-                  <span className={`ops-side-tab-count${'tone' in tab && tab.tone ? ` ${tab.tone}` : ''}`}>{tab.count}</span>
-                </button>
-              ))}
-            </div>
-            <div className="ops-side-tab-body">
-              {sideTab === 'facts' && <InsightList empty="No facts available yet." items={facts} />}
-              {sideTab === 'questions' && <InsightList empty="No open questions — the agent has no pending decisions." items={openQuestions} />}
-              {sideTab === 'files' && <InsightList empty="No files touched yet — writes and edits will be listed here." items={touchedFiles} />}
-              {sideTab === 'risks' && <InsightList empty="No risks detected — failures, guardrails, and blocks surface here." items={risks} />}
-              {sideTab === 'review' && <InsightList empty="Nothing to review." items={nextReview.map(item => toInsight(item))} />}
-            </div>
-          </section>
-        </aside>
-      </div>
+        )}
+      </main>
     </div>
   )
 }
@@ -582,17 +613,20 @@ function Readout({ label, value }: { label: string; value: string }) {
   )
 }
 
-function InsightList({ empty, items }: { empty: string; items: OpsInsight[] }) {
+function InsightList({ empty, items, onOpenPath }: { empty: string; items: OpsInsight[]; onOpenPath?: (path: string) => void | Promise<void> }) {
   if (items.length === 0) return <div className="ops-empty">{empty}</div>
   return (
     <div className="ops-insight-list">
       {items.map(item => (
-        <div key={item.id} className="ops-insight-row">
+        <div key={item.id} className={`ops-insight-row ${item.detail && looksLikePath(item.detail) ? 'clickable' : ''}`}>
           <span className={`ops-insight-dot ${item.tone}`} />
           <div>
             <strong>{item.text}</strong>
             {item.detail && <span>{item.detail}</span>}
           </div>
+          {item.detail && looksLikePath(item.detail) && onOpenPath && (
+            <button type="button" onClick={() => { void onOpenPath(item.detail || '') }}>Open</button>
+          )}
         </div>
       ))}
     </div>
@@ -735,6 +769,7 @@ function deriveCommands({
 }): OpsCommand[] {
   const commands: OpsCommand[] = []
   for (const item of activity) {
+    if (!isCommandStreamTool(item.name)) continue
     const command = commandText(item.name, item.input)
     if (!command) continue
     commands.push({
@@ -749,8 +784,9 @@ function deriveCommands({
     })
   }
   for (const [index, tool] of (latestRun?.tools ?? []).entries()) {
+    if (!isCommandStreamTool(tool.name)) continue
     const command = commandText(tool.name, tool.input)
-    if (!command && tool.name !== 'shell' && tool.name !== 'bash') continue
+    if (!command && tool.name !== 'shell') continue
     commands.push({
       id: `run-${latestRun?.id ?? 'latest'}-${index}`,
       tool: tool.name,
@@ -765,6 +801,16 @@ function deriveCommands({
   return dedupeCommands(commands)
     .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, 12)
+}
+
+function isCommandStreamTool(tool: string): boolean {
+  return tool === 'shell' ||
+    tool === 'terminal_send' ||
+    tool === 'terminal_read' ||
+    tool === 'http_probe' ||
+    tool === 'web_search' ||
+    tool === 'fetch_url' ||
+    tool === 'browser'
 }
 
 function commandText(tool: string, input?: string): string {
@@ -782,15 +828,97 @@ function commandText(tool: string, input?: string): string {
 }
 
 function dedupeCommands(commands: OpsCommand[]): OpsCommand[] {
-  const seen = new Set<string>()
-  const out: OpsCommand[] = []
+  const grouped = new Map<string, OpsCommand>()
   for (const command of commands) {
-    const key = `${command.tool}:${command.command}:${command.timestamp}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(command)
+    const key = `${command.tool}:${normaliseCommandForDedupe(command.command)}`
+    const prev = grouped.get(key)
+    if (!prev) {
+      grouped.set(key, { ...command, repeats: 1 })
+      continue
+    }
+    const latest = command.timestamp >= prev.timestamp ? command : prev
+    const worstTone = moreSevereTone(prev.tone, command.tone)
+    grouped.set(key, {
+      ...latest,
+      id: prev.id,
+      tone: worstTone,
+      status: latest.status,
+      repeats: (prev.repeats ?? 1) + 1,
+    })
   }
-  return out
+  return [...grouped.values()]
+}
+
+function normaliseCommandForDedupe(command: string): string {
+  return command
+    .replace(/\s+/g, ' ')
+    .replace(/\btime":\s*"[^"]+"/gi, 'time":"<time>"')
+    .trim()
+    .toLowerCase()
+}
+
+function moreSevereTone(a: StatusTone, b: StatusTone): StatusTone {
+  const rank: Record<StatusTone, number> = { muted: 0, ok: 1, pending: 2, warn: 3, bad: 4 }
+  return rank[b] > rank[a] ? b : a
+}
+
+function deriveLedgerFacts(events: LedgerEvent[]): OpsInsight[] {
+  const facts = new Map<string, OpsInsight>()
+  const add = (label: string, value: string, tone: StatusTone = 'ok', detail?: string) => {
+    const clean = value.trim()
+    if (!clean) return
+    const key = `${label}:${clean}`.toLowerCase()
+    if (!facts.has(key)) facts.set(key, toInsight(`${label}: ${summarize(clean)}`, tone, detail || clean))
+  }
+  for (const event of events.slice(0, 160)) {
+    const source = event.tool || event.source || event.kind
+    if (event.kind === 'session_state') {
+      const session = event.message || event.metadata?.id || 'session'
+      const kind = event.metadata?.kind || 'terminal'
+      const state = event.state || event.status || 'unknown'
+      const port = event.metadata?.port ? `:${event.metadata.port}` : ''
+      add('Session', `${kind}${port} ${session} ${state}`, state === 'dead' ? 'bad' : state === 'busy' ? 'warn' : 'ok', event.detail || `source=${source}`)
+      continue
+    }
+    if (event.kind === 'tool_routing') {
+      const phase = event.metadata?.phase || event.state || event.status || 'default'
+      const count = event.metadata?.tool_count || ''
+      const choice = event.metadata?.tool_choice || ''
+      add('Routing', `${phase}${count ? `, ${count} tools` : ''}${choice ? `, ${choice}` : ''}`, count && Number(count) > 28 ? 'warn' : 'ok', event.detail || `source=${source}`)
+      continue
+    }
+    if (event.kind === 'tool_routing_warning') {
+      const phase = event.metadata?.phase || event.state || event.status || 'default'
+      const count = event.metadata?.tool_count || ''
+      const budget = event.metadata?.tool_budget || ''
+      add('Routing warning', `${phase}${count ? `, ${count} tools` : ''}${budget ? ` / budget ${budget}` : ''}`, 'warn', event.detail || event.message || `source=${source}`)
+      continue
+    }
+    if (event.kind === 'evidence_pin') {
+      for (const line of (event.detail || '').split(/\r?\n/)) {
+        const text = line.trim()
+        if (!text) continue
+        const webshell = text.match(/https?:\/\/[^\s"'<>]+(?:shell|cmd|webshell|\.php)[^\s"'<>]*/i)?.[0]
+        if (webshell) { add('Webshell', webshell, 'ok', `source=${source}`); continue }
+        const uid = text.match(/\buid=\d+\([^)]+\)\s+gid=\d+\([^)]+\)[^\r\n]*/i)?.[0]
+        if (uid) { add('Access', uid, /uid=0\(root\)/i.test(uid) ? 'ok' : 'pending', `source=${source}`); continue }
+        const target = text.match(/\b(?:target(?:\s+ip)?\s*[:=]\s*)?([0-9]{1,3}(?:\.[0-9]{1,3}){3})\b/i)?.[1]
+        if (target) { add('Target', target, 'ok', `source=${source}`); continue }
+        if (/\b(?:failed|not found|no such file|exit code|blocked|denied)\b/i.test(text)) {
+          add('Failed', text, 'warn', `source=${source}`)
+          continue
+        }
+        if (/\b(?:artifact|saved|wrote|output)\s*[:=]/i.test(text)) {
+          add('Artifact', text.replace(/^.*?[:=]\s*/, ''), 'ok', `source=${source}`)
+          continue
+        }
+        add('Evidence', text, 'muted', `source=${source}`)
+      }
+    }
+    for (const artifact of event.artifacts || []) add('Artifact', artifact, 'ok', `source=${source}`)
+    for (const file of event.files || []) add('File', file, 'pending', `source=${source}`)
+  }
+  return [...facts.values()].slice(0, 12)
 }
 
 function deriveEvidence({
@@ -814,11 +942,11 @@ function deriveEvidence({
     ...(latestRun?.events ?? []).flatMap(event => [event.message, event.detail ?? '']),
   ].join('\n')
   const items: OpsEvidence[] = []
-  for (const ip of uniqueMatches(text, /\b(?:\d{1,3}\.){3}\d{1,3}\b/g).slice(0, 6)) {
-    items.push({ id: `ip-${ip}`, label: 'Host', value: ip, tone: ip === lab?.target ? 'ok' : 'muted' })
+  for (const ip of extractHostIPs(text).slice(0, 6)) {
+    items.push({ id: `ip-${ip}`, label: 'Host', value: ip, tone: ip === lab?.target ? 'ok' : 'muted', detail: evidenceLineFor(text, ip) })
   }
   for (const host of uniqueMatches(text, /\b[a-z0-9][a-z0-9.-]+\.(?:htb|local|lan|internal)\b/gi).slice(0, 6)) {
-    items.push({ id: `host-${host}`, label: 'Name', value: host, tone: 'ok' })
+    items.push({ id: `host-${host}`, label: 'Name', value: host, tone: 'ok', detail: evidenceLineFor(text, host) })
   }
   for (const port of extractPorts(text).slice(0, 12)) {
     items.push({ id: `port-${port.port}-${port.service}`, label: 'Service', value: `${port.port}${port.service ? ` / ${port.service}` : ''}`, tone: 'pending', detail: port.line })
@@ -829,13 +957,13 @@ function deriveEvidence({
     }
   }
   for (const cve of uniqueMatches(text, /\bCVE-\d{4}-\d{4,7}\b/gi).slice(0, 6)) {
-    items.push({ id: `cve-${cve.toUpperCase()}`, label: 'CVE', value: cve.toUpperCase(), tone: 'warn' })
+    items.push({ id: `cve-${cve.toUpperCase()}`, label: 'CVE', value: cve.toUpperCase(), tone: 'warn', detail: evidenceLineFor(text, cve) })
   }
   for (const vuln of uniqueMatches(text, /\b(?:SQL injection|command injection|remote code execution|RCE|auth(?:entication)? bypass|XSS|SSRF|LFI|RFI|path traversal|directory traversal|default credentials?|weak credentials?|information disclosure|IDOR|insecure deserialization|file upload bypass)\b/gi).slice(0, 8)) {
-    items.push({ id: `vuln-${vuln.toLowerCase()}`, label: 'Vulnerability', value: titleCase(vuln), tone: 'warn' })
+    items.push({ id: `vuln-${vuln.toLowerCase()}`, label: 'Vulnerability', value: titleCase(vuln), tone: 'warn', detail: evidenceLineFor(text, vuln) })
   }
   for (const poc of uniqueMatches(text, /\b(?:PoC|proof[- ]of[- ]concept|verified|reproduced|repro|exploit(?:ed)?|payload|curl|burp|request|response|screenshot)\b/gi).slice(0, 8)) {
-    items.push({ id: `poc-${poc.toLowerCase()}`, label: 'PoC Signal', value: titleCase(poc), tone: 'pending' })
+    items.push({ id: `poc-${poc.toLowerCase()}`, label: 'PoC Signal', value: titleCase(poc), tone: 'pending', detail: evidenceLineFor(text, poc) })
   }
   for (const finding of uniqueMatches(text, /\b(?:high|critical|medium|low)\s+(?:severity|risk)\b/gi).slice(0, 6)) {
     items.push({ id: `severity-${finding.toLowerCase()}`, label: 'Severity', value: titleCase(finding), tone: /critical|high/i.test(finding) ? 'bad' : 'pending' })
@@ -881,6 +1009,81 @@ function uniqueMatches(text: string, pattern: RegExp): string[] {
     found.add(match[0])
   }
   return [...found]
+}
+
+function evidenceLineFor(text: string, needle: string): string {
+  const lowerNeedle = needle.toLowerCase()
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.length < 3) continue
+    if (line.toLowerCase().includes(lowerNeedle)) {
+      return `Observed in output: ${summarize(line)}`
+    }
+  }
+  return 'Observed in recent tool output or run events.'
+}
+
+function deriveOpsOverview({
+  evidence,
+  commands,
+  artifacts,
+  touchedFiles,
+  latestRun,
+  risks,
+}: {
+  evidence: OpsEvidence[]
+  commands: OpsCommand[]
+  artifacts: OpsInsight[]
+  touchedFiles: OpsInsight[]
+  latestRun?: TaskRun
+  risks: OpsInsight[]
+}): { headline: string; detail: string } {
+  const hosts = evidence.filter(item => item.label === 'Host' || item.label === 'Name').slice(0, 2).map(item => item.value)
+  const services = evidence.filter(item => item.label === 'Service').slice(0, 3).map(item => item.value)
+  const vulns = evidence.filter(item => item.label === 'CVE' || item.label === 'Vulnerability').slice(0, 2).map(item => item.value)
+  if (latestRun?.stop_reason) {
+    return {
+      headline: `Stopped: ${latestRun.stop_reason}`,
+      detail: latestRun.stop_detail || risks[0]?.text || 'Open Logs or Timeline for the final blocker.',
+    }
+  }
+  if (vulns.length > 0) {
+    return {
+      headline: `${vulns.join(', ')} under investigation`,
+      detail: `Evidence from ${commands.length} commands, ${artifacts.length} artifacts, ${touchedFiles.length} files. ${services.length ? `Services: ${services.join(', ')}.` : ''}`,
+    }
+  }
+  if (hosts.length > 0 || services.length > 0) {
+    return {
+      headline: `${hosts.join(', ') || 'Target'} mapped`,
+      detail: services.length ? `Observed services: ${services.join(', ')}.` : 'Recon evidence is being collected.',
+    }
+  }
+  return {
+    headline: latestRun ? titleCase(latestRun.state || latestRun.status || 'Run loaded') : 'No run selected',
+    detail: 'Use the tabs below to inspect commands, evidence, timeline, files, and artifacts.',
+  }
+}
+
+function extractHostIPs(text: string): string[] {
+  const found = new Set<string>()
+  const pattern = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    const ip = match[0]
+    if (!isValidIPv4(ip)) continue
+    const before = text.slice(Math.max(0, match.index - 32), match.index).toLowerCase()
+    if (/\b(?:version|freepbx|asterisk|apache|php|openssl|nginx|product|release)\s*$/.test(before)) continue
+    found.add(ip)
+  }
+  return [...found]
+}
+
+function isValidIPv4(ip: string): boolean {
+  return ip.split('.').every(part => {
+    const n = Number(part)
+    return Number.isInteger(n) && n >= 0 && n <= 255
+  })
 }
 
 function extractPorts(text: string): Array<{ port: string; service: string; line: string }> {
@@ -978,6 +1181,45 @@ function shortPath(path: string): string {
   const parts = normalized.split('/').filter(Boolean)
   if (parts.length <= 3) return path
   return `.../${parts.slice(-3).join('/')}`
+}
+
+function normaliseDisplayPath(path: string): string {
+  return path.trim().replace(/[),.;:]+$/, '')
+}
+
+function basename(path: string): string {
+  const parts = path.replaceAll('\\', '/').split('/').filter(Boolean)
+  return parts.at(-1) || path
+}
+
+function languageFromPath(path: string): string {
+  const ext = basename(path).split('.').pop()?.toLowerCase() || ''
+  const map: Record<string, string> = {
+    md: 'markdown',
+    markdown: 'markdown',
+    ts: 'typescript',
+    tsx: 'typescript',
+    js: 'javascript',
+    jsx: 'javascript',
+    json: 'json',
+    html: 'html',
+    css: 'css',
+    go: 'go',
+    py: 'python',
+    sh: 'shell',
+    ps1: 'powershell',
+    xml: 'xml',
+    yaml: 'yaml',
+    yml: 'yaml',
+  }
+  return map[ext] || 'plaintext'
+}
+
+function looksLikePath(value: string): boolean {
+  const text = value.trim()
+  return /^(?:[A-Za-z]:[\\/]|\/mnt\/[a-z]\/|\/|\.{1,2}\/|[\w.-]+\/)/.test(text) &&
+    !text.includes('://') &&
+    !text.startsWith('Observed in output:')
 }
 
 function buildTraceItems({

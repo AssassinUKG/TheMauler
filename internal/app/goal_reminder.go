@@ -50,13 +50,22 @@ func goalReminderPrompt(run TaskRun) string {
 		sb.WriteString(verified)
 	}
 	if todos, err := tools.LoadTodos(); err == nil && len(todos) > 0 {
-		sb.WriteString("\nCurrent plan state:")
-		limit := len(todos)
-		if limit > 8 {
-			limit = 8
+		var active []tools.TodoItem
+		for _, item := range todos {
+			status := strings.ToLower(strings.TrimSpace(item.Status))
+			if status == "done" || status == "completed" {
+				continue
+			}
+			active = append(active, item)
+			if len(active) >= 5 {
+				break
+			}
 		}
-		for i := 0; i < limit; i++ {
-			item := todos[i]
+		if len(active) > 0 {
+			sb.WriteString("\nOpen plan items:")
+		}
+		for i := 0; i < len(active); i++ {
+			item := active[i]
 			fmt.Fprintf(&sb, "\n- [%s] %s", item.Status, item.Text)
 		}
 	}
