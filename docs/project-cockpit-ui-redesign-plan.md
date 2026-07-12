@@ -7,15 +7,15 @@ Goal: reshape TheMauler around projects/boxes first, then chat/ops/files/runs as
 ## Target Layout
 
 ```text
-┌──────────────────────────────┬──────────────────────────────┬──────────────────────────────┐
-│ Projects / Boxes             │ Work Surface                  │ Project Inspector            │
-│                              │                              │                              │
-│ Search                       │ Chat | Ops | Terminal | Files │ Target                       │
-│ New Project / New Box        │ Runs | Memory                 │ Environment                  │
-│ Recent / pinned boxes        │                              │ Folders                      │
-│ Status badges                │ Current task/run content      │ Agent/run controls           │
-│                              │                              │ Current run summary          │
-└──────────────────────────────┴──────────────────────────────┴──────────────────────────────┘
++------------------------------+------------------------------+------------------------------+
+| Projects / Boxes             | Work Surface                  | Project Inspector            |
+|                              |                              |                              |
+| Search                       | Chat | Ops | Terminal | Files | Target                       |
+| New Project / New Box        | Runs | Memory                 | Environment                  |
+| Recent / pinned boxes        |                              | Folders                      |
+| Status badges                | Current task/run content      | Agent/run controls           |
+|                              |                              | Current run summary          |
++------------------------------+------------------------------+------------------------------+
 ```
 
 ## Left Pane: Projects / Boxes

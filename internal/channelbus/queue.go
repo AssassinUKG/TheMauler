@@ -113,6 +113,25 @@ func (q *Queue) Mark(id, status string) {
 	}
 }
 
+func (q *Queue) CancelActive() int {
+	if q == nil {
+		return 0
+	}
+	if q.db != nil {
+		return cancelActiveWorkItemsDB(q.db)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cancelled := 0
+	for i := range q.items {
+		if q.items[i].Status == "queued" || q.items[i].Status == "dispatching" {
+			q.items[i].Status = "cancelled"
+			cancelled++
+		}
+	}
+	return cancelled
+}
+
 func saveWorkItemDB(db *sql.DB, item WorkItem) error {
 	envJSON, err := json.Marshal(item.Envelope)
 	if err != nil {
@@ -214,4 +233,16 @@ limit 1
 func markWorkItemDB(db *sql.DB, id, status string) error {
 	_, err := db.Exec(`update channel_work_queue set status = ? where id = ?`, status, id)
 	return err
+}
+
+func cancelActiveWorkItemsDB(db *sql.DB) int {
+	res, err := db.Exec(`update channel_work_queue set status = 'cancelled' where status in ('queued', 'dispatching')`)
+	if err != nil {
+		return 0
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0
+	}
+	return int(n)
 }

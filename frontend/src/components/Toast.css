@@ -36,6 +36,7 @@
   border-color: #7a5c00;
   color: #e8c84a;
 }
+.toast-success{border-color:rgba(54,211,153,.45);background:#12231b;color:#b7f7d5}
 
 .toast-danger {
   background: #2a0a0a;

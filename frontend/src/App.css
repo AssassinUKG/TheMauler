@@ -375,6 +375,7 @@
 .center-tabs button:disabled {
   opacity: 0.35;
 }
+.center-more-select{height:28px;margin-left:2px;padding:0 26px 0 9px;border:1px solid var(--border);border-radius:7px;background:var(--bg2);color:var(--text-dim);font-size:12px}
 
 .center-file-tab {
   display: flex;

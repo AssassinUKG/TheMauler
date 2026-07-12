@@ -24,11 +24,11 @@ func TestCachedToolResultForReadCall(t *testing.T) {
 }
 
 func TestCachedToolResultForOffloadedResultPointsToReadToolResult(t *testing.T) {
-	input := `{"command":"nmap -sC -sV 10.129.23.158"}`
+	input := `{"path":"large-output.txt"}`
 	run := TaskRun{Tools: []TaskToolEvent{
-		{Name: "shell", Status: "done", Input: input, Result: "HEAD\n\n[tool result offloaded: 50000 chars omitted. result_id=run-1/result-9. Do NOT re-run the command to see more - call read_tool_result with this result_id.]\n\nTAIL"},
+		{Name: "read", Status: "done", Input: input, Result: "HEAD\n\n[tool result offloaded: 50000 chars omitted. result_id=run-1/result-9. Do NOT re-run the command to see more - call read_tool_result with this result_id.]\n\nTAIL"},
 	}}
-	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(input)}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "read", Arguments: json.RawMessage(input)}}
 
 	got := cachedToolResultForCall(run, tc)
 	for _, want := range []string{"[cached_tool_result]", "result_id: run-1/result-9", "next_tool: read_tool_result", "Do NOT re-run"} {
@@ -45,47 +45,71 @@ func TestCachedToolResultIDTrimsPunctuation(t *testing.T) {
 	}
 }
 
-func TestCachedToolResultForShellCall(t *testing.T) {
+func TestCachedToolResultIgnoresShellCall(t *testing.T) {
 	input := `{"command":"curl -sk https://connected.htb/health"}`
 	run := TaskRun{Tools: []TaskToolEvent{
 		{Name: "shell", Status: "done", Input: input, Result: "HTTP/1.1 200 OK"},
 	}}
 	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(input)}}
 
-	got := cachedToolResultForCall(run, tc)
-	if !strings.Contains(got, "[cached_tool_result]") || !strings.Contains(got, "HTTP/1.1 200 OK") {
-		t.Fatalf("expected cached read result, got %q", got)
+	if got := cachedToolResultForCall(run, tc); got != "" {
+		t.Fatalf("shell must not use the generic cache, got %q", got)
 	}
 }
 
-func TestCachedToolResultForShellPagerVariant(t *testing.T) {
+func TestCachedToolResultIgnoresShellPagerVariant(t *testing.T) {
 	input := `{"command":"curl -s --max-time 5 http://10.129.26.26/ | head -100"}`
 	run := TaskRun{Tools: []TaskToolEvent{
 		{Name: "shell", Status: "done", Input: input, Result: "301 Moved Permanently"},
 	}}
 	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(`{"command":"curl -s --max-time 5 http://10.129.26.26/ | head -30"}`)}}
 
-	got := cachedToolResultForCall(run, tc)
-	if !strings.Contains(got, "[cached_tool_result]") || !strings.Contains(got, "301 Moved Permanently") {
-		t.Fatalf("pager-only shell variant should hit cache, got %q", got)
+	if got := cachedToolResultForCall(run, tc); got != "" {
+		t.Fatalf("shell pager variants must not use the generic cache, got %q", got)
 	}
 }
 
 func TestRepeatedCachedToolCallDetectsSecondCacheReplay(t *testing.T) {
-	input := `{"command":"curl -s --max-time 5 http://10.129.26.26/ | head -100"}`
-	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(input)}}
+	input := `{"path":"Connected.md"}`
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "read", Arguments: json.RawMessage(input)}}
 	first := TaskRun{Tools: []TaskToolEvent{
-		{Name: "shell", Status: "done", Input: input, Result: "301 Moved Permanently"},
+		{Name: "read", Status: "done", Input: input, Result: "target: 10.129.23.158"},
 	}}
 	if repeatedCachedToolCall(first, tc) {
 		t.Fatalf("first cache replay should not be treated as repeated")
 	}
 	second := TaskRun{Tools: []TaskToolEvent{
-		{Name: "shell", Status: "done", Input: input, Result: "301 Moved Permanently"},
-		{Name: "shell", Status: "cached", Input: input, Result: "[cached_tool_result]"},
+		{Name: "read", Status: "done", Input: input, Result: "target: 10.129.23.158"},
+		{Name: "read", Status: "cached", Input: input, Result: "[cached_tool_result]"},
 	}}
 	if !repeatedCachedToolCall(second, tc) {
 		t.Fatalf("second identical cached replay should be detected")
+	}
+}
+
+func TestCachedEmptyGlobResultForCall(t *testing.T) {
+	input := `{"pattern":"*.txt","dir":"loot"}`
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "glob", Status: "done", Input: input, Result: "[glob_result]\nstate: empty\npattern: *.txt\ndir: loot\nmatches: 0\nrepeat_policy: do_not_re_glob_same_path"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "glob", Arguments: json.RawMessage(`{"dir":"loot/","pattern":"*.txt"}`)}}
+
+	got := cachedEmptyGlobResultForCall(run, tc)
+	for _, want := range []string{"[empty_glob_cached]", "state: cached_empty", "do_not_repeat", "matches: 0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("empty glob cache missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestCachedEmptyGlobResultForCallIgnoresChangedPattern(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "glob", Status: "done", Input: `{"pattern":"*.txt","dir":"loot"}`, Result: "[glob_result]\nstate: empty\nmatches: 0"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "glob", Arguments: json.RawMessage(`{"dir":"loot","pattern":"*.md"}`)}}
+
+	if got := cachedEmptyGlobResultForCall(run, tc); got != "" {
+		t.Fatalf("changed glob pattern should not hit empty cache:\n%s", got)
 	}
 }
 

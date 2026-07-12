@@ -4,7 +4,7 @@ import './Toast.css'
 export interface ToastItem {
   id: string
   message: string
-  level: 'warn' | 'danger'
+  level: 'success' | 'warn' | 'danger'
 }
 
 interface Props {

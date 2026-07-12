@@ -103,14 +103,14 @@ Hard constraints for every item:
 - Local-model brittleness: prefer fewer, simpler tool calls; compact outputs; explicit "unverified" wording when a fact is not confirmed.
 - Reuse first: generalize the ledger, learning-candidate, auto-distill, skill, toolset, and shell/recovery machinery already shipped before adding parallel systems.
 
-1. **Brain/Skill Curator** — planned.
+1. **Brain/Skill Curator** - planned.
    - Add a curator pass that reviews recent runs, repeated command patterns, recovered failures, useful procedures, and successful research paths.
    - Draft skills/reflections from evidence, but keep them reviewable before they become durable guidance.
    - Prefer focused procedure cards over broad prompt bloat.
    - Constraints: keep curator output as learning candidates, not automatic master-skill injection; use compact metadata and evidence pointers rather than raw prompt text.
    - Implementation note: make this the cross-run layer above `autoDistillLearnings`/`buildLearningCandidates`, not a duplicate extractor. Reuse `shellCommandFamily`/largest-family style detection for repeated command patterns.
 
-2. **Memory approval queue** — partial foundation exists.
+2. **Memory approval queue** - partial foundation exists.
    - Extend "Learned This Run" into a proper queue with approve/edit/reject/defer controls.
    - Show why each memory was proposed, which run/tool evidence supports it, confidence, sensitivity, and scope.
    - Avoid silently learning secrets, flags, client data, or one-off noisy errors.
@@ -119,7 +119,7 @@ Hard constraints for every item:
    - Done so far: Brain approval cards now support save, dismiss, and defer; `RecordLearningDecision` persists approved/rejected/deferred choices and records `learning_decision` ledger events; handled candidates are filtered out of the active review list.
    - Reconciliation: `autoDistillLearnings` currently saves some reflections directly. Route anything sensitive, secret-like, target-specific, or redacted through the approval queue instead of silent-save.
 
-3. **Split memory into core facts, run recall, hypotheses, and user preferences** — partial foundation landed 2026-06-14.
+3. **Split memory into core facts, run recall, hypotheses, and user preferences** - partial foundation landed 2026-06-14.
    - Separate confirmed facts from model guesses and stale run leftovers.
    - Add clear UI filters and prompt packets for: stable preferences, workspace facts, engagement facts, hypotheses, lessons, evidence pointers, and previous-run recall.
    - Inject hypotheses with explicit wording so the model does not treat them as verified truth.
@@ -127,21 +127,21 @@ Hard constraints for every item:
    - Implementation note: avoid new stores at first. Upgrade `MemoryEntry` with confidence/source fields and use existing kind/scope/tags to build separate injection packets.
    - Done so far: `MemoryEntry` now has `confidence` (`confirmed`, `likely`, `hypothesis`, `stale`) and `source` (`user`, `agent`, `tool`, `model`, `previous_run`, `auto_distill`, `system`); prompt injection prefixes likely/hypothesis/stale entries as unverified/stale; Memory UI exposes both fields; memory recall includes both fields in metadata; prompt injection now emits separate compact packets for user preferences/constraints, confirmed facts/decisions, previous-run recall, and unverified/stale memories; initial prompt injection and mid-run re-injection now withhold target-specific memories when their IP/host refs conflict with the current lab target or user prompt, while keeping them available through explicit memory recall. Next: add a small Brain/Logs filter for `memory_conflict` events and make the conflict reason visible from the run replay view.
 
-4. **Tool availability-aware skills** — planned.
+4. **Tool availability-aware skills** - planned.
    - Skills should declare required tools, shell backend, network/browser needs, and write/shell permissions.
    - The prompt builder should warn or adapt when a selected skill needs tools that the active profile/toolset cannot use.
    - This should reduce dead runs where the model follows a skill that assumes shell/write access but the current mode blocks it.
    - Constraints: requirements should guide skill selection/annotation and Doctor warnings, not add long skill metadata to the prompt.
    - Implementation note: add optional skill frontmatter such as `required_tools`, `shell_backend`, `needs_network`, and `needs_write`; cross-check with effective enabled tools/toolset during relevant-skill selection and prompt building.
 
-5. **Richer tool registry metadata** — planned.
+5. **Richer tool registry metadata** - planned.
    - Extend tool definitions with risk, latency, output size, resumability, side effects, required environment, and preferred follow-up tools.
    - Use that metadata in Doctor, Agent panel, routing, and recovery prompts.
    - Make disabled-tool messages and toolset previews explain what is actually available.
    - Constraints: metadata feeds UI/router/recovery only; do not dump full registry metadata into model prompts.
    - Implementation note: do not widen the core `Tool` interface. Add an optional `Metadata() ToolMetadata` interface and infer defaults for tools that do not implement it. Start with fields that have immediate consumers: risk and required environment.
 
-6. **Recover instead of stop** — partial foundation exists; recovery policy consolidation started 2026-06-14.
+6. **Recover instead of stop** - partial foundation exists; recovery policy consolidation started 2026-06-14.
    - Continue expanding one-shot recovery after bad tool calls, disabled tools, malformed JSON, empty outputs, repeated failures, and backend hiccups.
    - Recovery should summarize the issue, name the safest next step, and avoid immediately repeating the same failing action.
    - Keep hard stops for user stop, explicit denial, repeated identical disabled-tool calls, and dangerous ambiguity.
@@ -149,14 +149,14 @@ Hard constraints for every item:
    - Implementation note: consolidate scattered recovery checks into a recovery-policy table: condition -> soft hint, one-shot recovery turn, or hard stop. Reconsider which repeated-shell hard blocks should become one-turn recoveries.
    - Done so far: repeated shell failure, repeated empty shell output, and repeated identical shell result guards now route through a `preToolRecoveryRules` policy table with explicit stop reason/event mapping; disabled-tool handling now uses `evaluateDisabledToolRecoveryPolicy`; duplicate `fetch_url` skips now use `evaluateSkipRecoveryPolicy`. Next: fold malformed JSON retry and one-shot recovery reports into the same table style.
 
-7. **Terminal backend profiles** — planned.
+7. **Terminal backend profiles** - planned.
    - Make WSL/Kali, local PowerShell, Docker, SSH, and future remote shells first-class selectable execution profiles.
    - Each profile should expose cwd mapping, environment facts, allowed tools, latency expectations, and artifact paths.
    - Doctor should verify the selected terminal profile before long autonomous runs.
    - Constraints: profile facts should shape tool execution and Doctor checks; only a compact shell summary belongs in prompt context.
    - Implementation note: build on existing shell backend/mode/distro/user settings. A profile is a named bundle of backend, distro, user, cwd map, allowed tools, and health checks. Make WSL keepalive profile-aware.
 
-8. **Programmatic tool pipelines** — first pipeline landed 2026-06-14.
+8. **Programmatic tool pipelines** - first pipeline landed 2026-06-14.
    - Add reusable workflow tools for common multi-step operations instead of forcing the model to spam raw shell calls.
    - Candidate pipelines: scan job with progress, HTTP probe suite, web content capture, exploit research packet, evidence bundle, report skeleton.
    - Pipelines should produce compact summaries plus artifact paths, with expandable raw output in the UI.
@@ -164,7 +164,7 @@ Hard constraints for every item:
    - Implementation note: ship only the proven recurring pipelines first, such as HTTP probe and evidence bundle. Wire command-storm recovery hints toward these pipelines once available.
    - Done so far: added `http_probe`, a bounded shell-backed HTTP probe pipeline that runs compact curl checks through the configured shell backend, saves raw output under `.mauler_artifacts/http_probe/`, returns a summary plus artifact path, appears in toolsets/UI, and is suggested by prompt/storm hints when repeated curl probing appears. Added `evidence_bundle`, which gathers common scan/note/loot/report files into `.mauler_artifacts/evidence_bundle/` with short previews and ledger artifact pointers. Next: add a scan-with-progress pipeline or exploit research packet once the UX needs it.
 
-9. **Trajectory replay/debug** — partial foundation exists.
+9. **Trajectory replay/debug** - partial foundation exists.
    - Build a replay view over RunLedger/task-runs that shows prompt packets, selected memories, model replies, tool calls, results, stop reasons, recovery decisions, and state transitions.
    - Add filters for loops, repeated commands, empty outputs, disabled tools, context drops, backend retries, and memory injections.
    - Use replay output to generate focused regression tests and new reflection candidates.
@@ -187,21 +187,21 @@ Open reconciliation flags:
 
 Concrete, code-grounded work items derived from an audit of memory.go, ledger.go, shell.go, and the app.go shell dispatch. Ordered by leverage.
 
-1. **Unify background/job in the standalone shell tool** — DONE (2026-06-14). New `internal/tools/shell_background.go` implements a backend-agnostic detached job manager (os/exec + temp logfile + goroutine `cmd.Wait()` for real exit codes), wired through `shellParams`'s now-parsed `background`/`job` fields. Sets `WSL_UTF8=1` so wsl.exe's merged stdout/stderr stays UTF-8-decodable. Covers default shell mode and the PowerShell backend where the shared-terminal path bailed. Tests in `shell_background_test.go`.
-2. **Memory tool (recall/remember)** — DONE (2026-06-14). `internal/app/memory_tool.go` registers a `memory` tool (action=recall|remember) holding an `*App` ref like `subagentTool`. recall reuses the shared `rankMemory` scorer via `searchMemory`; remember tags entries `agent` and persists through `SaveMemoryEntry` (ledgered). Added to `defaults.EnabledTools`, `coreRead`, and the `memory` toolset; system prompt nudges its use when memory is enabled. Tests in `memory_tool_test.go`.
-3. **Per-turn memory re-injection** — DONE (2026-06-14). `maybeReinjectMemory` runs at the top of the agent loop (after the first tool call), re-scores memory via `searchMemory` against a window of recent non-system messages (`recentContextText`), and appends a compact note for entries that (a) textually hit a query term (`memoryHasTermHit`, not just importance/recency boosts) and (b) were not already injected. Bounded to `maxMemoryReinjections` (3) notes/run, ≤3 entries each, deduped via a per-run injected-ID set seeded from the up-front injection. Tests in `memory_reinject_test.go`.
-4. **Auto-distill on run finish** — DONE (2026-06-14). `autoDistillLearnings` runs in the run-finish defer (after milestone memory), mines this run's ledger via `buildLearningCandidates`, and persists the top `maxAutoDistilledMemories` (2) reflection-class candidates (importance ≥4) as constraint memories tagged `auto`/`distilled`, deduped against existing titles in the workspace scope. Tests in `memory_distill_test.go`.
-6. **WSL warm-session keepalive** — DONE (2026-06-14). `startShellKeepalive` holds the WSL2 distro VM warm for a run's duration (one detached `wsl.exe -- sleep`) so commands don't pay cold-boot latency after the VM idles out while a slow local model thinks. No-op except on Windows + WSL backend + isolated mode (shared_terminal already keeps a warm PTY). Wired into `runAgentLoop` after model-ready with a deferred stop.
-7. **Auto-distill settings toggle** — DONE (2026-06-14). Added `MemoryConfig.DisableAutoDistill` (opt-out, so older configs stay default-on), gated `autoDistillLearnings`, surfaced in SettingsModal's Context tab under a new Memory section (also exposes Enabled + Auto-inject which were previously uneditable), updated the generated TS model.
-8. **Jobs tab works for all agent jobs** — DONE (2026-06-14). The shared-terminal path already emitted `mauler:job_update`; the new standalone path (isolated mode / PowerShell backend) did not, so those jobs were invisible. Added a `tools.OnBackgroundJobUpdate` observer hook fired on job start/poll, wired in `OnStartup` to emit the same Wails event. Frontend: jobs no longer yank focus to the Jobs tab on every poll (only on first appearance), and done jobs show exit code instead of an empty PID.
-9. **File-change ledger for cleanup/verification** — DONE (2026-06-15). `write_file` and `edit_file` now record `file_change` RunLedger events after successful verification, including created vs modified, before/after size, before/after SHA-256, verification status, files list, and a cleanup hint. Added a read-only `file_changes` tool so the agent can query its own created/modified file list before end-of-run cleanup. Tests in `file_change_tracker_test.go`.
+1. **Unify background/job in the standalone shell tool** - DONE (2026-06-14). New `internal/tools/shell_background.go` implements a backend-agnostic detached job manager (os/exec + temp logfile + goroutine `cmd.Wait()` for real exit codes), wired through `shellParams`'s now-parsed `background`/`job` fields. Sets `WSL_UTF8=1` so wsl.exe's merged stdout/stderr stays UTF-8-decodable. Covers default shell mode and the PowerShell backend where the shared-terminal path bailed. Tests in `shell_background_test.go`.
+2. **Memory tool (recall/remember)** - DONE (2026-06-14). `internal/app/memory_tool.go` registers a `memory` tool (action=recall|remember) holding an `*App` ref like `subagentTool`. recall reuses the shared `rankMemory` scorer via `searchMemory`; remember tags entries `agent` and persists through `SaveMemoryEntry` (ledgered). Added to `defaults.EnabledTools`, `coreRead`, and the `memory` toolset; system prompt nudges its use when memory is enabled. Tests in `memory_tool_test.go`.
+3. **Per-turn memory re-injection** - DONE (2026-06-14). `maybeReinjectMemory` runs at the top of the agent loop (after the first tool call), re-scores memory via `searchMemory` against a window of recent non-system messages (`recentContextText`), and appends a compact note for entries that (a) textually hit a query term (`memoryHasTermHit`, not just importance/recency boosts) and (b) were not already injected. Bounded to `maxMemoryReinjections` (3) notes/run, <=3 entries each, deduped via a per-run injected-ID set seeded from the up-front injection. Tests in `memory_reinject_test.go`.
+4. **Auto-distill on run finish** - DONE (2026-06-14). `autoDistillLearnings` runs in the run-finish defer (after milestone memory), mines this run's ledger via `buildLearningCandidates`, and persists the top `maxAutoDistilledMemories` (2) reflection-class candidates (importance >=4) as constraint memories tagged `auto`/`distilled`, deduped against existing titles in the workspace scope. Tests in `memory_distill_test.go`.
+6. **WSL warm-session keepalive** - DONE (2026-06-14). `startShellKeepalive` holds the WSL2 distro VM warm for a run's duration (one detached `wsl.exe -- sleep`) so commands don't pay cold-boot latency after the VM idles out while a slow local model thinks. No-op except on Windows + WSL backend + isolated mode (shared_terminal already keeps a warm PTY). Wired into `runAgentLoop` after model-ready with a deferred stop.
+7. **Auto-distill settings toggle** - DONE (2026-06-14). Added `MemoryConfig.DisableAutoDistill` (opt-out, so older configs stay default-on), gated `autoDistillLearnings`, surfaced in SettingsModal's Context tab under a new Memory section (also exposes Enabled + Auto-inject which were previously uneditable), updated the generated TS model.
+8. **Jobs tab works for all agent jobs** - DONE (2026-06-14). The shared-terminal path already emitted `mauler:job_update`; the new standalone path (isolated mode / PowerShell backend) did not, so those jobs were invisible. Added a `tools.OnBackgroundJobUpdate` observer hook fired on job start/poll, wired in `OnStartup` to emit the same Wails event. Frontend: jobs no longer yank focus to the Jobs tab on every poll (only on first appearance), and done jobs show exit code instead of an empty PID.
+9. **File-change ledger for cleanup/verification** - DONE (2026-06-15). `write_file` and `edit_file` now record `file_change` RunLedger events after successful verification, including created vs modified, before/after size, before/after SHA-256, verification status, files list, and a cleanup hint. Added a read-only `file_changes` tool so the agent can query its own created/modified file list before end-of-run cleanup. Tests in `file_change_tracker_test.go`.
 
-5. **Memory scoring fixes** — DONE (2026-06-14). `containsWordish` now requires alphanumeric boundaries (kills the "cat"→"category" trap, keeps "connected"→"connected.htb"); `scoreMemory` adds a `usageBoost(LastUsedAt)` term; capacity eviction uses a combined `evictionScore` (importance + pinned + recency + usage) instead of `UpdatedAt`-only, so pinned/used facts survive. Tests in `memory_test.go`.
+5. **Memory scoring fixes** - DONE (2026-06-14). `containsWordish` now requires alphanumeric boundaries (kills the "cat"->"category" trap, keeps "connected"->"connected.htb"); `scoreMemory` adds a `usageBoost(LastUsedAt)` term; capacity eviction uses a combined `evictionScore` (importance + pinned + recency + usage) instead of `UpdatedAt`-only, so pinned/used facts survive. Tests in `memory_test.go`.
 
 ## Stability Hardening (2026-06-14)
 
-9. **CI** — DONE. `.github/workflows/ci.yml` runs `go build ./...`, `go vet ./internal/...`, `go test ./... -count=1`, and frontend `tsc --noEmit` on push to main + all PRs, with in-progress-run cancellation.
-10. **Background-job leak reaper + cap + sweep** — DONE. Standalone manager (`shell_background.go`): `MaxConcurrentBackgroundJobs=24` cap rejects new jobs when too many are unfinished; `reapFinishedShellJobs` frees finished-but-unpolled jobs (map entry + temp logfile); `SweepStaleJobLogs` clears orphan `mauler_job_*.log` files on startup; `ReapBackgroundShellJobs` runs at run-end. App shared-terminal manager got the same concurrency cap. Wired: sweep in `OnStartup`, reap in the run-finish defer. Tests in `shell_background_test.go`.
+9. **CI** - DONE. `.github/workflows/ci.yml` runs `go build ./...`, `go vet ./internal/...`, `go test ./... -count=1`, and frontend `tsc --noEmit` on push to main + all PRs, with in-progress-run cancellation.
+10. **Background-job leak reaper + cap + sweep** - DONE. Standalone manager (`shell_background.go`): `MaxConcurrentBackgroundJobs=24` cap rejects new jobs when too many are unfinished; `reapFinishedShellJobs` frees finished-but-unpolled jobs (map entry + temp logfile); `SweepStaleJobLogs` clears orphan `mauler_job_*.log` files on startup; `ReapBackgroundShellJobs` runs at run-end. App shared-terminal manager got the same concurrency cap. Wired: sweep in `OnStartup`, reap in the run-finish defer. Tests in `shell_background_test.go`.
 
 Known follow-ups (not yet done): split the 8k-line `app.go`; unify the two background-job implementations (pidfile-based vs `cmd.Wait()`-based); WSL-side `/tmp` orphan log sweep (current sweep only covers the Windows temp dir used by the standalone path); add filesystem diffing around shell commands so files created outside `write_file`/`edit_file` can also be audited and cleaned up safely.
 
@@ -209,12 +209,12 @@ Known follow-ups (not yet done): split the 8k-line `app.go`; unify the two backg
 
 Derived from analysing the 2026-06-13 23:18 run (FreePBX CVE-2025-57819 SQLi): a successful exploit that stalled into 72 tool calls / 36 min / user-stopped because context-clearing kept wiping the hash chunks it was extracting, so it re-issued queries it had already answered.
 
-1. **Preserve compact evidence + persist nudge** — `internal/agent/history.go`: `ClearOldToolResults` now skips small results matching evidence patterns (EXTRACTVALUE `~..~` leaks, password/hash/flag/private-key/`id` output) so accumulating extraction data survives clearing. `app.go` emits a one-time `persist_nudge` system message the first time context is dropped, telling the model to save findings to a file or the memory tool. Tests in `history_test.go`.
-2. **Run-your-script nudge** — folded into the storm hint: when the agent wrote a `.py/.sh/.ps1/.rb/.pl` artifact, the nudge names it ("run freepbx_cve.py instead").
-3. **Command-storm soft hint** — `shellCommandFamily` groups commands by binary+endpoint (query stripped); `shellCommandStormHint` appends a non-blocking nudge to script the loop once a family hits 10, then every 5. Complements the existing hard `repeatedShell*Block` guards (which only catch identical-result/failure loops, not distinct-payload extraction storms). Tests in `command_storm_test.go`.
-4. **Inefficiency distillation** — `autoDistillLearnings` now also distills a "script repeated <binary> extraction" constraint when a run's largest command family ≥10, so the brain learns from slow-but-successful runs, not only failures. Reworked to not early-return on empty ledger (the storm lesson reads `run.Tools`). Tests in `memory_distill_test.go`.
+1. **Preserve compact evidence + persist nudge** - `internal/agent/history.go`: `ClearOldToolResults` now skips small results matching evidence patterns (EXTRACTVALUE `~..~` leaks, password/hash/flag/private-key/`id` output) so accumulating extraction data survives clearing. `app.go` emits a one-time `persist_nudge` system message the first time context is dropped, telling the model to save findings to a file or the memory tool. Tests in `history_test.go`.
+2. **Run-your-script nudge** - folded into the storm hint: when the agent wrote a `.py/.sh/.ps1/.rb/.pl` artifact, the nudge names it ("run freepbx_cve.py instead").
+3. **Command-storm soft hint** - `shellCommandFamily` groups commands by binary+endpoint (query stripped); `shellCommandStormHint` appends a non-blocking nudge to script the loop once a family hits 10, then every 5. Complements the existing hard `repeatedShell*Block` guards (which only catch identical-result/failure loops, not distinct-payload extraction storms). Tests in `command_storm_test.go`.
+4. **Inefficiency distillation** - `autoDistillLearnings` now also distills a "script repeated <binary> extraction" constraint when a run's largest command family >=10, so the brain learns from slow-but-successful runs, not only failures. Reworked to not early-return on empty ledger (the storm lesson reads `run.Tools`). Tests in `memory_distill_test.go`.
 
-Note: two pre-existing `internal/llm/backends` tests (`ActualContextLength*`) fail in the working tree (dial a hardcoded :5510 / need a live server) — unrelated to these changes, but they will make the new CI workflow red until addressed.
+Note: two pre-existing `internal/llm/backends` tests (`ActualContextLength*`) fail in the working tree (dial a hardcoded :5510 / need a live server) - unrelated to these changes, but they will make the new CI workflow red until addressed.
 
 ## Status
 

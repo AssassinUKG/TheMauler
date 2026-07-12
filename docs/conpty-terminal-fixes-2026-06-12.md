@@ -1,4 +1,4 @@
-# ConPTY / terminal — review + fix list (2026-06-12)
+# ConPTY / terminal - review + fix list (2026-06-12)
 
 Review of the shared-PTY shell (ConPTY on Windows, go-pty everywhere). The agent
 protocol (marker-framed commands) and session lifecycle are sound. The biggest
@@ -16,11 +16,11 @@ Files: `internal/app/app.go` (terminal section ~L3578-4120),
 
 The frontend now renders a real terminal. Backend splits two consumers:
 
-- **UI path** — `pipeShellOutput` emits **raw PTY bytes (base64)** on
+- **UI path** - `pipeShellOutput` emits **raw PTY bytes (base64)** on
   `mauler:shell_output` (`{id, data}` where `data` is base64). `TerminalPane.tsx`
   decodes to `Uint8Array` and writes to xterm.js. Colours, cursor moves, `\r`
   repaints, `vim`/`htop`/`less` now work.
-- **Agent path** — unchanged semantics: complete lines are assembled from the raw
+- **Agent path** - unchanged semantics: complete lines are assembled from the raw
   stream **first**, then `sanitizeTerminalLine` runs per line and the plain-text
   record is pushed to `sess.output` for the marker protocol. This fixes the
   escape-split-across-`Read()` bug (#2) for the agent because a sequence is only
@@ -44,8 +44,8 @@ The frontend now renders a real terminal. Backend splits two consumers:
   terminal no longer shows `stty -echo` or the giant wrapper command.
 - **write_file/edit_file verification now follows WSL routing.** Previously the
   verifier `os.Stat`'d the Windows host for a `/tmp/...` path that only exists
-  inside WSL, producing `Verification failed: stat /tmp/…: GetFileAttributesEx
-  \tmp\…`. `readVerifiedFile` now uses `tools.ShouldUseWSLForPath` +
+  inside WSL, producing `Verification failed: stat /tmp/...: GetFileAttributesEx
+  \tmp\...`. `readVerifiedFile` now uses `tools.ShouldUseWSLForPath` +
   `tools.ReadFileViaWSL` to read the file back inside the distro (and skips host
   linting for WSL-routed files).
 
@@ -54,12 +54,12 @@ The frontend now renders a real terminal. Backend splits two consumers:
 - **Symptom:** commands failed instantly with `shared terminal: invalid exit code "'"`
   and result fragments like `4297200__' "$PWD"; printf '%s%s\n' '`. Cause: the
   terminal **wrapped the echoed wrapper command across rows**; a fragment carrying
-  the `__MAULER_DONE_…:` marker (split from START) was parsed as the real
+  the `__MAULER_DONE_...:` marker (split from START) was parsed as the real
   completion, with status = a stray quote. The cwd line lengthened the wrapper and
   made it worse.
 - **Fix:** `sharedTerminalWrapper` now builds the marker prefix from a shell
-  variable — `M=__MA''ULER_; … printf '%s\n' "${M}START_<id>__"`. The `''` splits
-  the literal, so the **echoed command never contains a literal `__MAULER_`** —
+  variable - `M=__MA''ULER_; ... printf '%s\n' "${M}START_<id>__"`. The `''` splits
+  the literal, so the **echoed command never contains a literal `__MAULER_`** -
   only the printf OUTPUT (after expansion) does. Echo fragments therefore can't be
   mistaken for markers, and since `started` only flips on the real START output,
   the echo is never captured. Verified live in WSL kali.
@@ -71,13 +71,13 @@ The frontend now renders a real terminal. Backend splits two consumers:
 
 ### Agent-effectiveness pass (2026-06-12, later)
 
-- **Timeout → Ctrl+C, session preserved.** `interruptSharedTerminalRun` sends
+- **Timeout -> Ctrl+C, session preserved.** `interruptSharedTerminalRun` sends
   `\x03` then probes with a fresh `__MAULER_RECOVER_<runid>__` sentinel. Since
   bash aborts the wrapper's command list on SIGINT (the DONE marker never prints),
   the old code waited for a marker that never came and killed the session anyway;
   the sentinel confirms the shell is back at a prompt so cwd/env/foothold survive.
   Only a genuinely wedged shell is killed.
-- **Background jobs.** `shell` tool gained `background: true` (launch detached →
+- **Background jobs.** `shell` tool gained `background: true` (launch detached ->
   returns a `jN` handle, output to `/tmp/mauler_job_jN.log`, PID to a pidfile) and
   `job: "jN"` (poll running/done + tail). See `startBackgroundJob` /
   `pollBackgroundJob` / `runSharedCommandSimple`. Lets the agent fire `nmap -p-` /
@@ -97,7 +97,7 @@ The frontend now renders a real terminal. Backend splits two consumers:
    pass above). Original note: `runCtx.Done()` branch called `a.shellSess.cancel()`
    and dropped the session,
    destroying cwd/env/venv state that is the entire point of a shared terminal.
-   Escalate instead: write `\x03` (Ctrl+C → ConPTY real interrupt), wait ~2s for
+   Escalate instead: write `\x03` (Ctrl+C -> ConPTY real interrupt), wait ~2s for
    the done marker or a fresh prompt, and only kill if still wedged.
 
 2. **`ensureShellSession` TOCTOU race.** It releases `shellMu` between the nil
@@ -112,7 +112,7 @@ The frontend now renders a real terminal. Backend splits two consumers:
 
 ### Correctness
 
-4. **`ansiEscape` regex is incomplete** — misses DCS (`\x1bP…\x1b\\`), APC, SOS/PM
+4. **`ansiEscape` regex is incomplete** - misses DCS (`\x1bP...\x1b\\`), APC, SOS/PM
    string sequences that PowerShell 7 / modern CLIs emit. Now that the UI uses
    xterm.js this only matters for the agent's sanitized text; widen the regex or
    use a small state machine.
@@ -123,10 +123,10 @@ The frontend now renders a real terminal. Backend splits two consumers:
    output and breaks if a pair straddles a `Read()`. Verify once with `wsl.exe`
    through the PTY, then delete.
 
-6. **Exit-code parse ignores errors** — `strconv.Atoi(codeText)` silently yields 0
+6. **Exit-code parse ignores errors** - `strconv.Atoi(codeText)` silently yields 0
    on garbage. Treat a parse failure as unknown (-1), not success.
 
-7. ~~`stty -echo` + `time.Sleep(50ms)` + drain is a race.~~ **DONE** — dropped the
+7. ~~`stty -echo` + `time.Sleep(50ms)` + drain is a race.~~ **DONE** - dropped the
    stty dance; the UI filter drops the wrapper echo instead.
 
 ### Frontend polish (mostly handled by xterm.js, verify)
@@ -142,5 +142,5 @@ The frontend now renders a real terminal. Backend splits two consumers:
 10. `hidePtyShellWindow` sets `SysProcAttr.HideWindow` on the `pty.Cmd`, but
     go-pty's ConPTY start path uses its own `STARTUPINFOEX`/attribute list and may
     ignore `SysProcAttr`. With ConPTY the child has no console window anyway, so
-    it's likely a harmless no-op — confirm against go-pty's conpty start code so we
+    it's likely a harmless no-op - confirm against go-pty's conpty start code so we
     aren't relying on it.

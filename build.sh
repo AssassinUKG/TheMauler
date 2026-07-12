@@ -66,7 +66,11 @@ install_linux_deps() {
   "${sudo_cmd[@]}" apt-get install -y \
     build-essential \
     pkg-config \
-    libgtk-3-dev
+    libgtk-3-dev \
+    ffmpeg \
+    espeak-ng \
+    python3 \
+    python3-pip
 
   # Wails v2 pkg-config flags hardcode webkit2gtk-4.0.
   # Ubuntu 22.04 and earlier ship libwebkit2gtk-4.0-dev directly.
@@ -121,6 +125,19 @@ if ! command -v wails >/dev/null 2>&1; then
 fi
 
 (cd frontend && npm install)
+
+if command -v python3 >/dev/null 2>&1; then
+  if ! python3 -c 'import kokoro, soundfile' >/dev/null 2>&1; then
+    echo "Installing Kokoro TTS Python packages..."
+    python3 -m pip install --user 'kokoro>=0.9.4' soundfile
+  fi
+  if ! command -v whisper >/dev/null 2>&1 && ! python3 -c 'import whisper' >/dev/null 2>&1; then
+    echo "Installing Whisper STT Python package..."
+    python3 -m pip install --user openai-whisper
+  fi
+else
+  echo "WARNING: python3 not found; Kokoro TTS and Whisper STT will be unavailable." >&2
+fi
 
 if [ "$SKIP_TESTS" -eq 0 ]; then
   go test ./...

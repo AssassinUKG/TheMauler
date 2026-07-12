@@ -271,13 +271,14 @@ func formatTerminalCommandOutput(sess *shellSession, beforeLen int, lines int) s
 // status. It only fires for finished commands so a still-running command's stale
 // exit is never reported as a failure.
 func terminalCommandFailure(sess *shellSession, state string) (int, bool) {
-	if sess == nil || sess.lastExit == nil || state != "prompt_or_idle" {
+	snapshot := sess.stateSnapshot()
+	if !snapshot.hasLastExit || state != "prompt_or_idle" {
 		return 0, false
 	}
-	if *sess.lastExit == 0 {
+	if snapshot.lastExit == 0 {
 		return 0, false
 	}
-	return *sess.lastExit, true
+	return snapshot.lastExit, true
 }
 
 func terminalStateHint(state string) string {
@@ -335,15 +336,16 @@ func classifyTerminalStateForSession(sess *shellSession, command string, tail []
 	// source of truth for running-vs-finished — no 30s expiry and no long-running
 	// string guessing. Only trust it for the local shell or a remote session we have
 	// injected markers into (remoteConnected without integration has no marks).
-	if sess != nil && sess.sawPromptMarker && (!sess.remoteConnected || sess.remoteIntegrated) {
-		if sess.awaitingCommand && !sess.promptReady {
+	state := sess.stateSnapshot()
+	if state.sawPromptMarker && (!state.remoteConnected || state.remoteIntegrated) {
+		if state.awaitingCommand && !state.promptReady {
 			// A program can prompt for input without the shell prompt returning.
 			if terminalTailHasInteractivePrompt(tail) {
 				return "interactive_prompt"
 			}
 			return "running"
 		}
-		if sess.promptReady {
+		if state.promptReady {
 			return "prompt_or_idle"
 		}
 	}
@@ -354,21 +356,24 @@ func classifyTerminalStateForSession(sess *shellSession, command string, tail []
 }
 
 func terminalSessionPromptReady(sess *shellSession) bool {
-	return sess != nil && sess.promptReady && !sess.lastDoneAt.IsZero() && time.Since(sess.lastDoneAt) < 30*time.Second
+	state := sess.stateSnapshot()
+	return state.promptReady && !state.lastDoneAt.IsZero() && time.Since(state.lastDoneAt) < 30*time.Second
 }
 
 func terminalExitLabel(sess *shellSession) string {
-	if sess == nil || sess.lastExit == nil {
+	state := sess.stateSnapshot()
+	if !state.hasLastExit {
 		return "unknown"
 	}
-	return fmt.Sprintf("%d", *sess.lastExit)
+	return fmt.Sprintf("%d", state.lastExit)
 }
 
 func terminalCWDLabel(sess *shellSession) string {
-	if sess == nil || strings.TrimSpace(sess.lastCWD) == "" {
+	state := sess.stateSnapshot()
+	if strings.TrimSpace(state.lastCWD) == "" {
 		return "unknown"
 	}
-	return sess.lastCWD
+	return state.lastCWD
 }
 
 func terminalTailHasInteractivePrompt(tail []string) bool {

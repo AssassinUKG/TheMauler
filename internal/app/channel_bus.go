@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -22,6 +25,12 @@ type ChannelResponse = channelbus.Response
 type ChannelWorkItem = channelbus.WorkItem
 
 func (a *App) DispatchChannelMessage(env ChannelEnvelope) (ChannelResponse, error) {
+	a.mu.Lock()
+	evalRunning := a.evalRunning
+	a.mu.Unlock()
+	if evalRunning {
+		return ChannelResponse{Status: "busy", Message: "Agent Eval is running; retry when it finishes."}, fmt.Errorf("agent eval is running")
+	}
 	env = channelbus.NormalizeEnvelope(env)
 	route := channelbus.RouteEnvelope(env)
 	a.recordChannelEvent("channel_message_in", env, route, "")
@@ -84,6 +93,28 @@ func (a *App) DispatchChannelMessage(env ChannelEnvelope) (ChannelResponse, erro
 	}
 }
 
+// DispatchSideChatMessage is the desktop conversational lane. Unlike the
+// general channel router, it never promotes an imperative-sounding question
+// into project work. This keeps casual chat isolated from tools and the active
+// project transcript.
+func (a *App) DispatchSideChatMessage(env ChannelEnvelope) (ChannelResponse, error) {
+	a.mu.Lock()
+	evalRunning := a.evalRunning
+	a.mu.Unlock()
+	if evalRunning {
+		return ChannelResponse{Status: "busy", Message: "Agent Eval is running; retry when it finishes."}, fmt.Errorf("agent eval is running")
+	}
+	env = channelbus.NormalizeEnvelope(env)
+	route := channelbus.Route{Lane: channelbus.LaneSideChat, Command: "chat", Argument: env.Text, ReadOnly: true, Reason: "desktop ask lane"}
+	a.recordChannelEvent("channel_message_in", env, route, "")
+	if a.isAgentRunning() {
+		return ChannelResponse{Lane: route.Lane, Status: "busy", Message: "The project agent is using the local model. Stop or finish that run, then ask again."}, nil
+	}
+	resp := a.handleChannelSideChat(env, route)
+	a.recordChannelEvent("channel_message_out", env, route, resp.Message)
+	return resp, nil
+}
+
 func (a *App) handleChannelQuickAction(env channelbus.Envelope, route channelbus.Route) (channelbus.Response, error) {
 	a.mu.Lock()
 	running := a.agentRunning
@@ -102,7 +133,7 @@ func (a *App) handleChannelQuickAction(env channelbus.Envelope, route channelbus
 	case "quick_terminal":
 		command, label := quickTerminalCommand(route.Argument)
 		if command == "" {
-			return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "I recognised a quick terminal request, but do not have a deterministic command for it yet. Use /run <task> for the full agent."}, nil
+			return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "I recognised a quick terminal request, but do not have a deterministic command for it yet. Use /cmd <task> for the full agent."}, nil
 		}
 		raw, _ := json.Marshal(terminalRunArgs{Command: command, WaitFor: "output", Lines: 60})
 		result, err := (&terminalRunTool{app: a}).Run(context.Background(), raw)
@@ -119,7 +150,7 @@ func (a *App) handleChannelQuickAction(env channelbus.Envelope, route channelbus
 			},
 		}, nil
 	default:
-		return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "Unknown quick action. Use /run <task> for full agent work."}, nil
+		return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "Unknown quick action. Use /cmd <task> for full agent work."}, nil
 	}
 }
 
@@ -196,7 +227,7 @@ func (a *App) GetChannelBusStatus() map[string]string {
 func (a *App) handleChannelSideChat(env channelbus.Envelope, route channelbus.Route) channelbus.Response {
 	reply, err := a.runChannelSideChat(env, route)
 	if err != nil {
-		reply = "I received that, but the side-chat model call failed: " + err.Error() + "\n\nUse /run <task> if you want me to start an unrestricted project agent run."
+		reply = "I received that, but the side-chat model call failed: " + err.Error() + "\n\nUse /cmd <task> if you want me to start an unrestricted project agent run."
 	}
 	return channelbus.Response{
 		Lane:    route.Lane,
@@ -215,7 +246,7 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 		text = strings.TrimSpace(env.Text)
 	}
 	if text == "" {
-		return "I received an empty message. Send text, voice with transcription configured, or use /run <task>.", nil
+		return "I received an empty message. Send text, voice with transcription configured, or use /cmd <task>.", nil
 	}
 	cfg, pf, profile, err := a.sideChatProfile()
 	if err != nil {
@@ -244,6 +275,18 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 		return "", err
 	}
 	reply = strings.TrimSpace(reply)
+	if route.FromVoice && sideChatClaimsCannotVoice(reply) {
+		retryMsgs := []llm.Message{
+			llm.NewTextMessage(llm.RoleSystem, "Telegram voice transport is available. The runtime will synthesize your final text as a Telegram voice note. Do not claim you cannot send voice messages or audio. Reply naturally in one or two short sentences."),
+			llm.NewTextMessage(llm.RoleUser, text),
+		}
+		reply, err = a.runSideChatCompletion(ctx, client, profile, retryMsgs)
+		if err != nil {
+			a.recordChannelSideChatModelEvent("channel_sidechat_model_error", env, route, profile, time.Since(start), 0, err.Error())
+			return "", err
+		}
+		reply = strings.TrimSpace(reply)
+	}
 	if reply == "" {
 		retryMsgs := []llm.Message{
 			llm.NewTextMessage(llm.RoleSystem, "Reply directly in one or two short sentences. Do not use tools. Do not output hidden thinking."),
@@ -256,6 +299,22 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 		}
 	}
 	reply = strings.TrimSpace(reply)
+	if sideChatLooksLikeToolCall(reply) {
+		retryMsgs := []llm.Message{
+			llm.NewTextMessage(llm.RoleSystem, "This is no-tool side chat. Do not output function calls, JSON tool calls, code fences, or command syntax. If action is needed, tell the user to send /cmd followed by the task."),
+			llm.NewTextMessage(llm.RoleUser, text),
+		}
+		reply, err = a.runSideChatCompletion(ctx, client, profile, retryMsgs)
+		if err != nil {
+			a.recordChannelSideChatModelEvent("channel_sidechat_model_error", env, route, profile, time.Since(start), 0, err.Error())
+			return "", err
+		}
+		reply = strings.TrimSpace(reply)
+		if reply == "" || sideChatLooksLikeToolCall(reply) {
+			reply = "That needs a real tool run. Send it as `/cmd <task>` and I will execute it through the agent instead of printing a tool call in chat."
+			a.recordChannelSideChatModelEvent("channel_sidechat_model_tool_leak", env, route, profile, time.Since(start), 0, "side-chat model emitted tool-call syntax")
+		}
+	}
 	if reply == "" {
 		reply = a.sideChatFallbackReply(text)
 		a.recordChannelSideChatModelEvent("channel_sidechat_model_empty", env, route, profile, time.Since(start), 0, "empty visible assistant response after retry")
@@ -263,6 +322,42 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 	a.recordChannelSideChatModelEvent("channel_sidechat_model_done", env, route, profile, time.Since(start), len(reply), reply)
 	a.appendSideChatTurn(sessionID, text, reply)
 	return reply, nil
+}
+
+func sideChatLooksLikeToolCall(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	if containsInlineToolMarkup(trimmed) {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	if regexp.MustCompile(`(?is)\b[a-z_][a-z0-9_]*\s*\(\s*[a-z_][a-z0-9_]*\s*=`).MatchString(trimmed) {
+		return true
+	}
+	if strings.Contains(lower, `"name"`) && strings.Contains(lower, `"args"`) {
+		return true
+	}
+	if strings.Contains(lower, "```tool_call") {
+		return true
+	}
+	return false
+}
+
+func sideChatClaimsCannotVoice(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "can't send voice") ||
+		strings.Contains(lower, "cannot send voice") ||
+		strings.Contains(lower, "can't send audio") ||
+		strings.Contains(lower, "cannot send audio") ||
+		strings.Contains(lower, "can't send voice messages") ||
+		strings.Contains(lower, "cannot send voice messages") ||
+		strings.Contains(lower, "ready to chat via text") ||
+		strings.Contains(lower, "text only")
 }
 
 func (a *App) runSideChatCompletion(ctx context.Context, client llm.Client, profile settings.Profile, msgs []llm.Message) (string, error) {
@@ -326,11 +421,17 @@ func (a *App) sideChatProfile() (*settings.Settings, *settings.ProfilesFile, set
 }
 
 func (a *App) sideChatMessages(sessionID string, env channelbus.Envelope, text string, cfg *settings.Settings, pf *settings.ProfilesFile) []llm.Message {
-	system := "You are TheMauler's Telegram side-chat assistant. Reply conversationally and directly. " +
+	system := "You are MaulBot, TheMauler's Telegram side-chat assistant running on the user's local Windows machine. Reply conversationally and directly. " +
+		"Do not claim you are cloud-hosted, remote-only, or unable to access the local machine because you are in the cloud. " +
+		"Your side-chat lane has no tools, but /cmd starts a local TheMauler agent run with approved local tools and CLI access. " +
+		"The Telegram runtime can receive voice notes, transcribe them, and synthesize your final text into a Telegram voice note; never claim you cannot send voice messages or audio. " +
 		"Keep this chat separate from the active project run. Do not claim to have run tools or changed files in side chat. " +
 		"You may answer questions about current app/project status using the status packet below. " +
-		"If the user wants real work, tell them to use /run <task>, /stop, /status, /facts, /plan, or /terminal. " +
-		"Unrestricted project runs are allowed when the user uses /run; side chat itself is no-tool text chat."
+		"If the user wants real work, tell them to use /cmd <task>, /stop, /status, /facts, /plan, or /terminal. " +
+		"For screenshots, files, shell commands, web research, or other actions, ask for /cmd <task> instead of saying you cannot do it."
+	if envHasAudioAttachment(env) {
+		system += " This incoming user turn came from a Telegram voice/audio message; answer as if in voice chat, concise and spoken-friendly."
+	}
 	if cfg != nil {
 		system += " Active profile: " + cfg.ActiveProfile + "."
 	}
@@ -350,6 +451,17 @@ func (a *App) sideChatMessages(sessionID string, env channelbus.Envelope, text s
 	}
 	msgs = append(msgs, llm.NewTextMessage(llm.RoleUser, user))
 	return msgs
+}
+
+func envHasAudioAttachment(env channelbus.Envelope) bool {
+	for _, att := range env.Attachments {
+		kind := strings.ToLower(strings.TrimSpace(att.Kind))
+		ct := strings.ToLower(strings.TrimSpace(att.ContentType))
+		if kind == "voice" || kind == "audio" || strings.Contains(ct, "audio/") || strings.Contains(ct, "ogg") || strings.Contains(ct, "opus") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) appendSideChatTurn(sessionID, userText, assistantText string) {
@@ -374,9 +486,9 @@ func (a *App) sideChatFallbackReply(text string) string {
 		strings.Contains(lower, "running") ||
 		strings.Contains(lower, "queue") ||
 		(strings.Contains(lower, "what") && strings.Contains(lower, "go")) {
-		return "The local side-chat model returned no visible text, but I still have Mauler state:\n\n" + status + "\n\nUse /run <task> if you want me to start or queue project work."
+		return "The local side-chat model returned no visible text, but I still have Mauler state:\n\n" + status + "\n\nUse /cmd <task> if you want me to start or queue project work."
 	}
-	return "I received that, but the local side-chat model returned no visible text. Telegram is still connected; use /run <task> for project work, or ask again and I will retry the side chat."
+	return "I received that, but the local side-chat model returned no visible text. Telegram is still connected; use /cmd <task> for project work, or ask again and I will retry the side chat."
 }
 
 func sideChatMaxTokens(profile settings.Profile) int {
@@ -393,22 +505,261 @@ func (a *App) handleChannelControl(env channelbus.Envelope, route channelbus.Rou
 		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: a.remoteStatusSummary()}, nil
 	case "facts":
 		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: a.remoteFactsSummary()}, nil
+	case "projects":
+		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: a.remoteProjectsSummary()}, nil
+	case "project":
+		message, err := a.remoteSelectProject(route.Argument)
+		return channelbus.Response{Lane: route.Lane, Status: statusForError(err), Message: message}, err
+	case "files":
+		message, err := a.remoteListFiles(route.Argument)
+		return channelbus.Response{Lane: route.Lane, Status: statusForError(err), Message: message}, err
+	case "file":
+		message, err := a.remoteReadWorkspaceFile(route.Argument)
+		return channelbus.Response{Lane: route.Lane, Status: statusForError(err), Message: message}, err
+	case "artifact":
+		message, err := a.remoteArtifactSummary(route.Argument)
+		return channelbus.Response{Lane: route.Lane, Status: statusForError(err), Message: message}, err
 	case "terminal", "terminal_read":
 		state := a.GetSharedTerminalState()
 		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: formatRemoteTerminalState(state)}, nil
 	case "stop":
-		a.StopAgent()
-		return channelbus.Response{Lane: route.Lane, Status: "stopping", Message: "Stop requested for the active project run."}, nil
+		stopped := a.EmergencyStop()
+		return channelbus.Response{
+			Lane:   route.Lane,
+			Status: "stopping",
+			Message: fmt.Sprintf(
+				"Emergency stop requested.\n- active run cancelled: %v\n- artifact task cancelled: %v\n- queued remote work cancelled: %d\n- terminal interrupt sent: %v",
+				stopped["agent"] > 0,
+				stopped["artifact"] > 0,
+				stopped["queue"],
+				stopped["terminal"] > 0,
+			),
+		}, nil
 	case "help":
 		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: remoteHelpText()}, nil
-	case "plan", "logs", "brain":
+	case "plan":
+		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: a.remotePlanSummary()}, nil
+	case "brain":
+		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: a.remoteBrainSummary()}, nil
+	case "logs":
 		return channelbus.Response{Lane: route.Lane, Status: "ok", Message: a.remoteRecentRunSummary(route.Command)}, nil
 	case "terminal_send":
-		item := a.ensureChannelQueue().Enqueue(env, route)
-		return channelbus.Response{Lane: route.Lane, Status: "queued", Message: "Queued terminal_send for explicit operator review/dispatch.", Queued: true, QueueID: item.ID}, nil
+		if a.isAgentRunning() {
+			item := a.ensureChannelQueue().Enqueue(env, route)
+			return channelbus.Response{Lane: route.Lane, Status: "queued_busy", Message: "Agent work is active, so terminal_send was queued instead of typing over it.", Queued: true, QueueID: item.ID}, nil
+		}
+		command := strings.TrimSpace(route.Argument)
+		if command == "" {
+			return channelbus.Response{Lane: route.Lane, Status: "error", Message: "Usage: /terminal_send <command>"}, fmt.Errorf("terminal command is empty")
+		}
+		if len(command) > 4000 {
+			return channelbus.Response{Lane: route.Lane, Status: "error", Message: "terminal command exceeds 4000 characters"}, fmt.Errorf("terminal command too long")
+		}
+		raw, _ := json.Marshal(terminalRunArgs{Command: command, WaitFor: "output", Lines: 80})
+		result, err := (&terminalRunTool{app: a}).Run(context.Background(), raw)
+		if err != nil {
+			return channelbus.Response{Lane: route.Lane, Status: "error", Message: "terminal_send failed: " + err.Error()}, nil
+		}
+		return channelbus.Response{Lane: route.Lane, Status: "done", Message: truncateRunes(result, 3500)}, nil
 	default:
 		return channelbus.Response{Lane: route.Lane, Status: "not_implemented", Message: "Command is routed cleanly but not implemented yet: /" + route.Command}, nil
 	}
+}
+
+func statusForError(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "ok"
+}
+
+func (a *App) remoteProjectsSummary() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cfg == nil || len(a.cfg.Context.LabProfiles) == 0 {
+		return "No saved projects."
+	}
+	lines := []string{"Projects"}
+	for _, project := range a.cfg.Context.LabProfiles {
+		marker := ""
+		if project.ID == a.cfg.Context.ActiveLabProfile {
+			marker = " [active]"
+		}
+		lines = append(lines, fmt.Sprintf("- %s%s — %s — %s", firstNonEmpty(project.ID, project.Name), marker, firstNonEmpty(project.Target, "no target"), project.WorkspaceDir))
+	}
+	lines = append(lines, "", "Use /project <id> to switch.")
+	return strings.Join(lines, "\n")
+}
+
+func (a *App) remoteSelectProject(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "Usage: /project <id>\n\n" + a.remoteProjectsSummary(), nil
+	}
+	a.mu.Lock()
+	if a.cfg == nil {
+		a.mu.Unlock()
+		return "Project settings unavailable.", fmt.Errorf("settings unavailable")
+	}
+	cfg := *a.cfg
+	running := a.agentRunning || a.evalRunning
+	a.mu.Unlock()
+	if running {
+		return "Cannot switch projects while an agent run or eval is active.", fmt.Errorf("agent is busy")
+	}
+	var selected *settings.LabProfile
+	for i := range cfg.Context.LabProfiles {
+		p := &cfg.Context.LabProfiles[i]
+		if strings.EqualFold(p.ID, id) || strings.EqualFold(p.Name, id) {
+			selected = p
+			break
+		}
+	}
+	if selected == nil {
+		return "Unknown project: " + id + "\n\n" + a.remoteProjectsSummary(), fmt.Errorf("project not found")
+	}
+	if info, err := os.Stat(filepath.FromSlash(selected.WorkspaceDir)); err != nil || !info.IsDir() {
+		return "Project workspace is unavailable: " + selected.WorkspaceDir, fmt.Errorf("workspace unavailable")
+	}
+	cfg.Context.ActiveLabProfile = selected.ID
+	cfg.Context.WorkspaceDir = selected.WorkspaceDir
+	cfg.Context.Lab = settings.LabContext{ID: selected.ID, Name: selected.Name, Target: selected.Target, Hostname: selected.Hostname, VPNInterface: selected.VPNInterface, LatestArtifact: selected.LatestArtifact, OpsProfile: selected.OpsProfile, EvidencePolicy: selected.EvidencePolicy, AccessPreference: selected.AccessPreference, Notes: selected.Notes}
+	cfg.Context.OpenFolders = []settings.WorkspaceFolder{{Path: selected.WorkspaceDir, Name: firstNonEmpty(selected.Name, selected.ID), Role: "root"}}
+	if err := a.UpdateSettings(cfg); err != nil {
+		return "Project switch failed: " + err.Error(), err
+	}
+	_ = a.ClearTodos()
+	return fmt.Sprintf("Project switched\n- name: %s\n- target: %s\n- workspace: %s\n- chat and plan: reset", firstNonEmpty(selected.Name, selected.ID), firstNonEmpty(selected.Target, "not set"), selected.WorkspaceDir), nil
+}
+
+func (a *App) remoteWorkspacePath(requested string) (string, string, error) {
+	a.mu.Lock()
+	root := ""
+	if a.cfg != nil {
+		root = a.cfg.Context.WorkspaceDir
+	}
+	a.mu.Unlock()
+	if root == "" {
+		root = mustGetwd()
+	}
+	rootAbs, err := filepath.Abs(filepath.FromSlash(root))
+	if err != nil {
+		return "", "", err
+	}
+	requested = strings.TrimSpace(strings.TrimPrefix(requested, "@"))
+	path := rootAbs
+	if requested != "" {
+		path = filepath.Join(rootAbs, filepath.Clean(filepath.FromSlash(requested)))
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", err
+	}
+	rel, err := filepath.Rel(rootAbs, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("path escapes active workspace")
+	}
+	return rootAbs, abs, nil
+}
+
+func (a *App) remoteListFiles(requested string) (string, error) {
+	root, path, err := a.remoteWorkspacePath(requested)
+	if err != nil {
+		return "Files unavailable: " + err.Error(), err
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return "Files unavailable: " + err.Error(), err
+	}
+	rel, _ := filepath.Rel(root, path)
+	if rel == "." {
+		rel = "/"
+	}
+	lines := []string{"Files — " + filepath.ToSlash(rel)}
+	for i, entry := range entries {
+		if i >= 80 {
+			lines = append(lines, "- … more entries omitted")
+			break
+		}
+		suffix := ""
+		if entry.IsDir() {
+			suffix = "/"
+		}
+		lines = append(lines, "- "+entry.Name()+suffix)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func (a *App) remoteReadWorkspaceFile(requested string) (string, error) {
+	root, path, err := a.remoteWorkspacePath(requested)
+	if err != nil {
+		return "File unavailable: " + err.Error(), err
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return "File unavailable or is a directory.", fmt.Errorf("not a readable file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "File unavailable: " + err.Error(), err
+	}
+	rel, _ := filepath.Rel(root, path)
+	return fmt.Sprintf("File — %s\n\n%s", filepath.ToSlash(rel), truncateRunes(string(data), 12000)), nil
+}
+
+func (a *App) remoteArtifactSummary(requested string) (string, error) {
+	if strings.TrimSpace(requested) != "" {
+		return a.remoteReadWorkspaceFile(requested)
+	}
+	root, _, err := a.remoteWorkspacePath("")
+	if err != nil {
+		return "Artifacts unavailable: " + err.Error(), err
+	}
+	var found []string
+	for _, dir := range []string{"mauler_artifacts", ".mauler/artifacts", "artifacts"} {
+		base := filepath.Join(root, filepath.FromSlash(dir))
+		_ = filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil || entry == nil || entry.IsDir() {
+				return nil
+			}
+			if len(found) < 50 {
+				rel, _ := filepath.Rel(root, path)
+				found = append(found, "- "+filepath.ToSlash(rel))
+			}
+			return nil
+		})
+	}
+	if len(found) == 0 {
+		return "No artifacts found in the active workspace.", nil
+	}
+	return "Artifacts\n" + strings.Join(found, "\n") + "\n\nUse /artifact <path> to read one.", nil
+}
+
+func (a *App) remotePlanSummary() string {
+	todos, err := a.ListTodos()
+	if err != nil || len(todos) == 0 {
+		return "No active plan."
+	}
+	lines := []string{"Active plan"}
+	for _, todo := range todos {
+		lines = append(lines, fmt.Sprintf("- [%s] %s", todo.Status, todo.Text))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (a *App) remoteBrainSummary() string {
+	events, err := a.ListLedgerEvents(40)
+	if err != nil || len(events) == 0 {
+		return "No Brain/ledger events available."
+	}
+	lines := []string{"Recent Brain signals"}
+	for i, event := range events {
+		if i >= 20 {
+			break
+		}
+		lines = append(lines, fmt.Sprintf("- %s · %s · %s", firstNonEmpty(event.Kind, "event"), firstNonEmpty(event.Status, event.State), truncateRunes(firstNonEmpty(event.Message, event.Detail), 240)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (a *App) handleChannelWork(env channelbus.Envelope, route channelbus.Route) (channelbus.Response, error) {
@@ -433,7 +784,8 @@ func (a *App) handleChannelWork(env channelbus.Envelope, route channelbus.Route)
 		return channelbus.Response{Lane: route.Lane, Status: "empty", Message: "No work prompt supplied."}, nil
 	}
 	a.applyTelegramWorkDefaults()
-	if err := a.SendMessage(prompt, nil, nil); err != nil {
+	images := channelImageDataURIs(env)
+	if err := a.SendMessage(prompt, images, nil); err != nil {
 		item := a.ensureChannelQueue().Enqueue(env, route)
 		return channelbus.Response{
 			Lane:    route.Lane,
@@ -446,9 +798,36 @@ func (a *App) handleChannelWork(env channelbus.Envelope, route channelbus.Route)
 	return channelbus.Response{
 		Lane:       route.Lane,
 		Status:     "started",
-		Message:    "Started project run from remote channel.",
+		Message:    formatRemoteRunStartMessage(prompt, a.cfg),
 		RunStarted: true,
 	}, nil
+}
+
+func channelImageDataURIs(env channelbus.Envelope) []string {
+	var images []string
+	for _, att := range env.Attachments {
+		kind := strings.ToLower(strings.TrimSpace(att.Kind))
+		ct := strings.ToLower(strings.TrimSpace(att.ContentType))
+		if kind != "image" && !strings.HasPrefix(ct, "image/") {
+			continue
+		}
+		path := strings.TrimSpace(att.Path)
+		if path == "" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.FromSlash(path))
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		if ct == "" {
+			ct = mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+		}
+		if !strings.HasPrefix(ct, "image/") {
+			ct = "image/jpeg"
+		}
+		images = append(images, "data:"+ct+";base64,"+base64.StdEncoding.EncodeToString(data))
+	}
+	return images
 }
 
 func (a *App) applyTelegramWorkDefaults() {
@@ -494,7 +873,7 @@ func (a *App) ensureChannelQueue() *channelbus.Queue {
 func (a *App) isAgentRunning() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.agentRunning
+	return a.agentRunning || a.evalRunning
 }
 
 func (a *App) drainChannelQueueAsync() {
@@ -649,9 +1028,17 @@ func remoteHelpText() string {
 		"Remote commands:",
 		"/status - active run, profile, terminal, queue",
 		"/facts - current pinned run facts",
-		"/run <task> - start or queue project work",
+		"/projects - list saved projects/boxes",
+		"/project <id> - switch the active project and reset chat/plan",
+		"/files [path] - list files inside the active workspace",
+		"/file <path> - read a workspace file",
+		"/artifact [path] - list or read run artifacts",
+		"/brain - recent RunLedger/Brain signals",
+		"/cmd <task> - start or queue project work",
+		"/run <task> - compatibility alias for /cmd",
 		"/stop - stop active project run",
 		"/terminal_read - read shared terminal state",
+		"/terminal_send <command> - run a trusted command in the shared terminal when idle",
 		"/plan - latest plan/progress",
 		"/logs - latest run summary",
 		"/help - this help",

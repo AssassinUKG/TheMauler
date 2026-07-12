@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -68,6 +69,13 @@ func TestDispatchChannelSideChatDoesNotStartRun(t *testing.T) {
 		t.Fatalf("side chat should force no-tool/no-thinking request, got tool_choice=%q thinking=%v preserve=%v effort=%q",
 			client.lastReq.ToolChoice, client.lastReq.EnableThinking, client.lastReq.PreserveThinking, client.lastReq.ReasoningEffort)
 	}
+	prompt := fmt.Sprintf("%#v", client.lastReq.Messages)
+	if !strings.Contains(prompt, "local Windows machine") || strings.Contains(strings.ToLower(prompt), "cloud-hosted") && !strings.Contains(prompt, "Do not claim") {
+		t.Fatalf("side chat prompt should anchor MaulBot as local, got %s", prompt)
+	}
+	if !strings.Contains(prompt, "synthesize your final text into a Telegram voice note") {
+		t.Fatalf("side chat prompt should advertise Telegram voice transport, got %s", prompt)
+	}
 }
 
 type sideChatEchoClient struct{}
@@ -103,6 +111,97 @@ func (c *sideChatRecordingClient) Models(ctx context.Context) ([]string, error) 
 }
 func (c *sideChatRecordingClient) Ping(ctx context.Context) error { return nil }
 func (c *sideChatRecordingClient) Name() string                   { return "fake-side-chat-recording" }
+
+type sideChatSequenceClient struct {
+	replies []string
+	calls   int
+}
+
+func (c *sideChatSequenceClient) Chat(ctx context.Context, req llm.Request) (<-chan llm.Delta, error) {
+	ch := make(chan llm.Delta, 1)
+	reply := ""
+	if c.calls < len(c.replies) {
+		reply = c.replies[c.calls]
+	}
+	c.calls++
+	if reply != "" {
+		ch <- llm.Delta{Content: reply}
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (c *sideChatSequenceClient) Models(ctx context.Context) ([]string, error) {
+	return []string{"fake"}, nil
+}
+func (c *sideChatSequenceClient) Ping(ctx context.Context) error { return nil }
+func (c *sideChatSequenceClient) Name() string                   { return "fake-side-chat-sequence" }
+
+func TestDispatchChannelSideChatSuppressesToolCallText(t *testing.T) {
+	client := &sideChatSequenceClient{replies: []string{
+		`run_command(command="powershell -ExecutionPolicy Bypass -File setup.ps1")`,
+		`{"name":"run_command","args":{"command":"powershell -ExecutionPolicy Bypass -File setup.ps1"}}`,
+	}}
+	oldBuilder := buildClientForAgent
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { buildClientForAgent = oldBuilder })
+	app := &App{
+		cfg:          &settings.Settings{ActiveProfile: "test"},
+		profiles:     &settings.ProfilesFile{Profiles: map[string]settings.Profile{"test": {ModelID: "fake", Backend: "fake"}}},
+		channelQueue: channelbus.NewQueue(),
+	}
+	resp, err := app.DispatchChannelMessage(ChannelEnvelope{
+		Source:    "telegram",
+		SessionID: "telegram:direct:1",
+		Text:      "Can you tell me what you can do?",
+	})
+	if err != nil {
+		t.Fatalf("DispatchChannelMessage returned error: %v", err)
+	}
+	if strings.Contains(resp.Message, "run_command") || strings.Contains(resp.Message, `"name"`) {
+		t.Fatalf("side chat leaked tool-call text: %q", resp.Message)
+	}
+	if !strings.Contains(resp.Message, "/cmd") {
+		t.Fatalf("side chat tool leak fallback should point to /cmd, got %q", resp.Message)
+	}
+}
+
+func TestDispatchChannelVoiceSideChatRetriesCannotVoiceClaim(t *testing.T) {
+	client := &sideChatSequenceClient{replies: []string{
+		"I can't send voice messages, but I'm ready to chat via text.",
+		"Loud and clear. What should we do next?",
+	}}
+	oldBuilder := buildClientForAgent
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		return client, nil
+	}
+	t.Cleanup(func() { buildClientForAgent = oldBuilder })
+	app := &App{
+		cfg:          &settings.Settings{ActiveProfile: "test"},
+		profiles:     &settings.ProfilesFile{Profiles: map[string]settings.Profile{"test": {ModelID: "fake", Backend: "fake"}}},
+		channelQueue: channelbus.NewQueue(),
+	}
+	resp, err := app.DispatchChannelMessage(ChannelEnvelope{
+		Source:      "telegram",
+		SessionID:   "telegram:direct:1",
+		Text:        "can you hear me",
+		Attachments: []channelbus.Attachment{{Kind: "voice", ContentType: "audio/ogg", Text: "can you hear me"}},
+	})
+	if err != nil {
+		t.Fatalf("DispatchChannelMessage returned error: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("expected retry after cannot-voice claim, got %d calls", client.calls)
+	}
+	if strings.Contains(strings.ToLower(resp.Message), "can't send voice") || strings.Contains(strings.ToLower(resp.Message), "via text") {
+		t.Fatalf("voice disclaimer should have been retried away, got %q", resp.Message)
+	}
+	if !strings.Contains(resp.Message, "Loud and clear") {
+		t.Fatalf("expected retry reply, got %q", resp.Message)
+	}
+}
 
 func TestDispatchChannelSideChatEmptyModelFallsBackToStatus(t *testing.T) {
 	client := &sideChatRecordingClient{}
@@ -144,7 +243,7 @@ func TestDispatchChannelRunQueuesWhenProjectBusy(t *testing.T) {
 	resp, err := app.DispatchChannelMessage(ChannelEnvelope{
 		Source:    "telegram",
 		SessionID: "telegram:direct:1",
-		Text:      "/run enumerate the target",
+		Text:      "/cmd enumerate the target",
 	})
 	if err != nil {
 		t.Fatalf("DispatchChannelMessage returned error: %v", err)
@@ -156,7 +255,7 @@ func TestDispatchChannelRunQueuesWhenProjectBusy(t *testing.T) {
 	if len(queue) != 1 {
 		t.Fatalf("expected one queued work item, got %d", len(queue))
 	}
-	if queue[0].Route.Command != "run" {
+	if queue[0].Route.Command != "cmd" {
 		t.Fatalf("queued wrong route: %+v", queue[0].Route)
 	}
 }
@@ -179,7 +278,7 @@ func TestDispatchChannelSideChatQueuesWhenProjectBusy(t *testing.T) {
 		t.Fatalf("expected memory request to queue as work while busy, got %+v", resp)
 	}
 	queue := app.ListChannelWorkQueue()
-	if len(queue) != 1 || queue[0].Route.Command != "run" {
+	if len(queue) != 1 || queue[0].Route.Command != "cmd" {
 		t.Fatalf("unexpected queued item: %+v", queue)
 	}
 }
@@ -257,7 +356,7 @@ func TestDispatchChannelRunQueuesToDBWhenProjectBusy(t *testing.T) {
 	if len(reloaded) != 1 {
 		t.Fatalf("expected persisted queued item, got %d", len(reloaded))
 	}
-	if reloaded[0].Route.Command != "run" || reloaded[0].Status != "queued" {
+	if reloaded[0].Route.Command != "cmd" || reloaded[0].Status != "queued" {
 		t.Fatalf("unexpected persisted route: %+v", reloaded[0])
 	}
 }
@@ -573,6 +672,27 @@ func TestEnsureModelLoadedReusesBackendContextAboveProfile(t *testing.T) {
 	}
 	if client.loads != 0 {
 		t.Fatalf("loads = %d, want cached model reused when backend context is larger", client.loads)
+	}
+}
+
+func TestEnsureModelLoadedReusesBackendContextWithoutLocalCache(t *testing.T) {
+	profile := settings.Profile{
+		Backend:   "llamacpp",
+		BaseURL:   "http://127.0.0.1:8802/v1",
+		ModelID:   "qwen",
+		CtxTokens: 45000,
+	}
+	app := &App{history: agent.NewHistory(32768)}
+	client := &countingLoader{actualContext: 54016}
+
+	if err := app.ensureModelLoaded(context.Background(), client, profile); err != nil {
+		t.Fatal(err)
+	}
+	if client.loads != 0 {
+		t.Fatalf("loads = %d, want already-loaded backend reused without local cache", client.loads)
+	}
+	if got := app.loadedModelKey; got != modelLoadKey(profile) {
+		t.Fatalf("loadedModelKey = %q, want %q", got, modelLoadKey(profile))
 	}
 }
 
@@ -2141,6 +2261,24 @@ func TestNormalizeToolCallArgumentsRepairsReadPathMarkup(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolCallArgumentsRepairsWriteEmbeddedContentMarkup(t *testing.T) {
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "write",
+		Arguments: json.RawMessage("{\"path\":\"C:/Users/richa/Documents/HTB_writeups/JPHut/index.html</path>\\n<parameter=content><!DOCTYPE html>\\n<html>hut</html>\"}"),
+	}}
+	got := normalizeToolCallArguments(tc)
+	args := string(got.Function.Arguments)
+	if strings.Contains(args, "</path>") || strings.Contains(args, "<parameter=content>") {
+		t.Fatalf("write embedded content markup was not removed: %s", args)
+	}
+	if !strings.Contains(args, `"path":"C:/Users/richa/Documents/HTB_writeups/JPHut/index.html"`) {
+		t.Fatalf("write path was not repaired: %s", args)
+	}
+	if !strings.Contains(args, `"content":"<!DOCTYPE html>\n<html>hut</html>"`) {
+		t.Fatalf("write content was not repaired: %s", args)
+	}
+}
+
 func TestBuildProjectResumePromptIncludesExistingWriteupAndEvidence(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -2396,6 +2534,26 @@ func TestSanitizeVisibleModelTextDropsMalformedThinkLeak(t *testing.T) {
 	}
 	if got := sanitizeVisibleModelText("<think>hidden</think>\nVisible answer"); got != "Visible answer" {
 		t.Fatalf("unexpected sanitized text: %q", got)
+	}
+}
+
+func TestSplitModelTextForDisplayExtractsLiteralThinkBlocks(t *testing.T) {
+	visible, thinking := splitModelTextForDisplay("<think>\nplan quietly\n</think>\nFinal answer")
+	if strings.TrimSpace(visible) != "Final answer" {
+		t.Fatalf("visible = %q", visible)
+	}
+	if thinking != "plan quietly" {
+		t.Fatalf("thinking = %q", thinking)
+	}
+}
+
+func TestSplitModelTextForDisplayStreamsOpenThinkBlock(t *testing.T) {
+	visible, thinking := splitModelTextForDisplay("prefix\n<think>\nchecking evidence")
+	if strings.TrimSpace(visible) != "prefix" {
+		t.Fatalf("visible = %q", visible)
+	}
+	if thinking != "checking evidence" {
+		t.Fatalf("thinking = %q", thinking)
 	}
 }
 

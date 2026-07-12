@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm'
 import {
   Undo,
   EncodeFileBase64,
+  IngestVideo,
+  IngestVideoPath,
   PickSaveFilePath,
   SaveFileContent,
   GetWorkingDir,
@@ -11,7 +13,12 @@ import {
   GetChannelBusStatus,
   ListChannelWorkQueue,
   GetSharedTerminalState,
+  GetSettings,
+  TranscribeVoiceClip,
+  SynthesizeSpeech,
   type ChatAttachment,
+  type AudioConfig,
+  type VideoIngest,
   type HistoryStats,
   type TodoItem,
   type ChannelWorkItem,
@@ -32,13 +39,15 @@ interface Props {
   runState: RunStatePayload | null
   todos: TodoItem[]
   activity: AgentActivity[]
+  settingsVersion: number
   onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[]) => void
   onCancelPending: () => void
-  onCancelTool: (name: string) => void
   onStopAgent: () => void
   onClearChat: () => void
   onArtifact: (code: string, lang: string) => void
   onAutonomousChange: (enabled: boolean) => void
+  onOpenQuickChat: () => void
+  onClearPlan: () => void | Promise<void>
 }
 
 export function ChatPane({
@@ -53,13 +62,15 @@ export function ChatPane({
   runState,
   todos,
   activity,
+  settingsVersion,
   onSubmitMessage,
   onCancelPending,
-  onCancelTool,
   onStopAgent,
   onClearChat,
   onArtifact,
   onAutonomousChange,
+  onOpenQuickChat,
+  onClearPlan,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -67,6 +78,7 @@ export function ChatPane({
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  const [videoStatus, setVideoStatus] = useState<string | null>(null)
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearch, setShowSearch] = useState(false)
@@ -77,6 +89,20 @@ export function ChatPane({
   const [channelQueue, setChannelQueue] = useState<ChannelWorkItem[]>([])
   const [terminalState, setTerminalState] = useState<TerminalStateSnapshot | null>(null)
   const [openPopover, setOpenPopover] = useState<'plan' | 'tools' | null>(null)
+  const [audioConfig, setAudioConfig] = useState<AudioConfig | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [voiceSession, setVoiceSession] = useState(false)
+  const [voiceStatus, setVoiceStatus] = useState('')
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const microphoneRef = useRef<MediaStream | null>(null)
+  const recordedChunksRef = useRef<Blob[]>([])
+  const recordingStartedRef = useRef(0)
+  const playbackRef = useRef<HTMLAudioElement | null>(null)
+  const speechGenerationRef = useRef(0)
+  const speechQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const speechOffsetRef = useRef(0)
+  const speechBufferRef = useRef('')
+  const wasStreamingRef = useRef(false)
 
   const visibleMessages = useMemo(() => {
     if (!searchQuery.trim()) return messages
@@ -97,6 +123,118 @@ export function ChatPane({
     const id = window.setInterval(() => setNowMs(Date.now()), 500)
     return () => window.clearInterval(id)
   }, [toolCountdown])
+
+  useEffect(() => {
+    void GetSettings().then(value => setAudioConfig(value.audio)).catch(() => setAudioConfig(null))
+  }, [settingsVersion])
+
+  const stopSpeech = useCallback(() => {
+    speechGenerationRef.current += 1
+    playbackRef.current?.pause()
+    playbackRef.current = null
+    speechQueueRef.current = Promise.resolve()
+    speechBufferRef.current = ''
+  }, [])
+
+  const enqueueSpeech = useCallback((text: string) => {
+    const spoken = text.trim()
+    if (!spoken) return
+    const generation = speechGenerationRef.current
+    speechQueueRef.current = speechQueueRef.current.catch(() => {}).then(async () => {
+      const result = await SynthesizeSpeech(spoken)
+      if (generation !== speechGenerationRef.current) return
+      const player = new Audio(result.data_uri)
+      playbackRef.current = player
+      await new Promise<void>((resolve, reject) => {
+        player.onended = () => resolve()
+        player.onerror = () => reject(new Error('Audio playback failed'))
+        void player.play().catch(reject)
+      })
+      if (playbackRef.current === player) playbackRef.current = null
+    }).catch(error => setVoiceStatus(`Voice reply unavailable: ${String(error)}`))
+  }, [])
+
+  useEffect(() => {
+    if (!voiceSession || !audioConfig?.enabled || !audioConfig.speak_replies) {
+      wasStreamingRef.current = streaming
+      speechOffsetRef.current = streamBuffer.length
+      return
+    }
+    if (streaming && !wasStreamingRef.current) {
+      speechOffsetRef.current = 0
+      speechBufferRef.current = ''
+      stopSpeech()
+    }
+    if (streamBuffer.length < speechOffsetRef.current) speechOffsetRef.current = 0
+    const delta = streamBuffer.slice(speechOffsetRef.current)
+    speechOffsetRef.current = streamBuffer.length
+    if (delta) speechBufferRef.current += delta
+    const extracted = takeSpeechChunks(speechBufferRef.current, audioConfig.clause_min_chars || 36, !streaming && wasStreamingRef.current)
+    speechBufferRef.current = extracted.rest
+    extracted.chunks.forEach(enqueueSpeech)
+    wasStreamingRef.current = streaming
+  }, [audioConfig, enqueueSpeech, stopSpeech, streamBuffer, streaming, voiceSession])
+
+  useEffect(() => () => {
+    microphoneRef.current?.getTracks().forEach(track => track.stop())
+    stopSpeech()
+  }, [stopSpeech])
+
+  const stopRecording = useCallback(() => {
+    const recorder = recorderRef.current
+    if (recorder?.state === 'recording') recorder.stop()
+  }, [])
+
+  const startRecording = useCallback(async () => {
+    if (!audioConfig?.enabled) {
+      setVoiceStatus('Enable Audio / Voice in Settings first.')
+      return
+    }
+    stopSpeech()
+    if (streaming && audioConfig.barge_in) onStopAgent()
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: audioConfig.input_device ? { exact: audioConfig.input_device } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+      const preferred = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus'].find(type => MediaRecorder.isTypeSupported(type))
+      const recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream)
+      microphoneRef.current = stream
+      recorderRef.current = recorder
+      recordedChunksRef.current = []
+      recorder.ondataavailable = event => { if (event.data.size > 0) recordedChunksRef.current.push(event.data) }
+      recorder.onstop = () => {
+        setRecording(false)
+        stream.getTracks().forEach(track => track.stop())
+        microphoneRef.current = null
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+        if (blob.size === 0) return
+        if (Date.now() - recordingStartedRef.current < 400) {
+          setVoiceStatus('Recording was too short. Hold Talk while speaking.')
+          return
+        }
+        setVoiceStatus('Transcribing...')
+        void blobToDataURI(blob)
+          .then(TranscribeVoiceClip)
+          .then(transcript => {
+            setVoiceStatus(`Heard: ${transcript}`)
+            onSubmitMessage(transcript, [], [])
+          })
+          .catch(error => setVoiceStatus(`Transcription failed: ${String(error)}`))
+      }
+      recorder.start(200)
+      recordingStartedRef.current = Date.now()
+      setVoiceSession(true)
+      setRecording(true)
+      setVoiceStatus('Listening...')
+    } catch (error) {
+      setVoiceStatus(`Microphone unavailable: ${String(error)}`)
+    }
+  }, [audioConfig, onStopAgent, onSubmitMessage, stopSpeech, streaming])
 
   useEffect(() => {
     let cancelled = false
@@ -208,6 +346,7 @@ export function ChatPane({
   }, [showSearch])
 
   const IMAGE_EXTS: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
+  const VIDEO_EXTS: Record<string, string> = { mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', avi: 'video/x-msvideo' }
   const TEXT_EXTS = new Set(['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'yaml', 'yml', 'toml', 'ini', 'log', 'go', 'ts', 'tsx', 'js', 'jsx', 'css', 'html', 'py', 'ps1', 'sh', 'sql'])
   const MAX_ATTACHMENT_CHARS = 180_000
 
@@ -246,6 +385,50 @@ export function ChatPane({
     reader.readAsText(file)
   }, [TEXT_EXTS, addAttachment])
 
+  // Video: local vision models can't decode raw video, so the Go side samples
+  // keyframes (added as images) plus an optional audio transcript (added as a
+  // context attachment).
+  const applyVideoIngest = useCallback((res: VideoIngest, label: string) => {
+    if (res.frames?.length) setImages(prev => [...prev, ...res.frames])
+    const parts = [res.note?.trim() || `Video "${label}" attached as keyframes.`]
+    if (res.transcript?.trim()) parts.push(`\nAudio transcript:\n${res.transcript.trim()}`)
+    addAttachment({
+      name: `${label} — video context`,
+      kind: 'document',
+      mime: 'text/plain',
+      content: parts.join('\n'),
+    })
+  }, [addAttachment])
+
+  const ingestVideoData = useCallback(async (file: File) => {
+    setVideoStatus(`Analyzing ${file.name || 'video'}…`)
+    try {
+      const dataURI = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result ?? ''))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(file)
+      })
+      applyVideoIngest(await IngestVideo(dataURI, file.name || 'clip.mp4'), file.name || 'video')
+    } catch (err) {
+      addAttachment({ name: file.name || 'video', kind: 'file', content: `Video could not be analyzed: ${String(err)}` })
+    } finally {
+      setVideoStatus(null)
+    }
+  }, [applyVideoIngest, addAttachment])
+
+  const ingestVideoPath = useCallback(async (path: string) => {
+    const name = path.split(/[\\/]/).pop() || 'video'
+    setVideoStatus(`Analyzing ${name}…`)
+    try {
+      applyVideoIngest(await IngestVideoPath(path), name)
+    } catch (err) {
+      addAttachment({ name, kind: 'file', path, content: `Video could not be analyzed: ${String(err)}` })
+    } finally {
+      setVideoStatus(null)
+    }
+  }, [applyVideoIngest, addAttachment])
+
   const handleDrop = useCallback(async (e: React.DragEvent<HTMLTextAreaElement>) => {
     e.preventDefault()
     const files = Array.from(e.dataTransfer.files ?? [])
@@ -257,6 +440,8 @@ export function ChatPane({
           const reader = new FileReader()
           reader.onload = () => setImages(prev => [...prev, reader.result as string])
           reader.readAsDataURL(file)
+        } else if (mime?.startsWith('video/') || VIDEO_EXTS[ext]) {
+          void ingestVideoData(file)
         } else {
           readTextFileAttachment(file)
         }
@@ -268,7 +453,9 @@ export function ChatPane({
     if (!path) return
     const ext = path.split('.').pop()?.toLowerCase() ?? ''
     const mime = IMAGE_EXTS[ext]
-    if (mime) {
+    if (VIDEO_EXTS[ext]) {
+      void ingestVideoPath(path)
+    } else if (mime) {
       try {
         const b64 = await EncodeFileBase64(path)
         setImages(prev => [...prev, `data:${mime};base64,${b64}`])
@@ -284,7 +471,7 @@ export function ChatPane({
       })
     }
     inputRef.current?.focus()
-  }, [IMAGE_EXTS, addAttachment, readTextFileAttachment])
+  }, [IMAGE_EXTS, VIDEO_EXTS, addAttachment, readTextFileAttachment, ingestVideoData, ingestVideoPath])
 
   // Paste images, copied files, and larger/multiline text as attachments.
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
@@ -300,6 +487,11 @@ export function ChatPane({
           setImages(prev => [...prev, reader.result as string])
         }
         reader.readAsDataURL(file)
+      } else if (item.kind === 'file' && item.type.startsWith('video/')) {
+        const file = item.getAsFile()
+        if (!file) continue
+        handledBinary = true
+        void ingestVideoData(file)
       } else if (item.kind === 'file') {
         const file = item.getAsFile()
         if (!file) continue
@@ -323,7 +515,7 @@ export function ChatPane({
     } else if (handledBinary) {
       e.preventDefault()
     }
-  }, [addAttachment, readTextFileAttachment])
+  }, [addAttachment, readTextFileAttachment, ingestVideoData])
 
   const removeImage = useCallback((idx: number) => {
     setImages(prev => prev.filter((_, i) => i !== idx))
@@ -340,12 +532,13 @@ export function ChatPane({
 
   return (
     <div className="chat-pane">
+      <div className="chat-lane-banner"><strong>Project agent</strong><span>Tools and selected-box context are active.</span><button onClick={onOpenQuickChat}>Quick question · no tools</button></div>
       {showSearch && (
         <div className="chat-search-bar">
           <input
             ref={searchRef}
             className="chat-search-input"
-            placeholder="Search messages…"
+            placeholder="Search messages..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             onKeyDown={e => {
@@ -355,7 +548,7 @@ export function ChatPane({
           <span className="chat-search-count">
             {searchQuery.trim() ? `${visibleMessages.length} / ${messages.length}` : ''}
           </span>
-          <button className="chat-search-close" onClick={() => { setShowSearch(false); setSearchQuery('') }}>×</button>
+          <button className="chat-search-close" onClick={() => { setShowSearch(false); setSearchQuery('') }}>x</button>
         </div>
       )}
       <div className="chat-messages">
@@ -399,22 +592,18 @@ export function ChatPane({
           />
         ))}
 
-        {/* Live stream bubble */}
-        {streaming && (
-          <div className="chat-live-strip">
-            <div className="chat-live-main">
-              <span>Live Run</span>
-              <strong>{liveRunLabel(runState?.state || 'working', toolCountdown?.name)}</strong>
-              <p>{liveRunDetail(runState?.detail, streamBuffer, thinkingBuffer, activity, toolCountdown)}</p>
-            </div>
-            {toolCountdown && (
-              <ToolCountdownCard countdown={toolCountdown} nowMs={nowMs} onCancel={onCancelTool} />
-            )}
-          </div>
+        {(streaming && (thinkingBuffer.trim() || streamBuffer.trim())) && (
+          <LiveModelBubble thinking={thinkingBuffer} content={streamBuffer} />
         )}
 
         <div ref={bottomRef} />
       </div>
+
+      {videoStatus && (
+        <div className="video-status">
+          <span className="video-status-spinner" /> {videoStatus}
+        </div>
+      )}
 
       {/* Image previews */}
       {images.length > 0 && (
@@ -452,7 +641,7 @@ export function ChatPane({
               Plan <strong>{todoSummary(todos)}</strong>
             </button>
             {openPopover === 'plan' && (
-              <PlanPopover todos={todos} />
+              <PlanPopover todos={todos} onClear={onClearPlan} />
             )}
           </div>
           <div className="run-popover-wrap">
@@ -515,6 +704,19 @@ export function ChatPane({
             autoCapitalize="sentences"
           />
           <div className="chat-input-actions">
+            <button
+              className={`composer-voice-btn ${recording ? 'recording' : voiceSession ? 'active' : ''}`}
+              onClick={() => recording ? stopRecording() : void startRecording()}
+              disabled={!audioConfig?.enabled}
+              title={recording ? 'Stop recording and send' : 'Talk to Mauler'}
+            >
+              {recording ? 'Send voice' : 'Talk'}
+            </button>
+            {voiceSession && (
+              <button className="composer-voice-btn active" onClick={() => { setVoiceSession(false); stopSpeech(); setVoiceStatus('') }} title="Turn spoken replies off">
+                Voice on
+              </button>
+            )}
             <button className="composer-stop-btn danger" onClick={onStopAgent} disabled={!streaming} title={streaming ? 'Stop the current run' : 'No run is active'}>
               Stop
             </button>
@@ -529,10 +731,42 @@ export function ChatPane({
               <span>{streaming ? 'Interrupt & Send' : 'Send'}</span>
             </button>
           </div>
+          {voiceStatus && <div className="composer-voice-status" role="status">{voiceStatus}</div>}
         </div>
       </div>
     </div>
   )
+}
+
+function blobToDataURI(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('Could not read recording'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+function takeSpeechChunks(input: string, minChars: number, flush: boolean): { chunks: string[]; rest: string } {
+  const chunks: string[] = []
+  let start = 0
+  for (let i = 0; i < input.length; i += 1) {
+    const length = i + 1 - start
+    const boundary = /[.!?;\n]/.test(input[i])
+    const softBoundary = length >= 150 && /[,,:]/.test(input[i])
+    const hardBoundary = length >= 230 && /\s/.test(input[i])
+    if ((boundary && length >= minChars) || softBoundary || hardBoundary) {
+      const chunk = input.slice(start, i + 1).trim()
+      if (chunk) chunks.push(chunk)
+      start = i + 1
+    }
+  }
+  const rest = input.slice(start)
+  if (flush && rest.trim()) {
+    chunks.push(rest.trim())
+    return { chunks, rest: '' }
+  }
+  return { chunks, rest }
 }
 
 function todoSummary(todos: TodoItem[]): string {
@@ -551,13 +785,13 @@ function toolSummary(activity: AgentActivity[], countdown: ToolCountdown | null)
   return last ? `${last.name} ${last.status}` : 'idle'
 }
 
-function PlanPopover({ todos }: { todos: TodoItem[] }) {
+function PlanPopover({ todos, onClear }: { todos: TodoItem[]; onClear: () => void | Promise<void> }) {
   const current = todos.find(t => t.status === 'in_progress') || todos.find(t => t.status === 'blocked') || todos.find(t => t.status !== 'done')
   return (
     <div className="composer-popover composer-plan-popover">
       <div className="composer-popover-head">
         <span>Active Plan</span>
-        <strong>{todoSummary(todos)}</strong>
+        <div><strong>{todoSummary(todos)}</strong><button onClick={() => void onClear()} disabled={todos.length === 0}>Clear plan</button></div>
       </div>
       <p className="composer-popover-note">Plan state is not evidence. Confirm important claims in Facts, logs, files, or terminal output.</p>
       {current && (
@@ -610,7 +844,7 @@ function ToolboxPopover({
     <div className="composer-popover composer-tools-popover">
       <div className="composer-popover-head">
         <span>Toolbox</span>
-        <strong>{formatRunState(runState?.state || 'ready')} · {terminalState?.state || 'terminal unknown'}</strong>
+        <strong>{formatRunState(runState?.state || 'ready')} / {terminalState?.state || 'terminal unknown'}</strong>
       </div>
       <div className="toolbox-grid">
         <div><span>Profile</span><strong>{profile || 'none'}</strong></div>
@@ -665,32 +899,6 @@ function formatRunState(state: string): string {
   return state.replaceAll('_', ' ').replace(/\b\w/g, ch => ch.toUpperCase())
 }
 
-function liveRunLabel(state: string, tool?: string): string {
-  if (tool) return `Running ${tool}`
-  return formatRunState(state)
-}
-
-function liveRunDetail(
-  detail?: string,
-  streamBuffer?: string,
-  thinkingBuffer?: string,
-  activity: AgentActivity[] = [],
-  countdown: ToolCountdown | null = null,
-): string {
-  if (countdown) return `Running ${countdown.name}; full command/output is in the terminal and AI Commands split.`
-  if (detail?.trim()) return detail.trim()
-  if (streamBuffer?.trim()) return `Writing: ${truncateMiddle(streamBuffer.trim().replace(/\s+/g, ' '), 120)}`
-  if (thinkingBuffer?.trim()) return 'Thinking'
-  const running = activity.find(item => item.status === 'running')
-  if (running) return `Using ${running.name}; details are in AI Commands.`
-  const last = activity[0]
-  if (last) {
-    const status = last.status === 'done' ? 'finished' : last.status
-    return `${last.name} ${status}; next decision is being prepared.`
-  }
-  return 'Preparing the next action.'
-}
-
 function RunPill({
   label,
   value,
@@ -726,7 +934,7 @@ function truncateMiddle(value: string, max: number): string {
   if (text.length <= max) return text
   const head = Math.max(8, Math.floor((max - 1) * 0.62))
   const tail = Math.max(6, max - head - 1)
-  return `${text.slice(0, head)}…${text.slice(-tail)}`
+  return `${text.slice(0, head)}...${text.slice(-tail)}`
 }
 
 function shortPath(path: string): string {
@@ -755,42 +963,9 @@ function AttachmentChip({
       <div className="attachment-icon">TXT</div>
       <div className="attachment-meta">
         <div className="attachment-name">{attachment.name}</div>
-        <div className="attachment-kind">{attachmentSubtitle(attachment)}{attachment.truncated ? ' · truncated' : ''}</div>
+        <div className="attachment-kind">{attachmentSubtitle(attachment)}{attachment.truncated ? ' / truncated' : ''}</div>
       </div>
       {onRemove && <button className="attachment-remove" onClick={onRemove} title="Remove attachment">x</button>}
-    </div>
-  )
-}
-
-function ToolCountdownCard({
-  countdown,
-  nowMs,
-  onCancel,
-}: {
-  countdown: ToolCountdown
-  nowMs: number
-  onCancel: (name: string) => void
-}) {
-  const remainingMs = Math.max(0, countdown.deadline - nowMs)
-  const remainingSec = Math.ceil(remainingMs / 1000)
-  const elapsed = Math.max(0, nowMs - countdown.startedAt)
-  const total = Math.max(1, countdown.timeoutSec * 1000)
-  const pct = Math.min(100, Math.round((elapsed / total) * 100))
-  const isShell = countdown.name === 'shell'
-  return (
-    <div className="tool-countdown-card">
-      <div className="tool-countdown-row">
-        <div className="tool-countdown-title">
-          <span>{countdown.name}</span>
-          <span>{formatDuration(remainingSec)} left</span>
-        </div>
-        <button className="tool-countdown-cancel" onClick={() => onCancel(countdown.name)} title={isShell ? 'Interrupt this shell call' : 'Stop the current tool call'}>
-          {isShell ? 'Cancel shell' : 'Cancel'}
-        </button>
-      </div>
-      <div className="tool-countdown-track">
-        <div className="tool-countdown-fill" style={{ width: `${pct}%` }} />
-      </div>
     </div>
   )
 }
@@ -879,12 +1054,12 @@ function MessageBubble({
         {msg.timestamp > 0 && <span className="msg-time">{formatMsgTime(msg.timestamp)}</span>}
         {msg.role === 'assistant' && (
           <button className="msg-save-btn" onClick={() => void saveMessage()} title="Save reply to file">
-            {saved ? '✓' : 'Save'}
+            {saved ? 'Saved' : 'Save'}
           </button>
         )}
         {canCopy && (
           <button className="msg-copy-btn" onClick={copyMessage} title="Copy message">
-            {copied ? '✓' : 'Copy'}
+            {copied ? 'Copied' : 'Copy'}
           </button>
         )}
       </div>
@@ -959,12 +1134,43 @@ function MessageBubble({
         )}
         {collapsible && (
           <button className="msg-collapse-btn" onClick={() => setCollapsed(v => !v)}>
-            {collapsed ? `▼ Show all ${lineCount} lines` : '▲ Collapse'}
+            {collapsed ? `Show all ${lineCount} lines` : 'Collapse'}
           </button>
         )}
       </div>
     </div>
   )
+}
+
+function LiveModelBubble({ thinking, content }: { thinking: string; content: string }) {
+  const hasThinking = thinking.trim().length > 0
+  const contentParts = splitLiveAssistantContent(content)
+  const hasContent = contentParts.length > 0
+  if (!hasThinking && !hasContent) return null
+  return (
+    <div className="msg msg-assistant msg-streaming msg-live-model">
+      {hasThinking && <ThinkingBlock text={thinking} live />}
+      {contentParts.map((part, index) => (
+        <div className="live-response-message" key={`${index}-${part.slice(0, 24)}`}>
+          <div className="msg-header">
+            <span className="msg-role">Assistant</span>
+            <span className="msg-time">live</span>
+          </div>
+          <div className="msg-body live-response-body">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{part}</ReactMarkdown>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function splitLiveAssistantContent(content: string): string[] {
+  const text = content.replace(/\r\n/g, '\n').trim()
+  if (!text) return []
+  const parts = text.split(/\n{2,}/).map(part => part.trim()).filter(Boolean)
+  if (parts.length <= 1) return parts
+  return parts
 }
 
 function isPlanToolOutput(content: string): boolean {
@@ -1126,8 +1332,8 @@ function ThinkingBlock({ text, live = false }: { text: string; live?: boolean })
   const [open, setOpen] = useState(false)
   if (!text.trim()) return null
   return (
-    <details className={`thinking-block ${live ? 'live' : ''}`} open={open} onToggle={e => setOpen(e.currentTarget.open)}>
-      <summary>{live ? 'Thinking...' : 'Thinking'} {open ? '▲' : '▼'}</summary>
+    <details className={`thinking-block ${live ? 'live' : ''}`} open={live || open} onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary>{live ? 'Thinking live' : 'Thinking'} {live ? '' : (open ? 'open' : 'closed')}</summary>
       <pre>{text}</pre>
     </details>
   )

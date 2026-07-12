@@ -1,5 +1,7 @@
 # TheMauler — Feature Backlog
 
+Agentic correctness audit 2026-07-10: current P0-P2 runtime and benchmark defects are tracked in `docs/agentic-reliability-issues-2026-07.md`. MAULER-AR-001/002 are confirmed by the Go race detector and take precedence over feature backlog work.
+
 The original 10 UI features (bottom table) are implemented. Active work continues in the
 regression log (R-series) and UI Ops tracker (U-series) below — see each row's Status.
 

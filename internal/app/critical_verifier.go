@@ -13,14 +13,19 @@ var (
 	verifierUIDRe         = regexp.MustCompile(`(?i)\buid=(\d+)\(([^)]+)\)`)
 	verifierRootHintRe    = regexp.MustCompile(`(?i)(?:\buid=0\(root\)|\broot\.txt\b|\bwhoami\s*[:=]?\s*root\b)`)
 	verifierDNSMovedRe    = regexp.MustCompile(`(?i)\b(?:different IP|resolv(?:es|ing) to|/etc/hosts|connection refused|failed to connect|exit code 7|no route to host|host unreachable)\b`)
-	httpRedirectStatusRe   = regexp.MustCompile(`(?i)\bHTTP/[0-9.]+\s+30[1278]\b`)
-	httpRedirectBodyRe     = regexp.MustCompile(`(?i)\b(?:301|302|307|308)\b|\bMoved Permanently\b|\bFound\b|\bTemporary Redirect\b|\bPermanent Redirect\b`)
-	httpLocationRe         = regexp.MustCompile(`(?i)\bLocation:\s*(https?://[^\s"'<>]+)`)
-	httpHrefRe             = regexp.MustCompile(`(?i)href=["'](https?://[^"']+)["']`)
+	httpRedirectStatusRe  = regexp.MustCompile(`(?i)\bHTTP/[0-9.]+\s+30[1278]\b`)
+	httpRedirectBodyRe    = regexp.MustCompile(`(?i)\b(?:301|302|307|308)\b|\bMoved Permanently\b|\bFound\b|\bTemporary Redirect\b|\bPermanent Redirect\b`)
+	httpLocationRe        = regexp.MustCompile(`(?i)\bLocation:\s*(https?://[^\s"'<>]+)`)
+	httpHrefRe            = regexp.MustCompile(`(?i)href=["'](https?://[^"']+)["']`)
+	ipv4TokenRe           = regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
 )
 
 func appendCriticalVerifierHint(tc llm.ToolCallDef, result string) string {
-	hint := criticalVerifierHint(tc, result)
+	return appendCriticalVerifierHintWithTarget(tc, result, "")
+}
+
+func appendCriticalVerifierHintWithTarget(tc llm.ToolCallDef, result, confirmedTarget string) string {
+	hint := criticalVerifierHintWithTarget(tc, result, confirmedTarget)
 	if hint == "" || strings.Contains(result, "[verifier_required:") {
 		return result
 	}
@@ -28,17 +33,24 @@ func appendCriticalVerifierHint(tc llm.ToolCallDef, result string) string {
 }
 
 func criticalVerifierHint(tc llm.ToolCallDef, result string) string {
+	return criticalVerifierHintWithTarget(tc, result, "")
+}
+
+func criticalVerifierHintWithTarget(tc llm.ToolCallDef, result, confirmedTarget string) string {
 	lowerTool := strings.ToLower(strings.TrimSpace(tc.Function.Name))
 	if lowerTool != "shell" && lowerTool != "terminal_send" && lowerTool != "terminal_read" && lowerTool != "http_probe" && lowerTool != "write" && lowerTool != "edit" && lowerTool != "write_file" && lowerTool != "edit_file" {
 		return ""
 	}
 	lowerResult := strings.ToLower(result)
-	command := strings.ToLower(shellCommandFromToolArgs(tc.Function.Arguments))
+	command := strings.ToLower(probeTargetTextFromToolArgs(tc.Function.Arguments))
+	if hint := offTargetIPHint(command, confirmedTarget, result); hint != "" && (lowerTool == "shell" || lowerTool == "http_probe" || lowerTool == "terminal_send") {
+		return hint
+	}
 	if hint := httpRedirectHint(result); hint != "" && (lowerTool == "shell" || lowerTool == "http_probe" || lowerTool == "terminal_send") {
 		return hint
 	}
 	if strings.Contains(lowerResult, "command_failed: exit=") {
-		return "[verifier_required:command_exit] The command exited non-zero. Identify the failure class (network/DNS, path/URL, auth, payload, or command syntax) from the output before retrying or claiming success/failure — do not report the step as done."
+		return "[verifier_required:command_exit] The command exited non-zero. Identify the failure class (network/DNS, path/URL, auth, payload, or command syntax) from the output before retrying or claiming success/failure - do not report the step as done."
 	}
 	if verifierRootHintRe.MatchString(result) {
 		return "[verifier_required:root] Before reporting root/success, verify with `id; hostname; pwd` and check the expected flag/evidence path once."
@@ -64,6 +76,68 @@ func criticalVerifierHint(tc llm.ToolCallDef, result string) string {
 		}
 	}
 	return ""
+}
+
+func probeTargetTextFromToolArgs(raw json.RawMessage) string {
+	var args map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &args) != nil {
+		return shellCommandFromToolArgs(raw)
+	}
+	for _, key := range []string{"command", "url", "target", "host"} {
+		if text, ok := args[key].(string); ok && strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return shellCommandFromToolArgs(raw)
+}
+
+func offTargetIPHint(text, confirmedTarget, result string) string {
+	if strings.Contains(result, "[hint:target]") {
+		return ""
+	}
+	confirmed := firstIPv4(confirmedTarget)
+	if confirmed == "" {
+		return ""
+	}
+	for _, candidate := range ipv4TokenRe.FindAllString(text, -1) {
+		if candidate == confirmed || !validIPv4(candidate) {
+			continue
+		}
+		return "[hint:target] Confirmed target is " + confirmed + ". This command probes " + candidate + ". Confirm " + candidate + " is intentional; do not chase stale IPs from old runs or cached notes."
+	}
+	return ""
+}
+
+func firstIPv4(text string) string {
+	for _, candidate := range ipv4TokenRe.FindAllString(text, -1) {
+		if validIPv4(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func validIPv4(ip string) bool {
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > 3 {
+			return false
+		}
+		n := 0
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+			n = n*10 + int(r-'0')
+		}
+		if n > 255 {
+			return false
+		}
+	}
+	return true
 }
 
 func httpRedirectHint(result string) string {

@@ -22,6 +22,10 @@ The user has an RTX 3090 with 24 GB VRAM and currently runs Qwen3.6 locally thro
 All commands should be run from project root: `C:\Users\richa\Desktop\TheMauler`.
 
 ```powershell
+# Fresh Windows dependency check/setup
+.\setup.ps1 -Check
+.\setup.ps1 -Auto
+
 # Development: hot reload and desktop window
 wails dev
 
@@ -58,6 +62,12 @@ wails dev
 # Skip dependency bootstrap
 ./build.sh --skip-deps
 ```
+
+Audio/TTS fresh-install note: outgoing voice uses `internal/audio` with `MAULER_TTS_ENGINE=auto`
+(Kokoro first, Piper fallback). Kokoro requires Python plus `kokoro` and `soundfile`; Windows setup
+checks this via `.\setup.ps1`, and Linux `build.sh` installs/checks `python3`, `pip`, `ffmpeg`, and
+`espeak-ng` unless `--skip-deps` is used. `ffmpeg` is required for Telegram voice-note OGG/Opus
+conversion.
 
 ---
 
@@ -309,11 +319,11 @@ TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {}
   not have to spam the main transcript. Todo tool calls/results are suppressed from the visible chat
   and represented through plan surfaces instead.
 - Run page evidence is now profile-driven. Default `Pentesting` profile is attack/log/report focused for authorised work: hosts, services, CVEs, vulnerability hints, PoC verification signals, severity, artifacts, and report/evidence paths, with no remediation/client-fix loop. `HTB / CTF` is the explicit profile for recon/foothold/user/privesc/root/flag/writeup flows. Do not make normal agent runs revolve around HTB user/root flags.
-- **Settings round-trip data integrity fixed**: `go.ts` Settings interface now includes all fields including `think_indicator`, `diff_colours`, and the full `image` block — missing fields no longer silently zero out on save
+- **Settings round-trip data integrity fixed**: `go.ts` Settings interface now includes all fields including `think_indicator`, `diff_colours`, and the full `image` block - missing fields no longer silently zero out on save
 - Regression tests cover profile generation settings, one-model-load-per-key behavior, compaction lock boundaries, workspace switching/context reset, missing-path workspace hints, Monaco save rollback snapshots, web/browser budgets, source ranking, settings default migration, toolset filtering, PDF text extraction, safety presets, compact shell/toolset filtering, path normalization, and task-run logging/timeline behavior.
 - `npm run build` passes clean (301 modules, no TypeScript errors)
 
-Last focused verification 2026-07-06: terminal-result hygiene tests under `go test ./internal/app -run "TestTerminalRunResult|TestTerminalReadHistory|TestFormatTerminal|TestWaitForTerminal|TestClampRead|TestCleanTerminal|TestClassifyTerminal"` pass, `npm run --prefix frontend build` passes, and `.\build.ps1 -SkipTests` builds `build\bin\TheMauler.exe`.
+Last focused verification 2026-07-10: `go test ./...`, `go vet ./...`, and `npm run --prefix frontend build` pass. `go test -race ./internal/app ./internal/tools` fails on confirmed terminal-session state races and `run_script` stderr-buffer races. Track these as MAULER-AR-001/002 in `docs/agentic-reliability-issues-2026-07.md`; normal green tests do not override the race result.
 
 Production output: `C:\Users\richa\Desktop\TheMauler\build\bin\TheMauler.exe`.
 
@@ -329,17 +339,23 @@ keep AI Commands for structured grouped tool history, keep Terminal as raw PTY o
 commands collapse with `xN` health badges, make errors visually loud, add focus-run layout, promote
 target/VPN/shell identity, stabilize primary actions, and tone down the persistent green context bar.
 First pass landed: AI Commands groups consecutive similar rows and highlights error rows more
-strongly. Continue with the single authoritative status strip and focus-run layout.
+strongly. Status strip, focus-run bottom expansion, target identity, stable composer actions, grouped
+session controls, and a first-class Doctor center page are now in place. Continue only with visual
+polish found during live testing; reliability/tools work should take priority.
 
 ### NEXT: Mauler stability gate, then U16
 
 Immediate Mauler-only order:
-1. Live-smoke the current build against a real run and inspect RunLedger for repeated terminal/tool loops.
-2. Patch any remaining compact-tool arg-shape sanitation: legacy `bash`/`cmd`/`powershell` keys into `shell.command`, XML-ish closing tags in path args, and residual HTML entity escalation before routing/logging.
-3. Add/run `agent_eval` cases for terminal routing, compact shell arg repair, path sanitation, and repeated blocked terminal calls.
-4. Implement U16 every-turn message-structure repair from `docs/agent-loop-upgrade-roadmap.md`.
+1. Fix MAULER-AR-001 and MAULER-AR-002, then require the targeted race suite to pass.
+2. Fix MAULER-AR-003 before running Agent Eval beside any live desktop or channel work.
+3. Change reviewer failure semantics and completion evidence under MAULER-AR-004.
+4. Add shared JHUT end-to-end parity under MAULER-AR-005.
+5. Live-smoke the race-clean build and inspect RunLedger for repeated terminal/tool loops.
+6. Continue compact-tool sanitation and U16 only after the reliability register's P0/P1 items close.
 
-### NEXT: AI terminal ↔ human parity + tooling fixes
+Canonical issue register: `docs/agentic-reliability-issues-2026-07.md`.
+
+### NEXT: AI terminal <-> human parity + tooling fixes
 
 Prioritized, self-contained implementation tasks for making the agent drive the shared terminal
 "like a human" (a real VT screen model instead of a flat ANSI-stripped line log, OSC-133
@@ -351,18 +367,16 @@ wakeups, and richer keystroke vocabulary. 2026-07-06 added command-delta termina
 no raw history dump without grep, and AI Commands de-dup/error-status fixes. Continue terminal work
 only when live smoke tests show a real remaining gap.
 
-### DEFER: Voice / audio (STT + TTS, natural conversation)
+### LIVE-SMOKE: Voice / audio (STT + TTS, natural conversation)
 
-Full implementation plan for talking to the agent and hearing it reply, low-latency and fully local
-on the 3090, lives in `docs/voice-audio-implementation-plan-2026-07.md`. Decision: **all audio in the
-Mauler, InferenceBridge untouched.** Stack: **Parakeet TDT 0.6B v3** STT (true streaming, no
-silence-hallucination) + **Kokoro-82M** TTS (RTF 0.03 on a 3090, ~45 ms first-audio) + Silero VAD
-(`@ricky0123/vad-web`), ideally unified in-process via **sherpa-onnx-go** (C API, CUDA). The natural
-feel comes from sentence-chunking the existing `mauler:delta` stream into TTS + VAD barge-in via
-`StopAgent`. Milestones: M1 push-to-talk (Python sidecar) → M2 streaming + barge-in → M3 in-process
-sherpa-onnx. New `internal/audio/` package + `AudioConfig` settings + a VoicePane frontend.
+The shipped path is local Whisper push-to-talk plus Kokoro-first TTS with Piper fallback, streaming
+clauses, barge-in, worker health/restart, a hidden Windows worker, and the Kokoro voice dropdown.
+Live smoke on 2026-07-12 passed microphone capture, Whisper transcription, Kokoro playback, and
+health reporting. First Whisper use took about 30 seconds to load. Still live-test barge-in during a
+real generated reply and forced Piper fallback when those runtimes are available. Only then consider
+Silero VAD/open-mic; do not redesign the audio UI first.
 
-### DEFER: Telegram remote-control bot
+### LIVE-SMOKE: Telegram remote-control bot
 
 Full integration plan lives in `docs/telegram-bot-integration-plan-2026-07.md`. Direction: add a
 Go-native Telegram Bot API long-polling adapter inspired by HelixClaw's Rust implementation at
@@ -379,22 +393,22 @@ and `internal/app/telegram_runtime.go`: direct Bot API client, long polling, upd
 persistence, allow-list/mention filtering, duplicate-message suppression, safe Telegram HTML
 formatting/chunking, fake-server tests, message send/delete, file lookup/download, voice/audio
 attachment routing, and queued-reply delivery. The frontend Telegram page shows chats, queue,
-status, raw events, manual send, and delete actions. Next steps: finish full project-control
-commands (`/projects`, `/project`, `/files`, `/file`, `/artifact`, `/brain`), direct trusted
-`/terminal_send` execution through the state machine, progress edit-message UX, HelixClaw settings
-import, and real STT/TTS voice handling.
+status, raw events, manual send, and delete actions. Project selection, file/artifact browsing,
+Brain/plan/log access, trusted shared-terminal sends, edited progress messages, and real shared-
+runtime STT/TTS voice handling are implemented as of 2026-07-12. Remaining work is live Telegram
+smoke testing and HelixClaw settings import.
 
 ### NEXT: Target tool registry (Claude-shaped, Hermes-friendly)
 
-The concrete ~22-tool target registry — one orthogonal tool per capability modeled on Claude Code's
-shape with Hermes function-calling conventions (snake_case, strict schema, minimal required) — lives
+The concrete ~22-tool target registry - one orthogonal tool per capability modeled on Claude Code's
+shape with Hermes function-calling conventions (snake_case, strict schema, minimal required) - lives
 in `docs/tool-registry-target-spec-2026-07.md`. It collapses ~40 tools to ~22 by merging eight
-families (read_*→`read`, todo_*→`todo_write`, browser_*→`browser`, subagent_*→`task`,
+families (read_*->`read`, todo_*->`todo_write`, browser_*->`browser`, subagent_*->`task`,
 sqlite_*->`sqlite`, skills_*->`skill`, legacy shell aliases->`shell`, and legacy terminal command names->`terminal_send`) and dropping
 the old model-facing shell alias; every dropped name becomes a `mode`/`type`/`action` arg so no capability is lost. Defines the
 `ops-lean` toolset the settings audit asks for. `apply_patch` is in the core set. Grade with
 `agent_eval` before/after. Includes a **future update** spec for real Chrome integration (extension +
-native-messaging bridge so the AI drives the user's logged-in browser) — the `browser` merge is the
+native-messaging bridge so the AI drives the user's logged-in browser) - the `browser` merge is the
 interim path.
 
 ### NEXT: Settings + loop + benchmark audit (agentic reliability)
@@ -403,21 +417,22 @@ Prioritized, evidence-backed fixes from a full audit of the live config, the age
 benchmark live in `docs/settings-loop-benchmark-audit-2026-07.md`. Current status: context shortfall
 is now a hard failure when the backend reports actual context below the profile request;
 non-InferenceBridge providers have been stripped from the live config; grammar constraints are
-disabled until a live probe proves they help. Still do: make Reasoning Effort coherent on no-think
-profiles, run real profile benchmarks, and promote `agent_eval` as the regression gate.
+disabled until a live probe proves they help. Reasoning Effort is coherent on no-think profiles as
+of 2026-07-12 via a short thinking-sibling pass followed by no-think tool execution. Still do: run
+real profile benchmarks and keep `agent_eval` as the regression gate.
 
 ### NEXT: Agent-loop upgrade tier (Hermes / Claude-Code-class patterns)
 
 Implementable specs (files, signatures, algorithm, wiring anchors, tests, acceptance) live in
-`docs/agent-loop-upgrade-roadmap.md` (U1–U7), with the cross-project analysis in
-`docs/agent-loop-upgrade-plan-2026-06.md`. Order: U1 dynamic reasoning-effort tool → U2 tool-result
-disk offload + `read_tool_result` → U3 Doctor launch-flag/quant assertions → U4 Go-native
-programmatic tool execution over the registry → U5 graduated compaction ladder → U6 externalized
-`PROGRESS.md` resume → U7 grammar-constrained tool args (held on a live probe). Go-native runtime
+`docs/agent-loop-upgrade-roadmap.md` (U1-U7), with the cross-project analysis in
+`docs/agent-loop-upgrade-plan-2026-06.md`. Order: U1 dynamic reasoning-effort tool -> U2 tool-result
+disk offload + `read_tool_result` -> U3 Doctor launch-flag/quant assertions -> U4 Go-native
+programmatic tool execution over the registry -> U5 graduated compaction ladder -> U6 externalized
+`PROGRESS.md` resume -> U7 grammar-constrained tool args (held on a live probe). Go-native runtime
 update: `docs/go-native-agent-runtime-update-2026-06-30.md` supersedes older Python-first
 `run_script` wording. Keep orchestration, validation, timing, cancellation, ledgering, prompt
 accounting, and program step execution in Go; Python is only workload code via shell/WSL when
-needed. This builds on the now-complete reliability roadmap (R1–R10). The HelixClaw mirror is
+needed. This builds on the now-complete reliability roadmap (R1-R10). The HelixClaw mirror is
 `C:\Users\richa\Documents\HelixClaw\HELIXCLAW_AGENT_LOOP_UPGRADE.md`.
 
 Reliability-spine follow-up now lives in `docs/agent-loop-upgrade-roadmap.md` as U8-U13:
@@ -429,17 +444,26 @@ request-scoped execution-state packets, structured result contracts, and reliabi
 counters. Continue by hardening the explicit Plan/Act/Observe/Reflect loop, live shell smoke tests,
 and the final lean tool registry.
 
-**HelixClaw-parity ports (U16–U23).** A direct code-read comparison of both agent cores
+**HelixClaw-parity ports (U16-U23).** A direct code-read comparison of both agent cores
 (`docs/helixclaw-parity-comparison-2026-07.md`) found the remaining gap: HelixClaw is a hierarchical
-multi-agent OS (CEO → supervisor actor → typed workers, each planner→executor→observer with
+multi-agent OS (CEO -> supervisor actor -> typed workers, each planner->executor->observer with
 role-scoped tools); TheMauler is one hardened loop. Backport specs live in
-`docs/agent-loop-upgrade-roadmap.md` as U16–U23, in priority order: U16 every-turn message-structure
-repair (7-phase, from HelixClaw `session_repair.rs`) → U20 tool permission classes → U18 structural
-write-guards (protected paths / patch-size / file-count caps) → U19 role-scoped tool sets → U17
-verification-gate loop (build/test/lint gates that block completion) → U21 plan→review completion
-rails → U22 experience/tool-sequence learning → U23 task-DAG dispatcher. Port selectively — do not
+`docs/agent-loop-upgrade-roadmap.md` as U16-U23, in priority order: U16 every-turn message-structure
+repair (7-phase, from HelixClaw `session_repair.rs`) -> U20 tool permission classes -> U18 structural
+write-guards (protected paths / patch-size / file-count caps) -> U19 role-scoped tool sets -> U17
+verification-gate loop (build/test/lint gates that block completion) -> U21 plan->review completion
+rails -> U22 experience/tool-sequence learning -> U23 task-DAG dispatcher. Port selectively - do not
 regress Mauler's existing leads (tool-result offload, compaction ladder, loop-metrics anti-loop,
 `agent_eval` harness). HelixClaw source: `C:\Users\richa\Documents\HelixClaw\crates\helixclaw-agents\src\`.
+
+**Self-review loop for stable automated runs (S0-S4).** `docs/self-review-loop-plan-2026-07.md`
+supersedes and sequences U17 + U21 into one coherent review loop and adds the same-profile reviewer
+pass (S3) and orchestrator (S4). Key constraint: **no model swapping** - every review turn uses the
+run's active profile (the no-escalation cousin of R6). Before an autonomous run may report `done` it
+must pass S1 whole-task verify gate (build/test/lint) -> S2 completion rails (spec-coverage +
+deliverable-exists) -> S3 fresh-context read-only reviewer sub-pass, bounded by `MaxReviewCycles`.
+Order: S0 config/gateability -> S1 verify gate (ship alone first) -> S4 orchestrator -> S2 rails
+(advisory then blocking) -> S3 reviewer pass. When these land, mark U17/U21 done and point them here.
 
 ### NEXT: Local model tuning and role-split evals
 
@@ -465,30 +489,30 @@ Explorer now has a first-pass VS Code-like split between **Agent Root** and brow
 
 ### Latest local-LLM compatibility work, researched 2026-05-28
 
-P1 — Provider/tool-call compatibility hardening:
+P1 - Provider/tool-call compatibility hardening:
 - Send `stream_options.include_usage=true` on streaming OpenAI-compatible requests so token accounting works on current LM Studio/llama.cpp-style APIs. Status: implemented.
 - Send `parallel_tool_calls=false` by default when tools are present; TheMauler owns batching through tools such as `read_many`, and local Qwen reliability is better with sequential tool calls. Status: implemented.
 - For llama.cpp-compatible backends, send `parse_tool_calls=true` when tools are present so native tool parsing is requested instead of relying only on text repair. Status: implemented.
 - Expand Doctor for LM Studio native metadata: tool/function capability, reasoning metadata, and loaded context length. Status: first pass implemented; keep polishing as LM Studio API fields evolve.
 
-P2 — Backend/profile modernization:
+P2 - Backend/profile modernization:
 - Add first-class provider presets/docs for SGLang and vLLM OpenAI-compatible Qwen3.6 serving, including official `--reasoning-parser qwen3` and `--tool-call-parser qwen3_coder` guidance. Status: provider presets and launch notes implemented.
 - Re-check default Qwen3.6 profile sampling against the official model card: thinking/general, coding, and non-thinking parameter families. Status: defaults updated so thinking general/coding use `presence_penalty=0.0`, non-thinking keeps `presence_penalty=1.5`.
 - Keep llama.cpp diagnostics current for `chat_format`, fallback templates, `parse_tool_calls`, reasoning output format, and experimental server-side built-in tools. Status: Doctor covers format/template and warns if dangerous server-side built-in file/shell tools appear enabled in `/props`.
 
-P3 — Hermes-style agent foundation follow-up:
+P3 - Hermes-style agent foundation follow-up:
 - Add bounded subagents for Researcher, Reviewer, Test/Fix, and Summarizer with profile/toolset/context/time/output contracts. Status: first pass implemented as `subagent_research`, `subagent_review`, `subagent_testfix`, and `subagent_summarize` tools with scratch history and budgets.
 - Add post-write verification: file mutation verifier plus optional LSP/diagnostic run after edits. Status: mutation verifier implemented; LSP diagnostics still planned.
 - Add promptware/secret-exfiltration guardrails for fetched docs, repo content, and tool results before passing them back into the model. Status: first pass implemented for all tool results; keep tuning patterns and UX.
 - Consider worktree-per-task isolation for high-risk autonomous changes. Status: planned.
 - Add regression tests for Hermes/Qwen XML tool-call examples and local-provider compatibility flags. Status: partial; compatibility flag tests and Hermes JSON `<tool_call>` tests added.
 
-1. **Bounded subagents** — add focused subagent runners for Researcher, Reviewer, Test/Fix, and Summarizer with explicit profile, toolset, timeout, context budget, and output contract. Status: first pass implemented as bounded subagent tools.
-2. **Doctor diagnostics** — one-click health report for provider reachability, duplicate LM Studio loads, context mismatch, shell backend, path translation, browser automation, memory DB, logs, and web search. Status: first pass backend/app surface appears present; verify UX in app and fill any missing checks.
-3. **Live in-run state updates** — structured run state exists in task logs and now streams into the bottom status bar during a run. Status: implemented; keep polishing state copy.
-4. **PDF/OCR document handling** — `read_pdf` now extracts text from text-based PDFs. Next: add OCR fallback or a clear scanned-PDF workflow for image-only PDFs. Status: text extraction implemented.
-5. **Sandbox shell backends** — keep local/WSL first, then add Docker and SSH execution backends for safer unrestricted work. Status: planned.
-6. **Skill import/marketplace later** — support direct URL/GitHub import once local skills are stable. Status: planned.
+1. **Bounded subagents** - add focused subagent runners for Researcher, Reviewer, Test/Fix, and Summarizer with explicit profile, toolset, timeout, context budget, and output contract. Status: first pass implemented as bounded subagent tools.
+2. **Doctor diagnostics** - one-click health report for provider reachability, duplicate LM Studio loads, context mismatch, shell backend, path translation, browser automation, memory DB, logs, and web search. Status: first pass backend/app surface appears present; verify UX in app and fill any missing checks.
+3. **Live in-run state updates** - structured run state exists in task logs and now streams into the bottom status bar during a run. Status: implemented; keep polishing state copy.
+4. **PDF/OCR document handling** - `read_pdf` now extracts text from text-based PDFs. Next: add OCR fallback or a clear scanned-PDF workflow for image-only PDFs. Status: text extraction implemented.
+5. **Sandbox shell backends** - keep local/WSL first, then add Docker and SSH execution backends for safer unrestricted work. Status: planned.
+6. **Skill import/marketplace later** - support direct URL/GitHub import once local skills are stable. Status: planned.
 
 ### 2. Agent Controls Polish
 
@@ -506,7 +530,7 @@ P3 — Hermes-style agent foundation follow-up:
 
 - Add profile create/rename alongside duplicate/delete.
 - Add validation for empty profile names, invalid URLs, and numeric bounds.
-- The Image settings tab was added in the last session — verify it saves and loads correctly end-to-end.
+- The Image settings tab was added in the last session - verify it saves and loads correctly end-to-end.
 
 ### 4. Local Provider Polish
 
@@ -538,3 +562,4 @@ P3 — Hermes-style agent foundation follow-up:
 7. `encoding/base64` in `app.go` is used by `EncodeFileBase64`.
 8. There is no `.git` metadata in this workspace right now, so use direct file inspection rather than git diff/status.
 9. Do not delete working code just to simplify a change. Preserve good code and existing capabilities unless there is a very strong, explicit reason to remove them; prefer additive, guarded, or compatibility-preserving edits.
+10. Use UTF-8 or ASCII only; do not introduce mojibake.

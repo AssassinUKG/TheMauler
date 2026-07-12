@@ -112,6 +112,21 @@ type AgentModePreset struct {
 	ToolPermissions map[string]bool `toml:"tool_permissions" json:"tool_permissions"`
 }
 
+// ReviewLoopConfig controls the same-profile self-review loop that gates run completion.
+// It never swaps models; every review turn uses the run's active profile.
+type ReviewLoopConfig struct {
+	Enabled            bool     `toml:"enabled" json:"enabled"`
+	OnlyAutonomous     bool     `toml:"only_autonomous" json:"only_autonomous"`
+	MaxReviewCycles    int      `toml:"max_review_cycles" json:"max_review_cycles"`
+	VerifyGate         bool     `toml:"verify_gate" json:"verify_gate"`
+	VerifyCommands     []string `toml:"verify_commands" json:"verify_commands"`
+	VerifyTimeoutSec   int      `toml:"verify_timeout_sec" json:"verify_timeout_sec"`
+	CompletionRails    bool     `toml:"completion_rails" json:"completion_rails"`
+	CompletionBlocking bool     `toml:"completion_blocking" json:"completion_blocking"`
+	ReviewerPass       bool     `toml:"reviewer_pass" json:"reviewer_pass"`
+	ReviewerMaxTools   int      `toml:"reviewer_max_tools" json:"reviewer_max_tools"`
+}
+
 // AgentsConfig holds auto-agent routing and safety settings.
 type AgentsConfig struct {
 	ModeOverride          string                     `toml:"mode_override" json:"mode_override"` // Auto | Manual | Builder | Fixer | Reviewer | Researcher | Planner
@@ -123,6 +138,7 @@ type AgentsConfig struct {
 	RequirePlan           bool                       `toml:"require_plan" json:"require_plan"`
 	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (2)
 	ReasoningEffort       string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | minimal | low | medium | high
+	ReviewLoop            ReviewLoopConfig           `toml:"review_loop" json:"review_loop"`
 	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
 }
 
@@ -218,6 +234,15 @@ type ImageConfig struct {
 	DisplayMethod    string `toml:"display_method" json:"display_method"`     // sixel | kitty | text
 	MaxDisplayWidth  int    `toml:"max_display_width" json:"max_display_width"`
 	WSLPathTranslate bool   `toml:"wsl_path_translate" json:"wsl_path_translate"`
+
+	// Video ingestion. Local vision models cannot decode raw video, so pasted
+	// or dropped clips are sampled into keyframes (fed as images) plus an
+	// optional audio transcript. Requires ffmpeg in PATH; transcription
+	// additionally requires whisper.
+	VideoEnabled    bool `toml:"video_enabled" json:"video_enabled"`
+	VideoMaxFrames  int  `toml:"video_max_frames" json:"video_max_frames"`
+	VideoFrameWidth int  `toml:"video_frame_width" json:"video_frame_width"`
+	VideoTranscribe bool `toml:"video_transcribe" json:"video_transcribe"`
 }
 
 // TelegramConfig holds remote bot settings. The bot runs through the channel
@@ -238,6 +263,22 @@ type TelegramConfig struct {
 	VoiceReplies      string   `toml:"voice_replies" json:"voice_replies"`           // off | on_voice | always
 	TranscriptionMode string   `toml:"transcription_mode" json:"transcription_mode"` // disabled | local | openai_compatible
 	TranscriptionURL  string   `toml:"transcription_url" json:"transcription_url"`
+}
+
+// AudioConfig controls local desktop speech input and streamed spoken replies.
+type AudioConfig struct {
+	Enabled        bool    `toml:"enabled" json:"enabled"`
+	Mode           string  `toml:"mode" json:"mode"` // push_to_talk | open_mic
+	STTEngine      string  `toml:"stt_engine" json:"stt_engine"`
+	TTSEngine      string  `toml:"tts_engine" json:"tts_engine"`
+	Voice          string  `toml:"voice" json:"voice"`
+	Speed          float64 `toml:"speed" json:"speed"`
+	InputDevice    string  `toml:"input_device" json:"input_device"`
+	VADThreshold   float64 `toml:"vad_threshold" json:"vad_threshold"`
+	BargeIn        bool    `toml:"barge_in" json:"barge_in"`
+	SpeakReplies   bool    `toml:"speak_replies" json:"speak_replies"`
+	SpeakToolNotes bool    `toml:"speak_tool_notes" json:"speak_tool_notes"`
+	ClauseMinChars int     `toml:"clause_min_chars" json:"clause_min_chars"`
 }
 
 // UIConfig holds display and layout settings.
@@ -279,6 +320,7 @@ type Settings struct {
 	Skills        SkillsConfig      `toml:"skills" json:"skills"`
 	Image         ImageConfig       `toml:"image" json:"image"`
 	Telegram      TelegramConfig    `toml:"telegram" json:"telegram"`
+	Audio         AudioConfig       `toml:"audio" json:"audio"`
 	UI            UIConfig          `toml:"ui" json:"ui"`
 	Logging       LoggingConfig     `toml:"logging" json:"logging"`
 	LogLevel      string            `toml:"log_level" json:"log_level"`

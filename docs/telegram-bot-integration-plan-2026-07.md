@@ -58,7 +58,7 @@ Implemented first pass:
   - Router rules:
     - Plain messages are model-backed side chat, isolated from the desktop project transcript.
     - `/status`, `/facts`, `/terminal_read`, `/plan`, `/logs`, `/help` are control/read commands.
-    - `/run` is the explicit project work request; `/ops` is a legacy alias for `/run`.
+    - `/cmd` is the explicit project work request; `/run` and `/ops` are compatibility aliases for `/cmd`.
     - Simple deterministic terminal chores can route through `quick_action` instead of starting a full project run.
     - Work requests queue when a project run is already active.
     - Voice/audio attachments are marked on the route for later transcription handling.
@@ -72,7 +72,7 @@ Implemented first pass:
   - `ListChannelWorkQueue`.
   - `GetChannelBusStatus`.
   - Side-chat model replies that do not write into the desktop Chat transcript.
-  - Busy-run queueing for `/run`, quick actions, and side-chat questions.
+  - Busy-run queueing for `/cmd`, quick actions, and side-chat questions.
   - Queue drain after the active run becomes idle, with queued replies sent back through Telegram.
   - Quick-action routing for simple terminal chores.
   - Control handlers for `/status`, `/facts`, `/terminal_read`, `/stop`, `/help`, `/plan`, `/logs`.
@@ -214,8 +214,9 @@ Required commands:
 /status
 /projects
 /project <name-or-path>
-/run <prompt>
-/ops <prompt>        # legacy alias for /run
+/cmd <prompt>
+/run <prompt>        # compatibility alias for /cmd
+/ops <prompt>        # compatibility alias for /cmd
 /stop
 /terminal
 /terminal_read
@@ -242,8 +243,8 @@ and answered after the run is idle.
 
 Control behavior:
 
-- `/run` starts a normal run in the selected project/profile/toolset.
-- `/ops` is accepted as a compatibility alias for `/run`; it does not force a separate specialised agent mode.
+- `/cmd` starts a normal run in the selected project/profile/toolset.
+- `/run` and `/ops` are accepted as compatibility aliases for `/cmd`; they do not force a separate specialised agent mode.
 - Obvious quick terminal requests, such as opening a tmux session, may execute through the `quick_action` lane and existing terminal state machine without starting a full model run.
 - `/stop` cancels the active run.
 - `/terminal_read` reads current terminal state using the existing structured terminal screen.
@@ -346,7 +347,7 @@ Session memory:
 
 ## Milestones
 
-### T1 - Text Bot MVP ✅ first pass
+### T1 - Text Bot MVP [done] first pass
 
 - **Done:** channel bus / route isolation exists before transport wiring.
 - **Done:** channel work queue is durable in SQLite with regression coverage.
@@ -355,47 +356,45 @@ Session memory:
 - **Done:** Settings config and Telegram settings UI.
 - **Done:** Long-polling runtime, direct-message support, allow-list, mention filtering, offset
   persistence, duplicate-message suppression, text replies with Telegram HTML formatting/chunking.
-- **Done:** `/status`, `/run`, `/stop`, `/facts`, `/help`, `/plan`, `/logs`, `/terminal_read`.
+- **Done:** `/status`, `/cmd`, `/run`, `/stop`, `/facts`, `/help`, `/plan`, `/logs`, `/terminal_read`.
 - **Done:** Separate side-chat prompt/session path that avoids desktop Chat pollution.
 - **Done:** Telegram page for chat/event inspection, manual sends, and delete-message action.
 - **Done:** Tests for Bot API payload formatting/chunking, runtime routing, allow-list, mentions,
   offsets, duplicate suppression, voice/audio download routing, queue persistence, and busy drain.
 
-### T2 - Full Project Control 🔨 partial
+### T2 - Full Project Control [implemented; live smoke pending]
 
 - `/projects`, `/project`, `/logs`, `/brain`, `/files`, `/file`, `/artifact`.
 - Project switching without disturbing desktop UI unexpectedly.
-- **Partial:** `/logs` and `/plan` are routed; `/brain`, `/files`, `/file`, `/artifact`,
-  `/projects`, and `/project` remain to finish.
-- **Partial:** RunLedger events exist for Telegram/channel messages; progress message editing still
-  needs the edited-message UX.
+- **Done:** `/projects`, `/project`, `/logs`, `/plan`, `/brain`, `/files`, `/file`, and `/artifact`
+  are implemented. Workspace reads are containment-checked and bounded for Telegram output.
+- **Done:** project switching applies the saved lab context and workspace, then resets chat/plan.
+- **Done:** RunLedger events exist for Telegram/channel messages and progress updates edit one
+  persistent Telegram message, with a normal-send fallback when editing fails.
 - Tests for session keys and command parser.
 
-### T3 - Terminal Control 🔨 partial
+### T3 - Terminal Control [implemented; live smoke pending]
 
 - **Done:** `/terminal_read` routes through the existing structured terminal screen/state.
-- **Partial:** `/terminal_send` currently queues explicit operator review/dispatch; finish direct
-  state-machine execution for trusted/unrestricted Telegram control.
+- **Done:** `/terminal_send` executes through the shared terminal state machine when idle and queues
+  when agent/eval work is active, so it cannot type over another run.
 - **Done:** Active terminal/session/ready/busy state is available through channel status and
   terminal-read output.
 - **Done:** Terminal state machine prevents typing over listener/busy states in the shared tool path.
 
-### T4 - Voice In 🔨 partial
+### T4 - Voice In [implemented; live smoke pending]
 
 - **Done:** Voice/audio file lookup, download, local save, and channel attachment routing.
-- **Open:** real transcription adapter using the Mauler audio sidecar or local transcription
-  endpoint.
-- **Open:** voice transcript becomes the user turn after STT.
-- **Open:** reply includes transcript preview.
+- **Done:** downloaded voice/audio is transcribed through the shared Mauler audio runtime.
+- **Done:** the transcript becomes the isolated Telegram user turn and the reply includes a bounded
+  transcript preview.
 
-### T5 - Voice Out
+### T5 - Voice Out [implemented; live smoke pending]
 
-- TTS reply generation.
-- OGG/Opus conversion.
-- `sendVoice` for voice-note capable output, `sendAudio` fallback.
-- `voice_replies` setting.
+- **Done:** shared TTS reply generation, OGG/Opus conversion, `sendVoice` with `sendAudio` fallback,
+  and the `voice_replies` policy are wired.
 
-### T6 - Settings And UI Polish ✅ first pass
+### T6 - Settings And UI Polish [done] first pass
 
 - **Done:** Settings tab.
 - **Done:** Telegram page with status cards, queue, raw events, chat view, manual send, delete.
@@ -433,7 +432,7 @@ Integration tests with fake Telegram server:
 Live smoke:
 
 - DM `/status`.
-- DM `/run say hi and then list current project facts`.
+- DM `/cmd say hi and then list current project facts`.
 - DM `/stop` during a long run.
 - DM `/terminal_read`.
 - Send a Telegram voice note and confirm transcript/run/reply.

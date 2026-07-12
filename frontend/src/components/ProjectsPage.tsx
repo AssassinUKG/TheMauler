@@ -17,7 +17,7 @@ import './ProjectsPage.css'
 
 interface Props {
   version: number
-  onProjectChanged: () => void
+  onProjectChanged: (project: LabProfile, previousName: string) => void
 }
 
 const defaultFolders = ['notes', 'scans', 'loot', 'scripts', 'screenshots']
@@ -75,7 +75,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
 
   const newProject = () => {
     const base = settings?.context.workspace_dir || cwd || 'C:/Users/richa/Documents/HTB_writeups'
-    const name = 'New box'
+    const name = 'New HTB box'
     const id = uniqueProjectId('new-box', projects)
     setSelectedId('')
     setDraft({
@@ -83,8 +83,8 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
       id,
       name,
       workspace_dir: joinPath(base, id),
-      ops_profile: 'Pentesting',
-      evidence_policy: 'research_assisted',
+      ops_profile: 'HTB / CTF',
+      evidence_policy: 'discovery_first',
       access_preference: 'auto',
     })
   }
@@ -109,6 +109,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
         open_folders: activate ? workspaceFoldersFor(profile.workspace_dir, foldersFromDraft(folderDraft)) : settings.context.open_folders,
       },
     }
+    const previousName = projects.find(item => item.id === activeId)?.name || settings.context.lab.name || 'previous workspace'
     if (activate) {
       await ensureProjectFolders(profile.workspace_dir, foldersFromDraft(folderDraft))
     }
@@ -117,7 +118,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
     setSelectedId(profile.id)
     setDraft(profile)
     showStatus(activate ? `Switched to ${profile.name}` : `Saved ${profile.name}`)
-    if (activate) onProjectChanged()
+    if (activate) onProjectChanged(profile, previousName)
     return profile
   }
 
@@ -136,6 +137,8 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
         lab_profiles: profiles,
         active_lab_profile: nextActive,
         lab: nextActiveProfile ? labFromProfile(nextActiveProfile) : settings.context.lab,
+        workspace_dir: nextActiveProfile?.workspace_dir || settings.context.workspace_dir,
+        open_folders: nextActiveProfile ? workspaceFoldersFor(nextActiveProfile.workspace_dir, defaultFolders) : settings.context.open_folders,
       },
     }
     await UpdateSettings(next)
@@ -143,7 +146,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
     setSelectedId(nextActive)
     setDraft(profileToDraft(nextActiveProfile ?? blankProject(), settings.context.workspace_dir || cwd))
     showStatus('Project removed')
-    onProjectChanged()
+    if (settings.context.active_lab_profile === id && nextActiveProfile) onProjectChanged(nextActiveProfile, target.name || target.id)
   }
 
   const selectedVPN = vpnItems.find(item => vpnValue(item) === draft.vpn_interface || item.name === draft.vpn_interface)
@@ -152,13 +155,14 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
     <div className="projects-page">
       <header className="projects-header">
         <div>
-          <h1>Projects / Boxes</h1>
-          <p>Switch the active box, agent root, lab context, VPN target, and folder scaffold from one place.</p>
+          <span className="project-kicker">Start here</span>
+          <h1>Your boxes</h1>
+          <p>Resume an old box or create a clean workspace. Files and saved sessions are never deleted when you switch.</p>
         </div>
         <div className="projects-header-actions">
           {status && <span className="projects-status">{status}</span>}
           <button onClick={() => void load()}>Refresh</button>
-          <button onClick={newProject}>New project</button>
+          <button className="project-new-box" onClick={newProject}>+ New HTB box</button>
         </div>
       </header>
 
@@ -172,7 +176,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
               className={`project-card${project.id === selectedId ? ' selected' : ''}${project.id === activeId ? ' active' : ''}`}
               onClick={() => chooseProject(project.id)}
             >
-              <span className="project-card-title">{project.name || project.id}</span>
+              <span className="project-card-title">{project.name || project.id}{project.id === activeId ? '  • ACTIVE' : ''}</span>
               <span>{[project.target, project.hostname, project.vpn_interface].filter(Boolean).join(' | ') || 'No target set'}</span>
               <span className="project-card-root">{project.workspace_dir || cwd}</span>
             </button>
@@ -187,7 +191,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
             </div>
             <div className="project-editor-actions">
               <button onClick={() => void saveProject(false)}>Save</button>
-              <button className="primary" onClick={() => void saveProject(true)}>Use project</button>
+              <button className="primary" onClick={() => void saveProject(true)}>{selectedId === activeId ? 'Resume box' : 'Open box'}</button>
               {selectedId && <button className="danger" onClick={() => void deleteProject(selectedId)}>Delete</button>}
             </div>
           </div>
@@ -266,7 +270,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
           <div className="project-summary">
             <div><span>Active root</span><strong>{settings?.context.workspace_dir || cwd || 'not set'}</strong></div>
             <div><span>Selected VPN</span><strong>{selectedVPN ? `${selectedVPN.ip}/${selectedVPN.cidr} (${selectedVPN.name})` : draft.vpn_interface || 'not set'}</strong></div>
-            <div><span>Switch action</span><strong>creates folders, saves context, swaps agent root, refreshes Explorer</strong></div>
+            <div><span>Open / resume</span><strong>switches root, starts a clean project chat, and preserves previous files and sessions</strong></div>
           </div>
         </section>
       </div>

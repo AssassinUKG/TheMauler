@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +15,30 @@ import (
 )
 
 var sharedBrowser = &browserSession{}
+
+type BrowserRuntimeStatus struct {
+	Available bool
+	Active    bool
+	Binary    string
+}
+
+func GetBrowserRuntimeStatus() BrowserRuntimeStatus {
+	status := BrowserRuntimeStatus{}
+	sharedBrowser.mu.Lock()
+	status.Active = sharedBrowser.ctx != nil && sharedBrowser.ctx.Err() == nil
+	sharedBrowser.mu.Unlock()
+	for _, candidate := range []string{"chrome", "chrome.exe", "msedge", "msedge.exe", `C:\Program Files\Google\Chrome\Application\chrome.exe`, `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			status.Available, status.Binary = true, path
+			break
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			status.Available, status.Binary = true, candidate
+			break
+		}
+	}
+	return status
+}
 
 type browserSession struct {
 	mu          sync.Mutex

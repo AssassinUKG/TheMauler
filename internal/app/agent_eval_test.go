@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"mauler/internal/channelbus"
 	"mauler/internal/llm"
 	"mauler/internal/settings"
 )
@@ -200,6 +201,7 @@ func TestAgentEvalSmokeWithMockClient(t *testing.T) {
 	cfg.Tools.ConfirmExec = false
 	cfg.Agents.MaxToolCalls = 8
 	cfg.Agents.MaxRunSeconds = 0
+	cfg.Agents.ReviewLoop.VerifyGate = false
 	cfg.Context.CompactionAt = 0.99
 	profile := settings.Profile{
 		Name:      "mock",
@@ -215,6 +217,7 @@ func TestAgentEvalSmokeWithMockClient(t *testing.T) {
 	}
 
 	evalApp := &App{cfg: &cfg, profiles: &profiles}
+	reviewerPass := false
 	report := evalApp.runAgentEvalScenarios("mock", []AgentEvalScenario{{
 		Name:   "edit-then-verify",
 		Prompt: "Fix the compile error in main.go.",
@@ -226,10 +229,51 @@ func TestAgentEvalSmokeWithMockClient(t *testing.T) {
 		ExpectStatus:     "done",
 		ExpectFiles:      map[string]string{"main.go": "return \"123\""},
 		MaxAutoContinues: 1,
+		ReviewerPass:     &reviewerPass,
 	}})
 
 	if report.Total != 1 || report.PassCount != 1 {
 		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestAgentEvalPreflightBlocksLiveRunWithoutChangingWorkingDir(t *testing.T) {
+	before, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := settings.DefaultSettings()
+	app := &App{cfg: &cfg, agentRunning: true}
+	report := app.runAgentEvalScenarios("mock", []AgentEvalScenario{{Name: "must-not-run", Prompt: "write a file"}})
+	if report.Total != 1 || len(report.Results) != 1 || report.Results[0].Status != "blocked" {
+		t.Fatalf("expected blocked preflight, got %#v", report)
+	}
+	if !strings.Contains(report.Results[0].FailReason, "task or artifact is active") {
+		t.Fatalf("unexpected preflight reason: %q", report.Results[0].FailReason)
+	}
+	after, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("eval preflight changed cwd: before=%q after=%q", before, after)
+	}
+	if app.evalRunning {
+		t.Fatal("blocked eval left evalRunning set")
+	}
+}
+
+func TestAgentEvalPreflightBlocksQueuedChannelWork(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	queue := channelbus.NewQueue()
+	queue.Enqueue(channelbus.Envelope{Source: "test", Text: "queued work"}, channelbus.Route{Lane: "work"})
+	app := &App{cfg: &cfg, channelQueue: queue}
+	report := app.runAgentEvalScenarios("mock", []AgentEvalScenario{{Name: "must-not-run", Prompt: "write a file"}})
+	if len(report.Results) != 1 || report.Results[0].Status != "blocked" || !strings.Contains(report.Results[0].FailReason, "channel work queue") {
+		t.Fatalf("expected queued-work block, got %#v", report)
+	}
+	if app.evalRunning {
+		t.Fatal("blocked eval left evalRunning set")
 	}
 }
 
@@ -300,3 +344,19 @@ func (c *agentEvalMockClient) Models(context.Context) ([]string, error) {
 }
 func (c *agentEvalMockClient) Ping(context.Context) error { return nil }
 func (c *agentEvalMockClient) Name() string               { return "mock-agent-eval" }
+
+func TestLoadAgentEvalScenariosIncludesReliabilityGate(t *testing.T) {
+	scenarios, err := loadAgentEvalScenarios()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, scenario := range scenarios {
+		seen[scenario.Name] = true
+	}
+	for _, want := range []string{"redirect-loop-guard", "off-target-ip-guard", "terminal-routing-discipline", "compact-arg-repair", "verify-blocks-compile-error", "completion-covers-both-asks"} {
+		if !seen[want] {
+			t.Fatalf("missing agent eval scenario %q; have %#v", want, seen)
+		}
+	}
+}

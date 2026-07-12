@@ -88,6 +88,51 @@ func TestCriticalVerifierHintIgnoresNonExecutionTools(t *testing.T) {
 	}
 }
 
+func TestHTTPRedirectHintDetects301WithLocation(t *testing.T) {
+	result := "HTTP/1.1 301 Moved Permanently\r\nLocation: http://connected.htb/\r\n\r\n<html><a href=\"http://connected.htb/\">here</a></html>"
+	got := appendCriticalVerifierHint(llm.ToolCallDef{
+		Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(`{"command":"curl -s http://10.129.26.26/ | head -100"}`)},
+	}, result)
+	for _, want := range []string{"[hint:redirect]", "http://connected.htb/", "curl -L", "Do NOT re-run"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("redirect hint missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestHTTPRedirectHintIgnoresNon3xx(t *testing.T) {
+	got := appendCriticalVerifierHint(llm.ToolCallDef{
+		Function: llm.FunctionCall{Name: "http_probe", Arguments: json.RawMessage(`{"url":"http://10.129.26.26/"}`)},
+	}, "HTTP/1.1 200 OK\r\n\r\nhello")
+	if strings.Contains(got, "[hint:redirect]") {
+		t.Fatalf("200 response must not get redirect hint:\n%s", got)
+	}
+}
+
+func TestOffTargetProbeHint(t *testing.T) {
+	tc := llm.ToolCallDef{
+		Function: llm.FunctionCall{Name: "shell", Arguments: json.RawMessage(`{"command":"curl -s http://10.129.14.129/ | head -20"}`)},
+	}
+	got := appendCriticalVerifierHintWithTarget(tc, "curl: (7) Failed to connect", "target 10.129.26.26")
+	for _, want := range []string{"[hint:target]", "10.129.26.26", "10.129.14.129", "stale IPs"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("off-target hint missing %q:\n%s", want, got)
+		}
+	}
+
+	onTarget := appendCriticalVerifierHintWithTarget(llm.ToolCallDef{
+		Function: llm.FunctionCall{Name: "http_probe", Arguments: json.RawMessage(`{"url":"http://10.129.26.26/"}`)},
+	}, "HTTP/1.1 200 OK", "10.129.26.26")
+	if strings.Contains(onTarget, "[hint:target]") {
+		t.Fatalf("on-target probe should not warn:\n%s", onTarget)
+	}
+
+	noTarget := appendCriticalVerifierHintWithTarget(tc, "curl: (7) Failed to connect", "")
+	if strings.Contains(noTarget, "[hint:target]") {
+		t.Fatalf("missing confirmed target should not warn:\n%s", noTarget)
+	}
+}
+
 func TestBuildPendingVerifierPrompt(t *testing.T) {
 	prompt := buildPendingVerifierPrompt([]llm.Message{
 		llm.NewTextMessage(llm.RoleTool, "ok\n[verifier_required:webshell] verify it"),

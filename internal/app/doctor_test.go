@@ -143,7 +143,7 @@ func TestFetchLlamacppBuiltinToolsDetectsDangerousServerTools(t *testing.T) {
 }
 
 func TestFetchLlamacppContextPrefersSlots(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/slots":
 			_, _ = w.Write([]byte(`[{"id":0,"n_ctx":40960}]`))
@@ -152,10 +152,9 @@ func TestFetchLlamacppContextPrefersSlots(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	defer server.Close()
+	})
 
-	got, err := fetchLlamacppContext(server.URL + "/v1")
+	got, err := fetchLlamacppContextWithClient("http://doctor.test/v1", client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +164,7 @@ func TestFetchLlamacppContextPrefersSlots(t *testing.T) {
 }
 
 func TestFetchLlamacppContextReadsWrappedSlots(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/slots":
 			_, _ = w.Write([]byte(`{"value":[{"id":0,"n_ctx":40192}]}`))
@@ -174,10 +173,9 @@ func TestFetchLlamacppContextReadsWrappedSlots(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	defer server.Close()
+	})
 
-	got, err := fetchLlamacppContext(server.URL + "/v1")
+	got, err := fetchLlamacppContextWithClient("http://doctor.test/v1", client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,16 +462,15 @@ func TestLlamacppLaunchAssertionsWarnOnSpeculative(t *testing.T) {
 			"spec_type": "draft-mtp",
 		},
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/props" {
 			http.NotFound(w, r)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(props)
-	}))
-	defer server.Close()
+	})
 
-	addLlamacppLaunchAssertions(func(c DoctorCheck) { checks = append(checks, c) }, server.URL+"/v1", settings.Profile{ModelID: "qwen3.6"})
+	addLlamacppLaunchAssertionsWithClient(func(c DoctorCheck) { checks = append(checks, c) }, "http://doctor.test/v1", settings.Profile{ModelID: "qwen3.6"}, client)
 
 	if !hasDoctorCheck(checks, "llama.cpp speculative decoding", "warn", "Speculative/draft decoding signal detected") {
 		t.Fatalf("expected speculative warning, got %#v", checks)

@@ -39,6 +39,40 @@ func SetConfigSnapshot(c settings.ToolsConfig) {
 	cfgSnapshotMu.Unlock()
 }
 
+// SwapConfigSnapshot installs a temporary process-wide snapshot and returns an
+// idempotent restore function. Callers must still exclude concurrent runs while
+// the temporary snapshot is active.
+func SwapConfigSnapshot(c settings.ToolsConfig) func() {
+	paths := append([]string(nil), c.ProtectedPaths...)
+	next := &toolConfigSnapshot{
+		shellBackend:   c.ShellBackend,
+		shellDistro:    c.ShellDistro,
+		shellUser:      c.ShellUser,
+		protectedPaths: paths,
+	}
+	cfgSnapshotMu.Lock()
+	previous := cloneConfigSnapshot(cfgSnapshot)
+	cfgSnapshot = next
+	cfgSnapshotMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cfgSnapshotMu.Lock()
+			cfgSnapshot = cloneConfigSnapshot(previous)
+			cfgSnapshotMu.Unlock()
+		})
+	}
+}
+
+func cloneConfigSnapshot(snapshot *toolConfigSnapshot) *toolConfigSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	copy := *snapshot
+	copy.protectedPaths = append([]string(nil), snapshot.protectedPaths...)
+	return &copy
+}
+
 // ResetConfigSnapshot clears the cached snapshot so the accessors fall back to
 // settings.Load() again. Tests that install a snapshot must reset to this state
 // (not to DefaultSettings, which is itself a non-nil snapshot) so they don't

@@ -47,15 +47,16 @@ export interface Settings {
   agents: {
     mode_override: string
     default_autonomy: string
-      offline_only: boolean
-      max_tool_calls: number
-      max_run_seconds: number
-      escalation_profile: string
-      require_plan: boolean
-      no_think_after_tool_calls: number
-      reasoning_effort: string
-      presets: Record<string, AgentModePreset>
-    }
+    offline_only: boolean
+    max_tool_calls: number
+    max_run_seconds: number
+    escalation_profile: string
+    require_plan: boolean
+    no_think_after_tool_calls: number
+    reasoning_effort: string
+    review_loop: ReviewLoopConfig
+    presets: Record<string, AgentModePreset>
+  }
   environment: EnvironmentConfig
   context: {
     auto_inject_file: boolean
@@ -108,8 +109,13 @@ export interface Settings {
     display_method: string
     max_display_width: number
     wsl_path_translate: boolean
+    video_enabled: boolean
+    video_max_frames: number
+    video_frame_width: number
+    video_transcribe: boolean
   }
   telegram: TelegramConfig
+  audio: AudioConfig
   logging: {
     enabled: boolean
     log_tool_inputs: boolean
@@ -118,6 +124,67 @@ export interface Settings {
     max_runs: number
   }
   log_level: string
+}
+
+export interface AudioConfig {
+  enabled: boolean
+  mode: string
+  stt_engine: string
+  tts_engine: string
+  voice: string
+  speed: number
+  input_device: string
+  vad_threshold: number
+  barge_in: boolean
+  speak_replies: boolean
+  speak_tool_notes: boolean
+  clause_min_chars: number
+}
+
+export interface SpeechAudio {
+  data_uri: string
+  engine: string
+  voice: string
+}
+
+export interface AudioHealth {
+  enabled: boolean
+  overall: string
+  configured_tts: string
+  actual_tts: string
+  voice: string
+  stt_engine: string
+  stt_ready: boolean
+  worker_state: string
+  worker_pid: number
+  last_success: string
+  last_error: string
+  speak_replies: boolean
+  worker_hidden: boolean
+  stt_worker_state: string
+  stt_worker_pid: number
+  stt_model: string
+  stt_last_duration_ms: number
+  stt_last_audio_ms: number
+  stt_last_success: string
+  stt_last_error: string
+}
+
+export interface ServiceHealth {
+  id: string
+  name: string
+  status: string
+  summary: string
+  detail?: string
+  updated_at: string
+  metadata?: Record<string, string>
+}
+
+export interface JHUTBrowserReport {
+  pass: boolean; url: string; desktop_screenshot: string; mobile_screenshot: string
+  canvas_width: number; canvas_height: number; pixel_variance: number; pixel_coverage: number
+  orbit_changed: boolean; responsive: boolean; console_errors: string[]; runtime_errors: string[]
+  failures: string[]; verifier_version: string
 }
 
 export interface TelegramConfig {
@@ -145,6 +212,19 @@ export interface AgentModePreset {
   toolset: string
   instructions: string
   tool_permissions: Record<string, boolean>
+}
+
+export interface ReviewLoopConfig {
+  enabled: boolean
+  only_autonomous: boolean
+  max_review_cycles: number
+  verify_gate: boolean
+  verify_commands: string[]
+  verify_timeout_sec: number
+  completion_rails: boolean
+  completion_blocking: boolean
+  reviewer_pass: boolean
+  reviewer_max_tools: number
 }
 
 export interface ToolSafeRule {
@@ -480,6 +560,18 @@ export interface AgentEvalResult {
   false_done: boolean
   duration_ms: number
   fail_reason?: string
+  runtime_pass?: boolean
+  desktop_screenshot?: string
+  mobile_screenshot?: string
+  runtime_failures?: string[]
+  model_id?: string
+  provider?: string
+  context_tokens?: number
+  seed?: number
+  artifact_hash?: string
+  verifier_version?: string
+  stop_reason?: string
+  tool_trace?: TaskToolEvent[]
 }
 
 export interface AgentEvalReport {
@@ -722,6 +814,9 @@ export const ImportTaskRunsJSON = (raw: string): Promise<number> =>
 export const DispatchChannelMessage = (env: ChannelEnvelope): Promise<ChannelResponse> =>
   call('app.App.DispatchChannelMessage', env)
 
+export const DispatchSideChatMessage = (env: ChannelEnvelope): Promise<ChannelResponse> =>
+  call('app.App.DispatchSideChatMessage', env)
+
 export const ListChannelWorkQueue = (): Promise<ChannelWorkItem[]> =>
   call('app.App.ListChannelWorkQueue')
 
@@ -754,6 +849,24 @@ export const SendMessage = (text: string, images: string[], attachments: ChatAtt
 
 export const StopAgent = (): Promise<void> =>
   call('app.App.StopAgent')
+
+export const TranscribeVoiceClip = (dataURI: string): Promise<string> =>
+  call('app.App.TranscribeVoiceClip', dataURI)
+
+export const SynthesizeSpeech = (text: string): Promise<SpeechAudio> =>
+  call('app.App.SynthesizeSpeech', text)
+
+export const GetAudioHealth = (): Promise<AudioHealth> =>
+  call('app.App.GetAudioHealth')
+
+export const RestartAudioWorker = (): Promise<AudioHealth> =>
+  call('app.App.RestartAudioWorker')
+
+export const ListKokoroVoices = (): Promise<string[]> =>
+  call('app.App.ListKokoroVoices')
+
+export const GetServiceHealth = (): Promise<ServiceHealth[]> =>
+  call('app.App.GetServiceHealth')
 
 export const InterruptShellTool = (): Promise<void> =>
   call('app.App.InterruptShellTool')
@@ -829,6 +942,20 @@ export const GetHomeDir = (): Promise<string> =>
 
 export const EncodeFileBase64 = (path: string): Promise<string> =>
   call('app.App.EncodeFileBase64', path)
+
+export interface VideoIngest {
+  frames: string[]
+  transcript: string
+  duration: number
+  frameCount: number
+  note: string
+}
+
+export const IngestVideo = (dataURI: string, filename: string): Promise<VideoIngest> =>
+  call('app.App.IngestVideo', dataURI, filename)
+
+export const IngestVideoPath = (path: string): Promise<VideoIngest> =>
+  call('app.App.IngestVideoPath', path)
 
 export const RenameFile = (oldPath: string, newPath: string): Promise<void> =>
   call('app.App.RenameFile', oldPath, newPath)
@@ -983,6 +1110,9 @@ export const RunDoctor = (): Promise<DoctorResult> =>
 
 export const RunAgentEval = (profileName: string): Promise<AgentEvalReport> =>
   call('app.App.RunAgentEval', profileName)
+
+export const RunJHUTAgentEval = (profileName: string): Promise<AgentEvalReport> =>
+  call('app.App.RunJHUTAgentEval', profileName)
 
 export const RunMiniAgentLoopBenchmark = (profile: Profile, provider: Provider): Promise<AgentEvalResult> =>
   call('app.App.RunMiniAgentLoopBenchmark', profile, provider)

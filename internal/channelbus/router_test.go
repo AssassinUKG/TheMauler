@@ -9,10 +9,19 @@ func TestRouteSideQuestionIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestRouteRunQueuesWork(t *testing.T) {
-	route := RouteEnvelope(Envelope{Text: "/run enumerate the target"})
-	if route.Lane != LaneWork || route.Command != "run" || route.Policy != WorkQueueIfBusy {
-		t.Fatalf("expected queued run route, got %+v", route)
+func TestRouteCmdQueuesWork(t *testing.T) {
+	route := RouteEnvelope(Envelope{Text: "/cmd enumerate the target"})
+	if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy {
+		t.Fatalf("expected queued cmd route, got %+v", route)
+	}
+}
+
+func TestRouteRunAndOpsAliasCmd(t *testing.T) {
+	for _, text := range []string{"/run enumerate the target", "/ops enumerate the target"} {
+		route := RouteEnvelope(Envelope{Text: text})
+		if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy {
+			t.Fatalf("expected %q to alias queued cmd route, got %+v", text, route)
+		}
 	}
 }
 
@@ -25,7 +34,7 @@ func TestRouteNaturalLanguageQuickTerminalAction(t *testing.T) {
 
 func TestRouteNaturalLanguageWorkRequestQueuesWork(t *testing.T) {
 	route := RouteEnvelope(Envelope{Text: "Can you inspect the current project and update the docs?"})
-	if route.Lane != LaneWork || route.Command != "run" || route.Policy != WorkQueueIfBusy {
+	if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy {
 		t.Fatalf("expected natural language work request to queue work, got %+v", route)
 	}
 }
@@ -34,6 +43,21 @@ func TestRouteNaturalLanguageQuestionStaysSideChat(t *testing.T) {
 	route := RouteEnvelope(Envelope{Text: "Can you tell me what you can do?"})
 	if route.Lane != LaneSideChat {
 		t.Fatalf("expected plain question to stay side chat, got %+v", route)
+	}
+}
+
+func TestRouteCapabilityQuestionStaysSideChat(t *testing.T) {
+	cases := []string{
+		"Can you run normal system commands?",
+		"Can you run commands?",
+		"Do you have access to tools?",
+		"What can you do with tools?",
+	}
+	for _, text := range cases {
+		route := RouteEnvelope(Envelope{Source: "telegram", SessionID: "telegram:direct:1", Text: text})
+		if route.Lane != LaneSideChat || !route.ReadOnly {
+			t.Fatalf("expected capability question %q to stay side chat, got %+v", text, route)
+		}
 	}
 }
 
@@ -46,7 +70,7 @@ func TestRouteLocalSystemInfoUsesWorkLane(t *testing.T) {
 	}
 	for _, text := range cases {
 		route := RouteEnvelope(Envelope{Source: "telegram", SessionID: "telegram:direct:1", Text: text})
-		if route.Lane != LaneWork || route.Command != "run" || route.Policy != WorkQueueIfBusy {
+		if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy {
 			t.Fatalf("expected %q to route to work, got %+v", text, route)
 		}
 	}
@@ -56,6 +80,15 @@ func TestRouteControlStop(t *testing.T) {
 	route := RouteEnvelope(Envelope{Text: "/stop"})
 	if route.Lane != LaneControl || route.Command != "stop" || route.ReadOnly {
 		t.Fatalf("expected stop control route, got %+v", route)
+	}
+}
+
+func TestRouteEmergencyStopAliases(t *testing.T) {
+	for _, text := range []string{"/stopall", "/panic", "/abort", "/cancel", "cancel all tasks", "stop everything"} {
+		route := RouteEnvelope(Envelope{Text: text})
+		if route.Lane != LaneControl || route.Command != "stop" || route.ReadOnly {
+			t.Fatalf("expected emergency stop route for %q, got %+v", text, route)
+		}
 	}
 }
 

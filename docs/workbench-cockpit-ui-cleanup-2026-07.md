@@ -47,6 +47,7 @@ Goal: make the live workbench feel like a clear project cockpit, not three compe
 - C4: Apply the three-tier type scale and contrast cleanup. Files: `frontend/src/index.css`, component CSS files.
 - C5 done: Promote target/VPN/shell identity into the inspector/status hierarchy. Files: `frontend/src/components/RightInspector.tsx`, `frontend/src/components/StatusBar.tsx`.
 - C6 first pass done: Profile no longer duplicates in the sidebar, Doctor opens the correct panel, session controls are grouped, and composer `Stop`/`Send` positions are stable. Continue later with iconography/compact topbar treatment if needed.
+- C8 done: Doctor is a first-class center page/tab with its own run button, score cards, grouped check list, and persisted in-tab result while browsing the workbench. The topbar Doctor action opens/runs this page directly instead of hiding results inside Agent settings.
 - C7 done: Neutralize the bottom context bar and reserve saturated green for success states. Files: `frontend/src/components/StatusBar.css`.
 
 ## Acceptance

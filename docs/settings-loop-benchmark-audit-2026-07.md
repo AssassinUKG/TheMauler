@@ -1,4 +1,4 @@
-# Settings + Loop + Benchmark audit — actionable handoff (2026-07-02)
+# Settings + Loop + Benchmark audit - actionable handoff (2026-07-02)
 
 **Audience:** an AI coding agent (Codex/Claude) that will implement these fixes.
 **Scope:** analysis of the live settings, the agent loop, and the benchmark, with concrete edits for
@@ -27,14 +27,16 @@ Done since this audit:
 - Qwen and Gemma sampler/context profile fixes were applied in the live config, including Gemma `top_k=64`, presence penalty cleanup, and lowering the dead 120K Gemma profile to a realistic context.
 - `tool_grammar_constraint` is disabled in the live config until a grammar/tool-call probe proves it helps.
 
-Still open:
-- Reasoning Effort remains conceptually weak on no-think profiles unless the runtime either switches to a think sibling for high effort or makes the UI honest.
-- Real profile benchmarks and `agent_eval` gating still need to be run and wired into the workflow.
+Still open after the 2026-07-11 benchmark/reliability pass:
+- Reasoning Effort was fixed on 2026-07-12: High runs a bounded no-tools pass through the matching
+  thinking sibling, then returns to the selected no-think profile for tool execution.
+- Real per-profile benchmark runs still need to be collected. Agent Eval and the browser-backed JHUT
+  gate are now first-class Benchmark-page actions and are isolated from live work.
 - Tool-result budgets should be reviewed after one or two stable live runs at the real context size.
 
 ---
 
-## P0 — the three things that dominate everything else
+## P0 - the three things that dominate everything else
 
 ### P0-1. Context window may be silently capped at 8K despite profiles asking for 40K
 
@@ -63,34 +65,35 @@ re-run-the-same-command instability that reads as "the model is dumb."
 
 ---
 
-### P0-2. "Reasoning Effort: High" is inert on the active (no-think) profile
+### P0-2. "Reasoning Effort: High" on a no-think profile [closed 2026-07-12]
 
-**Root cause (verified).** `effortToThinking` (`internal/app/reasoning_effort.go:55`) maps `high` →
+**Root cause (verified).** `effortToThinking` (`internal/app/reasoning_effort.go:55`) maps `high` ->
 `enableThinking: profile.Thinking`. The active profile `qwen3.6-nothink` has `thinking=false`, so
 High resolves to thinking-OFF. The `set_reasoning_effort` tool cannot add depth it never had, and
 `no_think_after_tool_calls=2` is mostly a fallback because tool-enabled Qwen turns already force no-thinking. The UI (AgentPanel "Reasoning Effort" dropdown, set to High)
 presents a lever that is not connected on this profile.
 
-**Fix — pick one (prefer B):**
+**Fix - pick one (prefer B):**
 - **A (honest UI):** when the resolved profile has `thinking=false`, disable/grey the Reasoning
   Effort control and show "profile has thinking disabled." Frontend: `AgentPanel.tsx` effort
   selector; gate on the active profile's `thinking`.
-- **B (make it work):** when effort ≥ `high` and the active profile is a no-think variant that has a
-  think sibling (e.g. `qwen3.6-nothink` → `qwen3.6-think`, same `model_id`), auto-route the run to
+- **B (make it work):** when effort >= `high` and the active profile is a no-think variant that has a
+  think sibling (e.g. `qwen3.6-nothink` -> `qwen3.6-think`, same `model_id`), auto-route the run to
   the think profile (or set `req.EnableThinking=true` if the same GGUF supports a think mode). Keep
   `low`/`minimal` on the fast path. This is the higher-value option because it lets one effort knob
   span both speed and depth.
 
-Either way, add a test in `reasoning_effort_test.go` asserting the effort→thinking resolution for a
+Either way, add a test in `reasoning_effort_test.go` asserting the effort->thinking resolution for a
 no-think profile so this can't silently regress.
 
-**Acceptance:** setting effort High on a no-think profile either (A) is visibly disabled with a
-reason, or (B) produces `enableThinking=true` in the chat request (assert via the
-`tool_protocol_request` run event `thinking=` field).
+**Implemented:** High produces a private bounded `enableThinking=true` planning request on the
+same-provider/same-model thinking sibling. Its output is advisory context; normal tool execution
+remains on the selected no-thinking profile. Reviewer verdicts use the sibling while reviewer
+inspection/tool turns remain no-think.
 
 ---
 
-### P0-3. The benchmark history is 100% ctx-probes — no real agentic measurement exists
+### P0-3. The benchmark history is 100% ctx-probes - no real agentic measurement exists
 
 **Evidence.** All 107 entries in `benchmark-runs.json` are `profile_name="ctx-probe"`,
 `model_id="model.gguf"`, a single `"Tiny"` scenario, `0 tok/s`, `score 100`. The real 4-scenario
@@ -108,22 +111,33 @@ benchmark (General chat / Coding / JSON discipline / Tool protocol in `benchmark
    Anchor: `saveBenchmarkRun` / `loadBenchmarkRuns` (`benchmark.go:548-585`), and the
    Settings benchmark UI in `SettingsModal.tsx`.
 3. **Promote `agent_eval` to the real gate.** `internal/app/agent_eval.go`
-   (`runAgentEvalScenarios`) measures multi-step loop behavior — that is the actual agentic-quality
+   (`runAgentEvalScenarios`) measures multi-step loop behavior - that is the actual agentic-quality
    signal, and it is built but unused. Add a way to run it (a button or a `go test`-invokable
    harness) and treat it as the pre/post regression gate for every change in this doc.
 
-**Acceptance:** the benchmark view shows real 4-scenario runs per model with non-zero tok/s and a
-Tool-protocol structured/repaired count; `agent_eval` is runnable and produces a scored report.
+4. **Isolate Agent Eval before promoting it.** Audit 2026-07-10 found that the current harness calls
+   `os.Chdir()` and replaces the global tool configuration snapshot. Its mutex excludes only another
+   eval, not a normal desktop/channel run, so an eval can redirect a live run's relative tools.
+   Remove process-global cwd/config dependencies or block all concurrent work until MAULER-AR-003 in
+   `agentic-reliability-issues-2026-07.md` closes.
+5. **Add the shared JHUT scenario.** The manual fixture in
+   `C:/Users/richa/Documents/MaulerBench/jhut-threejs` is not in the built-in Agent Eval suite. Add it
+   with browser/runtime verification under MAULER-AR-005; source-token checks alone are not visual
+   evidence.
+
+**Acceptance:** the benchmark view shows real scenario runs per model with non-zero tok/s and a
+Tool-protocol structured/repaired count; `agent_eval` is runnable without process-global side effects,
+includes the shared JHUT end-to-end contract, and produces a scored report with runtime evidence.
 
 ---
 
-## P1 — settings edits for agentic reliability
+## P1 - settings edits for agentic reliability
 
 These are safe config edits. Live file: `~/.config/mauler/settings.toml`. Prefer changing
 `internal/settings/defaults.go` for anything that should be the shipped default, and only touch the
 user's TOML for user-specific choices.
 
-### P1-1. Tool count is too high for a 3B-active MoE — build a lean Ops toolset
+### P1-1. Tool count is too high for a 3B-active MoE - build a lean Ops toolset
 
 The active toolset `unrestricted` exposes ~40 tools, including **five overlapping shell verbs**
 (`shell`, `bash`, `terminal_run`, `terminal_send`, `terminal_read`) plus `start_listener`,
@@ -137,7 +151,7 @@ reliable with a *small orthogonal* set.
   write_file, edit_file, terminal_run, terminal_send, terminal_read, start_listener, http_probe,
   run_script, memory, progress, file_changes, evidence_bundle, todo_*, read_tool_result,
   set_reasoning_effort`.
-- **Drop `bash` as a distinct tool** — it duplicates `shell`. Note `EffectiveEnabledTools`
+- **Drop `bash` as a distinct tool** - it duplicates `shell`. Note `EffectiveEnabledTools`
   (`internal/settings/load.go:462`) already hard-links `bash` to `shell`; finish the job by removing
   `bash` from the toolsets/enabled map and the registry, or alias it. One shell one-shot verb +
   the three terminal verbs is the target.
@@ -149,11 +163,11 @@ reliable with a *small orthogonal* set.
 
 ### P1-2. Right-size tool-result context budgets to the *real* window
 
-`tool_result_aggregate_chars=24000` is ~60% of a 40K window in a single turn — and catastrophic if
+`tool_result_aggregate_chars=24000` is ~60% of a 40K window in a single turn - and catastrophic if
 P0-1 shows the real window is 8K. After P0-1 is confirmed:
-- If real window is 40K: set `tool_result_aggregate_chars` to **12000–16000**.
+- If real window is 40K: set `tool_result_aggregate_chars` to **12000-16000**.
 - Keep `tool_result_preview_chars=2000` (the user reverted a prior bump; the scan-output cleaning is
-  the real fix — see memory `scan_output_starvation`).
+  the real fix - see memory `scan_output_starvation`).
 - Anchors: `internal/settings/defaults.go:25-27`, clamp logic in `internal/settings/load.go:79-85`.
 
 ### P1-3. Profile guidance for the user's HTB use case
@@ -165,25 +179,25 @@ P0-1 shows the real window is 8K. After P0-1 is confirmed:
 
 ---
 
-## Reference — how the loop looks today (so Codex has the map)
+## Reference - how the loop looks today (so Codex has the map)
 
 Core loop: `runAgentLoop` (`internal/app/app.go:2294`). Per-turn structure:
 
 ```
-setup: system prompt (mode+memories+skills) · load model (retries) · context budget · keepalive
+setup: system prompt (mode+memories+skills)  -  load model (retries)  -  context budget  -  keepalive
 loop:
-  1. budget gates        tool/time exhausted → force text-only summary; recovery/doc-recovery gates
-  2. routing             toolDefsAndChoiceForTurnWithState(phase, #calls, terminal state) → subset + tool_choice
+  1. budget gates        tool/time exhausted -> force text-only summary; recovery/doc-recovery gates
+  2. routing             toolDefsAndChoiceForTurnWithState(phase, #calls, terminal state) -> subset + tool_choice
   3. memory              re-score & re-inject newly-relevant memories
-  4. context ladder      needsCompaction → clear old tool results → microcompact → summarize
-  5. nudges              foothold (re-exploit loop) · listener (reverse shell) · persist · goal
-  6. build request       execution-state prompt · forceNoThink after N calls · effort · optional GBNF
-  7. stream              client.Chat → thinking / visible text / tool calls
+  4. context ladder      needsCompaction -> clear old tool results -> microcompact -> summarize
+  5. nudges              foothold (re-exploit loop)  -  listener (reverse shell)  -  persist  -  goal
+  6. build request       execution-state prompt  -  forceNoThink after N calls  -  effort  -  optional GBNF
+  7. stream              client.Chat -> thinking / visible text / tool calls
   8. tool protocol       native tool_calls else repair inline markup / schema / reject hallucinated
-  9. spec guard          MTP truncation-at-</think> → fall back to stable decode
- 10. execute tools       confirm · rollback snapshot · run · offload big results · mutation-verify · ledger
- 11. continue?           tool calls → loop · clean text answer → finish
-finish (defer): living-doc check · loop-metrics · checkpoint delete · save run · milestone memory · distill
+  9. spec guard          MTP truncation-at-</think> -> fall back to stable decode
+ 10. execute tools       confirm  -  rollback snapshot  -  run  -  offload big results  -  mutation-verify  -  ledger
+ 11. continue?           tool calls -> loop  -  clean text answer -> finish
+finish (defer): living-doc check  -  loop-metrics  -  checkpoint delete  -  save run  -  milestone memory  -  distill
 ```
 
 **Strengths (keep):** graduated compaction ladder, memory re-injection, tool-protocol repair chain,
@@ -191,10 +205,10 @@ MTP stability guard, pentest foothold/listener nudges.
 
 **Risks to address (in priority order, mostly covered above):**
 - Injected-message pressure per turn (execution-state prompt + nudges + goal reminders) is fine on a
-  true 40K window, crushing on a silently-8K one → **P0-1**.
-- Routing depends on terminal state, which is heuristically classified and bash-prompt-biased →
+  true 40K window, crushing on a silently-8K one -> **P0-1**.
+- Routing depends on terminal state, which is heuristically classified and bash-prompt-biased ->
   fixed by the VT screen model in the companion terminal doc.
-- Loop leans on the model choosing well among many tools → **P1-1** (lean toolset) reduces the
+- Loop leans on the model choosing well among many tools -> **P1-1** (lean toolset) reduces the
   surface it must get right.
 
 ---
@@ -203,8 +217,8 @@ MTP stability guard, pentest foothold/listener nudges.
 
 | # | Item | Why | Effort |
 |---|------|-----|--------|
-| P0-1 | Doctor + status-bar assertion: actual vs configured context | Silent 8K cap would dominate all instability | S–M |
-| P0-2 | Make reasoning-effort coherent on no-think profiles | "High" is currently inert / misleading | S–M |
+| P0-1 | Doctor + status-bar assertion: actual vs configured context | Silent 8K cap would dominate all instability | S-M |
+| P0-2 | Make reasoning-effort coherent on no-think profiles | Closed 2026-07-12 | Done |
 | P0-3 | Run real benchmarks + promote agent_eval as the gate | No real agentic measurement exists today | M |
 | P1-1 | ops-lean toolset (~20), drop `bash` | Fewer wrong tool choices on a 3B-active MoE | M |
 | P1-2 | Right-size tool-result budgets to real window | 24k aggregate crowds context | S |

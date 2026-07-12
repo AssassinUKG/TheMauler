@@ -1,5 +1,27 @@
 export namespace app {
 	
+	export class TaskToolEvent {
+	    name: string;
+	    input?: string;
+	    result?: string;
+	    status: string;
+	    timestamp: string;
+	    duration_ms?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TaskToolEvent(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.input = source["input"];
+	        this.result = source["result"];
+	        this.status = source["status"];
+	        this.timestamp = source["timestamp"];
+	        this.duration_ms = source["duration_ms"];
+	    }
+	}
 	export class AgentEvalResult {
 	    name: string;
 	    pass: boolean;
@@ -22,6 +44,18 @@ export namespace app {
 	    false_done: boolean;
 	    duration_ms: number;
 	    fail_reason?: string;
+	    runtime_pass?: boolean;
+	    desktop_screenshot?: string;
+	    mobile_screenshot?: string;
+	    runtime_failures?: string[];
+	    model_id?: string;
+	    provider?: string;
+	    context_tokens?: number;
+	    seed?: number;
+	    artifact_hash?: string;
+	    verifier_version?: string;
+	    stop_reason?: string;
+	    tool_trace?: TaskToolEvent[];
 	
 	    static createFrom(source: any = {}) {
 	        return new AgentEvalResult(source);
@@ -50,7 +84,37 @@ export namespace app {
 	        this.false_done = source["false_done"];
 	        this.duration_ms = source["duration_ms"];
 	        this.fail_reason = source["fail_reason"];
+	        this.runtime_pass = source["runtime_pass"];
+	        this.desktop_screenshot = source["desktop_screenshot"];
+	        this.mobile_screenshot = source["mobile_screenshot"];
+	        this.runtime_failures = source["runtime_failures"];
+	        this.model_id = source["model_id"];
+	        this.provider = source["provider"];
+	        this.context_tokens = source["context_tokens"];
+	        this.seed = source["seed"];
+	        this.artifact_hash = source["artifact_hash"];
+	        this.verifier_version = source["verifier_version"];
+	        this.stop_reason = source["stop_reason"];
+	        this.tool_trace = this.convertValues(source["tool_trace"], TaskToolEvent);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class AgentEvalReport {
 	    results: AgentEvalResult[];
@@ -125,6 +189,56 @@ export namespace app {
 	        this.updated_at = source["updated_at"];
 	        this.last_evidence = source["last_evidence"];
 	        this.terminal_session = source["terminal_session"];
+	    }
+	}
+	export class AudioHealth {
+	    enabled: boolean;
+	    overall: string;
+	    configured_tts: string;
+	    actual_tts: string;
+	    voice: string;
+	    stt_engine: string;
+	    stt_ready: boolean;
+	    worker_state: string;
+	    worker_pid: number;
+	    last_success: string;
+	    last_error: string;
+	    speak_replies: boolean;
+	    worker_hidden: boolean;
+	    stt_worker_state: string;
+	    stt_worker_pid: number;
+	    stt_model: string;
+	    stt_last_duration_ms: number;
+	    stt_last_audio_ms: number;
+	    stt_last_success: string;
+	    stt_last_error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AudioHealth(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.overall = source["overall"];
+	        this.configured_tts = source["configured_tts"];
+	        this.actual_tts = source["actual_tts"];
+	        this.voice = source["voice"];
+	        this.stt_engine = source["stt_engine"];
+	        this.stt_ready = source["stt_ready"];
+	        this.worker_state = source["worker_state"];
+	        this.worker_pid = source["worker_pid"];
+	        this.last_success = source["last_success"];
+	        this.last_error = source["last_error"];
+	        this.speak_replies = source["speak_replies"];
+	        this.worker_hidden = source["worker_hidden"];
+	        this.stt_worker_state = source["stt_worker_state"];
+	        this.stt_worker_pid = source["stt_worker_pid"];
+	        this.stt_model = source["stt_model"];
+	        this.stt_last_duration_ms = source["stt_last_duration_ms"];
+	        this.stt_last_audio_ms = source["stt_last_audio_ms"];
+	        this.stt_last_success = source["stt_last_success"];
+	        this.stt_last_error = source["stt_last_error"];
 	    }
 	}
 	export class BenchmarkCase {
@@ -373,6 +487,44 @@ export namespace app {
 	        this.configured_window = source["configured_window"];
 	    }
 	}
+	export class JHUTBrowserReport {
+	    pass: boolean;
+	    url: string;
+	    desktop_screenshot: string;
+	    mobile_screenshot: string;
+	    canvas_width: number;
+	    canvas_height: number;
+	    pixel_variance: number;
+	    pixel_coverage: number;
+	    orbit_changed: boolean;
+	    responsive: boolean;
+	    console_errors: string[];
+	    runtime_errors: string[];
+	    failures: string[];
+	    verifier_version: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JHUTBrowserReport(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pass = source["pass"];
+	        this.url = source["url"];
+	        this.desktop_screenshot = source["desktop_screenshot"];
+	        this.mobile_screenshot = source["mobile_screenshot"];
+	        this.canvas_width = source["canvas_width"];
+	        this.canvas_height = source["canvas_height"];
+	        this.pixel_variance = source["pixel_variance"];
+	        this.pixel_coverage = source["pixel_coverage"];
+	        this.orbit_changed = source["orbit_changed"];
+	        this.responsive = source["responsive"];
+	        this.console_errors = source["console_errors"];
+	        this.runtime_errors = source["runtime_errors"];
+	        this.failures = source["failures"];
+	        this.verifier_version = source["verifier_version"];
+	    }
+	}
 	export class LabStatus {
 	    agent_root: string;
 	    lab_id: string;
@@ -615,28 +767,6 @@ export namespace app {
 	        this.detail = source["detail"];
 	    }
 	}
-	export class TaskToolEvent {
-	    name: string;
-	    input?: string;
-	    result?: string;
-	    status: string;
-	    timestamp: string;
-	    duration_ms?: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new TaskToolEvent(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.input = source["input"];
-	        this.result = source["result"];
-	        this.status = source["status"];
-	        this.timestamp = source["timestamp"];
-	        this.duration_ms = source["duration_ms"];
-	    }
-	}
 	export class TaskRun {
 	    id: string;
 	    prompt: string;
@@ -744,6 +874,30 @@ export namespace app {
 		    }
 		    return a;
 		}
+	}
+	export class ServiceHealth {
+	    id: string;
+	    name: string;
+	    status: string;
+	    summary: string;
+	    detail?: string;
+	    updated_at: string;
+	    metadata?: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceHealth(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.summary = source["summary"];
+	        this.detail = source["detail"];
+	        this.updated_at = source["updated_at"];
+	        this.metadata = source["metadata"];
+	    }
 	}
 	export class SessionChatMessage {
 	    role: string;
@@ -882,6 +1036,22 @@ export namespace app {
 	        this.model_id = source["model_id"];
 	    }
 	}
+	export class SpeechAudio {
+	    data_uri: string;
+	    engine: string;
+	    voice: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SpeechAudio(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.data_uri = source["data_uri"];
+	        this.engine = source["engine"];
+	        this.voice = source["voice"];
+	    }
+	}
 	export class StorageItem {
 	    id: string;
 	    label: string;
@@ -965,6 +1135,26 @@ export namespace app {
 	        this.kind = source["kind"];
 	        this.likely_vpn = source["likely_vpn"];
 	        this.label = source["label"];
+	    }
+	}
+	export class VideoIngest {
+	    frames: string[];
+	    transcript: string;
+	    duration: number;
+	    frameCount: number;
+	    note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new VideoIngest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.frames = source["frames"];
+	        this.transcript = source["transcript"];
+	        this.duration = source["duration"];
+	        this.frameCount = source["frameCount"];
+	        this.note = source["note"];
 	    }
 	}
 
@@ -1332,6 +1522,36 @@ export namespace settings {
 	        this.tool_permissions = source["tool_permissions"];
 	    }
 	}
+	export class ReviewLoopConfig {
+	    enabled: boolean;
+	    only_autonomous: boolean;
+	    max_review_cycles: number;
+	    verify_gate: boolean;
+	    verify_commands: string[];
+	    verify_timeout_sec: number;
+	    completion_rails: boolean;
+	    completion_blocking: boolean;
+	    reviewer_pass: boolean;
+	    reviewer_max_tools: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReviewLoopConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.only_autonomous = source["only_autonomous"];
+	        this.max_review_cycles = source["max_review_cycles"];
+	        this.verify_gate = source["verify_gate"];
+	        this.verify_commands = source["verify_commands"];
+	        this.verify_timeout_sec = source["verify_timeout_sec"];
+	        this.completion_rails = source["completion_rails"];
+	        this.completion_blocking = source["completion_blocking"];
+	        this.reviewer_pass = source["reviewer_pass"];
+	        this.reviewer_max_tools = source["reviewer_max_tools"];
+	    }
+	}
 	export class AgentsConfig {
 	    mode_override: string;
 	    default_autonomy: string;
@@ -1342,6 +1562,7 @@ export namespace settings {
 	    require_plan: boolean;
 	    no_think_after_tool_calls: number;
 	    reasoning_effort: string;
+	    review_loop: ReviewLoopConfig;
 	    presets: Record<string, AgentModePreset>;
 	
 	    static createFrom(source: any = {}) {
@@ -1359,6 +1580,7 @@ export namespace settings {
 	        this.require_plan = source["require_plan"];
 	        this.no_think_after_tool_calls = source["no_think_after_tool_calls"];
 	        this.reasoning_effort = source["reasoning_effort"];
+	        this.review_loop = this.convertValues(source["review_loop"], ReviewLoopConfig);
 	        this.presets = this.convertValues(source["presets"], AgentModePreset, true);
 	    }
 	
@@ -1379,6 +1601,40 @@ export namespace settings {
 		    }
 		    return a;
 		}
+	}
+	export class AudioConfig {
+	    enabled: boolean;
+	    mode: string;
+	    stt_engine: string;
+	    tts_engine: string;
+	    voice: string;
+	    speed: number;
+	    input_device: string;
+	    vad_threshold: number;
+	    barge_in: boolean;
+	    speak_replies: boolean;
+	    speak_tool_notes: boolean;
+	    clause_min_chars: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AudioConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.mode = source["mode"];
+	        this.stt_engine = source["stt_engine"];
+	        this.tts_engine = source["tts_engine"];
+	        this.voice = source["voice"];
+	        this.speed = source["speed"];
+	        this.input_device = source["input_device"];
+	        this.vad_threshold = source["vad_threshold"];
+	        this.barge_in = source["barge_in"];
+	        this.speak_replies = source["speak_replies"];
+	        this.speak_tool_notes = source["speak_tool_notes"];
+	        this.clause_min_chars = source["clause_min_chars"];
+	    }
 	}
 	export class LabProfile {
 	    id: string;
@@ -1574,6 +1830,10 @@ export namespace settings {
 	    display_method: string;
 	    max_display_width: number;
 	    wsl_path_translate: boolean;
+	    video_enabled: boolean;
+	    video_max_frames: number;
+	    video_frame_width: number;
+	    video_transcribe: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ImageConfig(source);
@@ -1586,6 +1846,10 @@ export namespace settings {
 	        this.display_method = source["display_method"];
 	        this.max_display_width = source["max_display_width"];
 	        this.wsl_path_translate = source["wsl_path_translate"];
+	        this.video_enabled = source["video_enabled"];
+	        this.video_max_frames = source["video_max_frames"];
+	        this.video_frame_width = source["video_frame_width"];
+	        this.video_transcribe = source["video_transcribe"];
 	    }
 	}
 	
@@ -1742,6 +2006,7 @@ export namespace settings {
 		    return a;
 		}
 	}
+	
 	
 	export class UIConfig {
 	    theme: string;
@@ -1953,6 +2218,7 @@ export namespace settings {
 	    skills: SkillsConfig;
 	    image: ImageConfig;
 	    telegram: TelegramConfig;
+	    audio: AudioConfig;
 	    ui: UIConfig;
 	    logging: LoggingConfig;
 	    log_level: string;
@@ -1972,6 +2238,7 @@ export namespace settings {
 	        this.skills = this.convertValues(source["skills"], SkillsConfig);
 	        this.image = this.convertValues(source["image"], ImageConfig);
 	        this.telegram = this.convertValues(source["telegram"], TelegramConfig);
+	        this.audio = this.convertValues(source["audio"], AudioConfig);
 	        this.ui = this.convertValues(source["ui"], UIConfig);
 	        this.logging = this.convertValues(source["logging"], LoggingConfig);
 	        this.log_level = source["log_level"];

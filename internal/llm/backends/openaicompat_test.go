@@ -611,6 +611,60 @@ func TestActualContextLengthReadsLlamaCppProps(t *testing.T) {
 	}
 }
 
+func TestActualContextLengthReadsInferenceBridgeStats(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models/stats" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"requested_model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
+			"active_model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
+			"matches_active_model": true,
+			"state": "Loaded",
+			"progress": {"stage": "loaded", "done": true},
+			"stats": {
+				"model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
+				"context_size": 54016
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("llamacpp", server.URL+"/v1", "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf", 45000, "", true)
+	if got := client.ActualContextLength(context.Background()); got != 54016 {
+		t.Fatalf("ActualContextLength for InferenceBridge stats = %d, want 54016", got)
+	}
+}
+
+func TestActualContextLengthIgnoresInferenceBridgeStatsForDifferentModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models/stats":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"active_model": "other-model.gguf",
+				"matches_active_model": false,
+				"state": "Loaded",
+				"progress": {"stage": "loaded", "done": true},
+				"stats": {"model": "other-model.gguf", "context_size": 54016}
+			}`))
+		case "/props":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"default_generation_settings":{"n_ctx":32768}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("llamacpp", server.URL+"/v1", "wanted-model.gguf", 32768, "", true)
+	if got := client.ActualContextLength(context.Background()); got != 0 {
+		t.Fatalf("ActualContextLength for mismatched InferenceBridge stats = %d, want 0", got)
+	}
+}
+
 func TestActualContextLengthReturnsZeroWhenModelNotLoaded(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

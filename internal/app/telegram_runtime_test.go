@@ -3,11 +3,15 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"mauler/internal/audio"
 	"mauler/internal/channelbus"
 	"mauler/internal/llm"
 	"mauler/internal/settings"
@@ -18,6 +22,8 @@ import (
 type fakeTelegramAPI struct {
 	me          telegram.User
 	sent        []string
+	edits       []string
+	voices      [][]byte
 	deleted     []string
 	files       map[string]telegram.File
 	downloads   map[string][]byte
@@ -40,6 +46,16 @@ func (f *fakeTelegramAPI) DeleteWebhook(ctx context.Context, dropPendingUpdates 
 func (f *fakeTelegramAPI) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
 	f.sent = append(f.sent, text)
 	return int64(len(f.sent)), nil
+}
+
+func (f *fakeTelegramAPI) EditMessage(ctx context.Context, chatID, messageID int64, text string) error {
+	f.edits = append(f.edits, fmt.Sprintf("%d:%d:%s", chatID, messageID, text))
+	return nil
+}
+
+func (f *fakeTelegramAPI) SendVoice(ctx context.Context, chatID int64, data []byte, filename, mimeType string) error {
+	f.voices = append(f.voices, append([]byte(nil), data...))
+	return nil
 }
 
 func (f *fakeTelegramAPI) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
@@ -79,6 +95,7 @@ func newTelegramRuntimeForTest(t *testing.T, cfg settings.TelegramConfig, fake *
 		client:        fake,
 		cfg:           cfg,
 		lastProgress:  map[int64]time.Time{},
+		progressIDs:   map[int64]int64{},
 		progressChats: map[int64]bool{},
 	}
 }
@@ -145,16 +162,202 @@ func TestTelegramRuntimeRequiresMentionOutsidePrivateChats(t *testing.T) {
 }
 
 func TestTelegramRuntimeVoiceMessageDownloadsAndRoutes(t *testing.T) {
+	client := &sideChatRecordingClient{reply: "llm side chat reply"}
 	oldBuilder := buildClientForAgent
+	oldTTS := synthesizeTelegramVoice
+	oldLocalWhisper := runLocalWhisperTranscription
 	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
-		return sideChatEchoClient{}, nil
+		return client, nil
 	}
-	t.Cleanup(func() { buildClientForAgent = oldBuilder })
+	synthesizeTelegramVoice = func(ctx context.Context, text string, opts audio.TTSOptions) ([]byte, error) {
+		return []byte("voice"), nil
+	}
+	runLocalWhisperTranscription = func(ctx context.Context, path string) string {
+		return "spoken hello from telegram"
+	}
+	t.Cleanup(func() {
+		buildClientForAgent = oldBuilder
+		synthesizeTelegramVoice = oldTTS
+		runLocalWhisperTranscription = oldLocalWhisper
+	})
+	stt := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected transcription method: %s", r.Method)
+		}
+		if strings.TrimSpace(r.Header.Get("Content-Type")) == "" {
+			t.Fatal("missing transcription content-type")
+		}
+		_, _ = w.Write([]byte(`{"text":"spoken hello from telegram"}`))
+	}))
+	t.Cleanup(stt.Close)
 	fake := &fakeTelegramAPI{
 		files:     map[string]telegram.File{"voice-1": {FileID: "voice-1", FilePath: "voice/file.ogg"}},
 		downloads: map[string][]byte{"voice/file.ogg": []byte("ogg-data")},
 	}
-	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{}, fake)
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{TranscriptionMode: "local", TranscriptionURL: stt.URL}, fake)
+	rt.app.profiles = &settings.ProfilesFile{Profiles: map[string]settings.Profile{"qwen3.6-nothink": {ModelID: "fake", Backend: "fake"}}}
+
+	rt.handleMessage(context.Background(), telegram.Message{
+		MessageID: 1,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Voice:     &telegram.Voice{FileID: "voice-1", MimeType: "audio/ogg"},
+	})
+
+	if len(fake.sent) != 0 {
+		t.Fatalf("voice chat should send voice-only when synthesis succeeds, got text replies: %#v", fake.sent)
+	}
+	if !strings.Contains(fmt.Sprintf("%#v", client.lastReq.Messages), "spoken hello from telegram") {
+		t.Fatalf("transcript was not sent to side-chat model: %#v", client.lastReq.Messages)
+	}
+	if len(fake.voices) != 1 || string(fake.voices[0]) != "voice" {
+		t.Fatalf("expected voice reply for voice message, got %#v", fake.voices)
+	}
+}
+
+func TestTelegramRuntimeVoiceMessageWithoutTranscriptionURLRepliesWithNotice(t *testing.T) {
+	calledModel := false
+	oldBuilder := buildClientForAgent
+	oldLocalWhisper := runLocalWhisperTranscription
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		calledModel = true
+		return sideChatEchoClient{}, nil
+	}
+	runLocalWhisperTranscription = func(ctx context.Context, path string) string { return "" }
+	t.Cleanup(func() {
+		buildClientForAgent = oldBuilder
+		runLocalWhisperTranscription = oldLocalWhisper
+	})
+	fake := &fakeTelegramAPI{
+		files:     map[string]telegram.File{"voice-1": {FileID: "voice-1", FilePath: "voice/file.ogg"}},
+		downloads: map[string][]byte{"voice/file.ogg": []byte("ogg-data")},
+	}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{TranscriptionMode: "local"}, fake)
+	rt.app.profiles = &settings.ProfilesFile{Profiles: map[string]settings.Profile{"qwen3.6-nothink": {ModelID: "fake", Backend: "fake"}}}
+
+	rt.handleMessage(context.Background(), telegram.Message{
+		MessageID: 1,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Voice:     &telegram.Voice{FileID: "voice-1", MimeType: "audio/ogg"},
+	})
+
+	if calledModel {
+		t.Fatal("voice transcription notice should not be routed through the model")
+	}
+	if len(fake.sent) != 1 || !strings.Contains(fake.sent[0], "local Whisper transcription failed") {
+		t.Fatalf("expected direct transcription notice, got %#v", fake.sent)
+	}
+}
+
+func TestTelegramRuntimePhotoMessageDownloadsAndRoutes(t *testing.T) {
+	fake := &fakeTelegramAPI{
+		files:     map[string]telegram.File{"photo-large": {FileID: "photo-large", FilePath: "photos/photo.jpg"}},
+		downloads: map[string][]byte{"photos/photo.jpg": []byte("jpeg-data")},
+	}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{BotUsername: "TheMaulerBot", RequireMention: true}, fake)
+
+	text, attachments := rt.messageTextAndAttachments(context.Background(), telegram.Message{
+		MessageID: 7,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Caption:   "@TheMaulerBot test image",
+		Photo: []telegram.PhotoSize{
+			{FileID: "photo-small", Width: 90, Height: 90},
+			{FileID: "photo-large", Width: 1280, Height: 720},
+		},
+	})
+
+	if !strings.Contains(text, "test image") {
+		t.Fatalf("caption was not preserved: %q", text)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("expected one image attachment, got %#v", attachments)
+	}
+	att := attachments[0]
+	if att.Kind != "image" || att.FileID != "photo-large" || att.ContentType != "image/jpeg" || att.Path == "" {
+		t.Fatalf("bad image attachment: %#v", att)
+	}
+	data, err := os.ReadFile(filepath.FromSlash(att.Path))
+	if err != nil || string(data) != "jpeg-data" {
+		t.Fatalf("saved image mismatch data=%q err=%v", string(data), err)
+	}
+}
+
+func TestTelegramRuntimeVoiceMessageUsesLocalWhisperFallback(t *testing.T) {
+	client := &sideChatRecordingClient{reply: "heard local voice"}
+	oldBuilder := buildClientForAgent
+	oldLocalWhisper := runLocalWhisperTranscription
+	oldTTS := synthesizeTelegramVoice
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		return client, nil
+	}
+	runLocalWhisperTranscription = func(ctx context.Context, path string) string {
+		if strings.TrimSpace(path) == "" {
+			t.Fatal("local whisper received empty audio path")
+		}
+		return "local whisper transcript"
+	}
+	synthesizeTelegramVoice = func(ctx context.Context, text string, opts audio.TTSOptions) ([]byte, error) {
+		if !strings.Contains(text, "heard local voice") {
+			t.Fatalf("voice reply synthesized wrong text: %q", text)
+		}
+		return []byte("ogg-voice"), nil
+	}
+	t.Cleanup(func() {
+		buildClientForAgent = oldBuilder
+		runLocalWhisperTranscription = oldLocalWhisper
+		synthesizeTelegramVoice = oldTTS
+	})
+	fake := &fakeTelegramAPI{
+		files:     map[string]telegram.File{"voice-1": {FileID: "voice-1", FilePath: "voice/file.ogg"}},
+		downloads: map[string][]byte{"voice/file.ogg": []byte("ogg-data")},
+	}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{TranscriptionMode: "local"}, fake)
+	rt.app.profiles = &settings.ProfilesFile{Profiles: map[string]settings.Profile{"qwen3.6-nothink": {ModelID: "fake", Backend: "fake"}}}
+
+	rt.handleMessage(context.Background(), telegram.Message{
+		MessageID: 1,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Voice:     &telegram.Voice{FileID: "voice-1", MimeType: "audio/ogg"},
+	})
+
+	if len(fake.sent) != 0 {
+		t.Fatalf("voice chat should send voice-only when synthesis succeeds, got text replies: %#v", fake.sent)
+	}
+	if !strings.Contains(fmt.Sprintf("%#v", client.lastReq.Messages), "local whisper transcript") {
+		t.Fatalf("local transcript was not sent to side-chat model: %#v", client.lastReq.Messages)
+	}
+	if len(fake.voices) != 1 || string(fake.voices[0]) != "ogg-voice" {
+		t.Fatalf("expected one voice reply, got %#v", fake.voices)
+	}
+}
+
+func TestTelegramRuntimeVoiceReplyFailureSendsSetupNotice(t *testing.T) {
+	client := &sideChatRecordingClient{reply: "heard you"}
+	oldBuilder := buildClientForAgent
+	oldLocalWhisper := runLocalWhisperTranscription
+	oldTTS := synthesizeTelegramVoice
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		return client, nil
+	}
+	runLocalWhisperTranscription = func(ctx context.Context, path string) string {
+		return "voice transcript"
+	}
+	synthesizeTelegramVoice = func(ctx context.Context, text string, opts audio.TTSOptions) ([]byte, error) {
+		return nil, fmt.Errorf("kokoro missing")
+	}
+	t.Cleanup(func() {
+		buildClientForAgent = oldBuilder
+		runLocalWhisperTranscription = oldLocalWhisper
+		synthesizeTelegramVoice = oldTTS
+	})
+	fake := &fakeTelegramAPI{
+		files:     map[string]telegram.File{"voice-1": {FileID: "voice-1", FilePath: "voice/file.ogg"}},
+		downloads: map[string][]byte{"voice/file.ogg": []byte("ogg-data")},
+	}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{TranscriptionMode: "local"}, fake)
 	rt.app.profiles = &settings.ProfilesFile{Profiles: map[string]settings.Profile{"qwen3.6-nothink": {ModelID: "fake", Backend: "fake"}}}
 
 	rt.handleMessage(context.Background(), telegram.Message{
@@ -165,10 +368,69 @@ func TestTelegramRuntimeVoiceMessageDownloadsAndRoutes(t *testing.T) {
 	})
 
 	if len(fake.sent) != 1 {
-		t.Fatalf("expected side-chat reply for voice message, got %d", len(fake.sent))
+		t.Fatalf("expected voice setup notice, got %#v", fake.sent)
 	}
-	if !strings.Contains(fake.sent[0], "llm side chat reply") {
-		t.Fatalf("voice message was not routed through LLM side chat: %q", fake.sent[0])
+	if !strings.Contains(fake.sent[0], "Voice reply failed") || !strings.Contains(fake.sent[0], "setup.ps1") {
+		t.Fatalf("expected voice failure setup notice, got %#v", fake.sent)
+	}
+	if len(fake.voices) != 0 {
+		t.Fatalf("voice send should not be attempted after synthesis failure, got %#v", fake.voices)
+	}
+}
+
+func TestTelegramRuntimeVoiceModeSticksUntilTypedText(t *testing.T) {
+	client := &sideChatRecordingClient{reply: "reply text"}
+	oldBuilder := buildClientForAgent
+	oldLocalWhisper := runLocalWhisperTranscription
+	oldTTS := synthesizeTelegramVoice
+	buildClientForAgent = func(settings.Profile) (llm.Client, error) {
+		return client, nil
+	}
+	runLocalWhisperTranscription = func(ctx context.Context, path string) string {
+		return "voice transcript"
+	}
+	synthesizeTelegramVoice = func(ctx context.Context, text string, opts audio.TTSOptions) ([]byte, error) {
+		return []byte("ogg-voice"), nil
+	}
+	t.Cleanup(func() {
+		buildClientForAgent = oldBuilder
+		runLocalWhisperTranscription = oldLocalWhisper
+		synthesizeTelegramVoice = oldTTS
+	})
+	fake := &fakeTelegramAPI{
+		files:     map[string]telegram.File{"voice-1": {FileID: "voice-1", FilePath: "voice/file.ogg"}},
+		downloads: map[string][]byte{"voice/file.ogg": []byte("ogg-data")},
+	}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{TranscriptionMode: "local"}, fake)
+	rt.app.profiles = &settings.ProfilesFile{Profiles: map[string]settings.Profile{"qwen3.6-nothink": {ModelID: "fake", Backend: "fake"}}}
+
+	rt.handleMessage(context.Background(), telegram.Message{
+		MessageID: 1,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Voice:     &telegram.Voice{FileID: "voice-1", MimeType: "audio/ogg"},
+	})
+	rt.handleMessage(context.Background(), telegram.Message{
+		MessageID: 2,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Voice:     &telegram.Voice{FileID: "voice-1", MimeType: "audio/ogg"},
+	})
+	if len(fake.sent) != 0 || len(fake.voices) != 2 {
+		t.Fatalf("voice session should produce two voice-only replies, sent=%#v voices=%#v", fake.sent, fake.voices)
+	}
+
+	rt.handleMessage(context.Background(), telegram.Message{
+		MessageID: 3,
+		From:      &telegram.User{ID: 100, Username: "rich"},
+		Chat:      telegram.Chat{ID: 42, Type: "private"},
+		Text:      "back to typing",
+	})
+	if len(fake.voices) != 2 {
+		t.Fatalf("typed text should exit voice mode, got extra voices=%#v", fake.voices)
+	}
+	if len(fake.sent) != 1 || !strings.Contains(fake.sent[0], "reply text") {
+		t.Fatalf("typed text should receive text reply, got %#v", fake.sent)
 	}
 }
 
@@ -208,5 +470,63 @@ func TestTelegramRuntimeSkipsDuplicateMessageInSession(t *testing.T) {
 
 	if len(fake.sent) != 1 {
 		t.Fatalf("duplicate Telegram message should only be answered once, got %d replies: %#v", len(fake.sent), fake.sent)
+	}
+}
+
+func TestTelegramRunProgressMessageFormatsModelLoad(t *testing.T) {
+	detail := strings.Join([]string{
+		"llamacpp",
+		"http://127.0.0.1:8800/v1",
+		"Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
+		"45000",
+		"",
+	}, "\x00")
+
+	got := formatTelegramRunProgressMessage("model_loading", detail)
+	for _, want := range []string{
+		"Working - in progress",
+		"Agent - Mauler",
+		"Now - loading the model",
+		"Backend: llamacpp",
+		"Model: Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
+		"Context: 45000 tokens",
+		"Endpoint: http://127.0.0.1:8800/v1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress message missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "\x00") || strings.Contains(got, "Run model_loading") {
+		t.Fatalf("progress message leaked raw internals: %q", got)
+	}
+}
+
+func TestTelegramRunProgressMessageFormatsLoopGuard(t *testing.T) {
+	got := formatTelegramRunProgressMessage("blocked", "Loop circuit-breaker paused the run after a corrective prompt because loop-health stayed critical: stability_score=14 repeated_tool_inputs=1 repeated_identical_outcomes=0 repeated_skips=0 tool_errors=6 tool_cycle_detected=false tool_cycle_period=0.")
+	for _, want := range []string{
+		"Working - blocked",
+		"Now - blocked by loop guard",
+		"stability score: 14",
+		"repeated tool inputs: 1",
+		"tool errors: 6",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("blocked message missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestTelegramProgressUpdateEditsExistingMessage(t *testing.T) {
+	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: true, ProgressIntervalS: 1}, fake)
+
+	rt.sendTelegramProgressUpdate(context.Background(), 42, "thinking", "first")
+	rt.sendTelegramProgressUpdate(context.Background(), 42, "testing", "second")
+
+	if len(fake.sent) != 1 {
+		t.Fatalf("progress should create one status message, got sends: %#v", fake.sent)
+	}
+	if len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "42:1:second") {
+		t.Fatalf("progress should edit first status message, got edits: %#v", fake.edits)
 	}
 }

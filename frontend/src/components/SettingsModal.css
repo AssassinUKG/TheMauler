@@ -188,6 +188,11 @@
   font-weight: 600;
 }
 
+.audio-health-card{margin:0 0 16px;padding:13px;border:1px solid var(--border);border-left:3px solid var(--text-dim);border-radius:8px;background:var(--c-card)}
+.audio-health-card.audio-health-ready{border-left-color:var(--accent)}.audio-health-card.audio-health-degraded{border-left-color:#f59e0b}.audio-health-card.audio-health-error{border-left-color:#ef4444}.audio-health-card.audio-health-disabled{opacity:.72}
+.audio-health-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.audio-health-head>div:first-child{display:grid;gap:3px}.audio-health-head span,.audio-health-grid span{color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.audio-health-head strong{color:var(--text-bright);font-size:15px;text-transform:capitalize}.audio-health-actions{display:flex;gap:7px}.audio-health-actions button{border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--text);padding:6px 9px}.audio-health-actions button:hover{border-color:var(--accent)}
+.audio-health-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.audio-health-grid>div{display:grid;gap:4px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg2)}.audio-health-grid strong{overflow:hidden;text-overflow:ellipsis;color:var(--text);font-size:11px}.audio-health-error{margin-top:9px;padding:8px;border-radius:5px;background:rgba(239,68,68,.1);color:#fca5a5;font-size:11px;word-break:break-word}
+
 /* Field layout */
 .field {
   display: flex;

@@ -26,6 +26,7 @@
   font-size: 17px;
   letter-spacing: 0;
 }
+.projects-header .project-kicker{display:block;margin-bottom:4px}.projects-header-actions .project-new-box{background:var(--btn-primary,var(--accent));color:var(--btn-primary-text,#fff);border-color:transparent;font-weight:800}
 
 .projects-header p {
   margin: 4px 0 0;

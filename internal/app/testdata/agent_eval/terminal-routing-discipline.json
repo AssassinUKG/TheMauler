@@ -1,0 +1,11 @@
+{
+  "name": "terminal-routing-discipline",
+  "prompt": "Target: 10.129.26.26. Explain which tool should be used for each action: terminal_send for an already-open interactive shell command, shell/http_probe for independent curl/nmap/web requests, and terminal_read only to inspect live PTY state. Keep it concise.",
+  "workspace": {
+    ".mauler/project-recap.md": "No live interactive session is confirmed. Independent HTTP probes should not be typed into a listener terminal.\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 5,
+  "expect_status": "done",
+  "max_auto_continues": 2
+}

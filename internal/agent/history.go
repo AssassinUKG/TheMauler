@@ -425,12 +425,17 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
 			resultIDs := followingToolResultIDs(merged, i+1)
 			kept := make([]llm.ToolCallDef, 0, len(msg.ToolCalls))
+			trailing := i == len(merged)-1
 			for _, tc := range msg.ToolCalls {
 				if tc.ID != "" && resultIDs[tc.ID] {
 					kept = append(kept, tc)
 					continue
 				}
-				actions = append(actions, RepairAction{Phase: 4, Action: "strip_unmatched_tool_call", Index: i, Detail: firstNonEmpty(tc.ID, tc.Function.Name)})
+				if trailing {
+					actions = append(actions, RepairAction{Phase: 7, Action: "strip_trailing_tool_call", Index: i, Detail: firstNonEmpty(tc.ID, tc.Function.Name)})
+				} else {
+					actions = append(actions, RepairAction{Phase: 4, Action: "strip_unmatched_tool_call", Index: i, Detail: firstNonEmpty(tc.ID, tc.Function.Name)})
+				}
 			}
 			if len(kept) == 0 {
 				msg.ToolCalls = nil

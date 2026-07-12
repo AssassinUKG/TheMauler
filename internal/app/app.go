@@ -15,6 +15,7 @@ import (
 	"html"
 	"io"
 	"mauler/internal/agent"
+	"mauler/internal/audio"
 	"mauler/internal/channelbus"
 	"mauler/internal/ledger"
 	"mauler/internal/llm"
@@ -66,6 +67,7 @@ type App struct {
 	loadMu sync.Mutex // serialises model-load/unload calls; never held alongside mu
 
 	agentRunning bool
+	evalRunning  bool
 	cancelAgent  context.CancelFunc
 	confirmCh    chan bool // non-nil when awaiting confirmation
 	stopReason   string
@@ -252,6 +254,9 @@ func (a *App) OnStartup(ctx context.Context) {
 	a.mu.Unlock()
 	configureWorkingDir(&cfg)
 	a.restartTelegramRuntime(cfg.Telegram)
+	if cfg.Audio.Enabled && strings.EqualFold(firstNonEmpty(cfg.Audio.STTEngine, "whisper"), "whisper") {
+		audio.WarmWhisper(audio.ResolveWhisperPython())
+	}
 }
 
 // OnDomReady is called when the frontend DOM is ready.
@@ -259,6 +264,7 @@ func (a *App) OnDomReady(_ context.Context) {}
 
 // OnShutdown is called before the app exits.
 func (a *App) OnShutdown(_ context.Context) {
+	audio.ShutdownWorkers()
 	a.mu.Lock()
 	if a.cancelAgent != nil {
 		a.cancelAgent()
@@ -294,6 +300,14 @@ func (a *App) GetSettings() settings.Settings {
 
 // UpdateSettings saves new settings and applies them.
 func (a *App) UpdateSettings(cfg settings.Settings) error {
+	processStateMu.Lock()
+	defer processStateMu.Unlock()
+	a.mu.Lock()
+	if a.evalRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("cannot update settings while Agent Eval is running")
+	}
+	a.mu.Unlock()
 	var workspaceChanged bool
 	requestedWorkspace := strings.TrimSpace(cfg.Context.WorkspaceDir)
 	if requestedWorkspace != "" {
@@ -311,9 +325,9 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		oldWD, _ := os.Getwd()
 		if !sameFilesystemPath(oldWD, abs) {
 			a.mu.Lock()
-			if a.agentRunning {
+			if a.agentRunning || a.evalRunning {
 				a.mu.Unlock()
-				return fmt.Errorf("cannot change workspace while an agent run is active")
+				return fmt.Errorf("cannot change workspace while an agent run or eval is active")
 			}
 			a.mu.Unlock()
 			if err := os.Chdir(abs); err != nil {
@@ -351,6 +365,11 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		a.emit("mauler:workspace_changed", cfg.Context.WorkspaceDir)
 	}
 	a.restartTelegramRuntime(cfg.Telegram)
+	if cfg.Audio.Enabled && strings.EqualFold(firstNonEmpty(cfg.Audio.STTEngine, "whisper"), "whisper") {
+		audio.WarmWhisper(audio.ResolveWhisperPython())
+	} else {
+		audio.StopWhisper()
+	}
 	return nil
 }
 
@@ -726,6 +745,10 @@ func (a *App) ClearTodos() error {
 // Attachments are text/file payloads from pasted text or dropped files.
 func (a *App) SendMessage(text string, images []string, attachments []ChatAttachment) error {
 	a.mu.Lock()
+	if a.evalRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("agent eval is running; wait for it to finish before starting a task")
+	}
 	if a.agentRunning {
 		a.mu.Unlock()
 		return fmt.Errorf("agent is already running")
@@ -1194,6 +1217,49 @@ func (a *App) StopAgent() {
 	}
 }
 
+// EmergencyStop cancels every user-facing AI/action lane that can keep doing work.
+func (a *App) EmergencyStop() map[string]int {
+	stopped := map[string]int{
+		"agent":    0,
+		"artifact": 0,
+		"queue":    0,
+		"terminal": 0,
+	}
+	a.mu.Lock()
+	if a.cancelAgent != nil {
+		a.stopReason = "user_stopped"
+		a.stopDetail = "The user requested an emergency stop."
+		a.cancelAgent()
+		stopped["agent"] = 1
+	}
+	if a.cancelArtifact != nil {
+		a.cancelArtifact()
+		stopped["artifact"] = 1
+	}
+	a.mu.Unlock()
+
+	stopped["queue"] = a.ensureChannelQueue().CancelActive()
+
+	a.shellMu.Lock()
+	sess := a.shellSess
+	a.shellMu.Unlock()
+	if sess != nil {
+		select {
+		case sess.interrupt <- struct{}{}:
+			stopped["terminal"] = 1
+		default:
+		}
+	}
+
+	a.recordLedger(ledger.Event{
+		Kind:    "emergency_stop",
+		Source:  "control",
+		Status:  "requested",
+		Message: fmt.Sprintf("agent=%d artifact=%d queue=%d terminal=%d", stopped["agent"], stopped["artifact"], stopped["queue"], stopped["terminal"]),
+	})
+	return stopped
+}
+
 // InterruptShellTool interrupts only the current shared-terminal tool command.
 // Unlike StopAgent, this leaves the agent run alive so the model can receive a
 // recoverable shell-tool error and decide what to do next.
@@ -1386,10 +1452,12 @@ func (a *App) GetWorkingDir() string {
 
 // SetWorkingDir changes the working directory for the agent and file tree.
 func (a *App) SetWorkingDir(dir string) error {
+	processStateMu.Lock()
+	defer processStateMu.Unlock()
 	a.mu.Lock()
-	if a.agentRunning {
+	if a.agentRunning || a.evalRunning {
 		a.mu.Unlock()
-		return fmt.Errorf("cannot change workspace while an agent run is active")
+		return fmt.Errorf("cannot change workspace while an agent run or eval is active")
 	}
 	a.mu.Unlock()
 
@@ -1943,6 +2011,10 @@ func (a *App) EncodeFileBase64(path string) (string, error) {
 // RunArtifact executes code from the artifact pane and streams stdout/stderr.
 func (a *App) RunArtifact(lang, code string) error {
 	a.mu.Lock()
+	if a.evalRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("agent eval is running; wait for it to finish before running an artifact")
+	}
 	if a.artifactRunning {
 		a.mu.Unlock()
 		return fmt.Errorf("artifact is already running")
@@ -2467,10 +2539,23 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	malformedToolContinues := 0    // consecutive retries caused by unparsed inline tool markup
 	totalToolCallsMade := 0        // cumulative tool calls across all turns this task
 	preOutputInferenceRetries := 0 // bounded retries for backend failures before any model output
+	reviewCyclesUsed := 0
 	escalationsUsed := 0
 	currentEffort := configuredReasoningEffort(*cfg, mode)
 	reasoningEffortChanges := 0
 	run.addEvent("reasoning_effort", "Initial reasoning effort", currentEffort)
+	if currentEffort == "high" && !profile.Thinking {
+		a.setRunState(&run, "planning", "Running a short no-tools thinking pass before execution.")
+		plan, sibling, planErr := a.runHighEffortPlanningPass(ctx, client, profile, firstUserText)
+		if planErr != nil {
+			run.addEvent("reasoning_plan", "High-effort planning pass unavailable; continuing no-think", planErr.Error())
+		} else if plan != "" {
+			a.mu.Lock()
+			a.history.Append(llm.NewTextMessage(llm.RoleSystem, "Private high-effort planning context (advisory, not evidence):\n"+plan+"\n\nExecute with tools now using the selected no-thinking profile. Verify every material claim."))
+			a.mu.Unlock()
+			run.addEvent("reasoning_plan", "Injected short thinking-sibling plan before no-think execution", fmt.Sprintf("profile=%s model=%s chars=%d", sibling.Name, sibling.ModelID, len(plan)))
+		}
+	}
 	toolBudgetSummaryRequested := false
 	timeBudgetSummaryRequested := false
 	docRecoveryRequested := false
@@ -2488,6 +2573,8 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	persistNudgeSent := false  // one-time reminder to save evidence before context is dropped
 	footholdNudgeSent := false // one-time reminder to stop re-exploiting once code execution is established
 	listenerNudgeSent := false // one-time reminder to start the listener before a reverse-shell payload
+	loopBreakerArmed := false
+	loopBreakerToolCount := 0
 	const maxAutoContinues = 8
 	const maxMalformedToolContinues = 2
 	logCfg := cfg.Logging
@@ -2500,6 +2587,33 @@ agentLoop:
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+		loopMetrics := buildLoopMetrics(run)
+		switch decideLoopCircuitBreaker(loopMetrics, loopBreakerArmed, loopBreakerToolCount, len(run.Tools)) {
+		case loopCircuitBreakerInject:
+			loopBreakerArmed = true
+			loopBreakerToolCount = len(run.Tools)
+			prompt := loopCircuitBreakerPrompt(loopMetrics)
+			if currentEffort != "high" {
+				currentEffort = "high"
+				run.addEvent("reasoning_effort", "Loop circuit-breaker raised reasoning effort", currentEffort)
+			}
+			a.mu.Lock()
+			a.history.Append(llm.NewTextMessage(llm.RoleSystem, prompt))
+			a.mu.Unlock()
+			a.setRunState(&run, "recovering", "Loop-health critical; forcing a different action.")
+			run.addEvent("loop_circuit_breaker", "Injected loop-health corrective prompt", prompt)
+		case loopCircuitBreakerPause:
+			detail := loopCircuitBreakerStopDetail(loopMetrics)
+			run.stopTerminal("loop_circuit_breaker", detail)
+			run.addEvent("loop_circuit_breaker", "Auto-paused stalled run", detail)
+			a.setRunState(&run, "blocked", detail)
+			finalStatus = "stopped"
+			break agentLoop
+		case loopCircuitBreakerReset:
+			loopBreakerArmed = false
+			loopBreakerToolCount = 0
+			run.addEvent("loop_circuit_breaker", "Loop-health recovered", loopMetrics.Detail())
 		}
 
 		toolBudgetExhausted := agentToolBudgetExhausted(cfg.Agents, len(run.Tools))
@@ -2755,6 +2869,7 @@ agentLoop:
 
 		var rawTextBuf strings.Builder
 		emittedVisibleText := ""
+		emittedContentThinkingText := ""
 		var thinkBuf strings.Builder
 		var toolCalls []llm.ToolCallDef
 		var usage *llm.Usage
@@ -2786,13 +2901,22 @@ agentLoop:
 				wasTruncated = true
 				run.addEvent("truncated", "Model hit token limit", "finish_reason=length")
 			}
-			if delta.Thinking != "" && req.EnableThinking {
+			if delta.Thinking != "" {
 				thinkBuf.WriteString(delta.Thinking)
 				a.emit("mauler:thinking", delta.Thinking)
 			}
 			if delta.Content != "" {
 				rawTextBuf.WriteString(delta.Content)
-				visible := sanitizeVisibleModelText(rawTextBuf.String())
+				visibleRaw, contentThinking := splitModelTextForDisplay(rawTextBuf.String())
+				if strings.HasPrefix(contentThinking, emittedContentThinkingText) {
+					thinkChunk := contentThinking[len(emittedContentThinkingText):]
+					emittedContentThinkingText = contentThinking
+					if thinkChunk != "" {
+						thinkBuf.WriteString(thinkChunk)
+						a.emit("mauler:thinking", thinkChunk)
+					}
+				}
+				visible := sanitizeVisibleModelText(visibleRaw)
 				switch {
 				case visible == emittedVisibleText:
 				case strings.HasPrefix(visible, emittedVisibleText):
@@ -2822,14 +2946,15 @@ agentLoop:
 		// resets the streak; repeats auto-fall back to a stable decode (see
 		// noteSpecTurn). Cheap and off the lock.
 		if strings.TrimSpace(profile.SpecType) != "" {
-			suspect := wasTruncated && req.EnableThinking && thinkBuf.Len() > 0 &&
+			suspect := wasTruncated && thinkBuf.Len() > 0 &&
 				len(toolCalls) == 0 && len(strings.TrimSpace(emittedVisibleText)) < 24
 			a.noteSpecTurn(cfg.ActiveProfile, suspect)
 		}
 
 		rawText := rawTextBuf.String()
 		textBuf := strings.Builder{}
-		textBuf.WriteString(sanitizeVisibleModelText(rawText))
+		visibleRawText, _ := splitModelTextForDisplay(rawText)
+		textBuf.WriteString(sanitizeVisibleModelText(visibleRawText))
 		nativeToolCallCount := len(toolCalls)
 		if nativeToolCallCount > 0 {
 			run.addEvent("tool_protocol_native", "Backend returned structured tool_calls", toolProtocolDebugDetail(rawText, textBuf.String(), toolCalls, toolDefs))
@@ -2927,7 +3052,7 @@ agentLoop:
 			run.Response = trimRunText(respBuf.String())
 		}
 		// Emit the full thinking block so the UI can attach it to the message
-		if thinkBuf.Len() > 0 && req.EnableThinking {
+		if thinkBuf.Len() > 0 {
 			a.emit("mauler:thinking_done", thinkBuf.String())
 		}
 		if usage != nil {
@@ -3187,6 +3312,29 @@ agentLoop:
 				a.setRunState(&run, "blocked", detail)
 				run.addEvent("stop", "Empty model response", detail)
 			}
+			if finalStatus != "stopped" {
+				decision := a.runReviewPhase(ctx, &run, profile, cfg, mode, autonomous, &reviewCyclesUsed, toolBudgetExhausted || timeBudgetExhausted)
+				if decision.StopReason != "" {
+					finalStatus = "stopped"
+					run.stop(decision.StopReason, decision.StopDetail)
+					a.setRunState(&run, "blocked", decision.StopDetail)
+					run.addEvent("stop", "Review gate incomplete", decision.StopDetail)
+					if strings.TrimSpace(decision.SummaryNote) != "" {
+						finalSummary = strings.TrimSpace(finalSummary + "\n\n" + decision.SummaryNote)
+						if strings.TrimSpace(run.Response) != "" {
+							run.Response = trimRunText(strings.TrimSpace(run.Response + "\n\n" + decision.SummaryNote))
+						}
+					}
+				}
+				if !decision.Proceed {
+					a.setRunState(&run, "recovering", "Review gate requested another fix cycle.")
+					run.addEvent("continue", fmt.Sprintf("Review gate retry %d/%d", reviewCyclesUsed, cfg.Agents.ReviewLoop.MaxReviewCycles), decision.InjectedPrompt)
+					a.mu.Lock()
+					a.history.Append(llm.NewTextMessage(llm.RoleSystem, decision.InjectedPrompt))
+					a.mu.Unlock()
+					continue
+				}
+			}
 			return
 		}
 		// Model made tool calls this round — reset the narration-without-acting streak
@@ -3347,9 +3495,19 @@ agentLoop:
 				})
 				continue
 			}
+			if cached := cachedEmptyGlobResultForCall(run, tc); cached != "" {
+				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, cached))
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(cached), "skipped", 0)
+				a.setRunState(&run, "recovering", cached)
+				run.addEvent("tool_skip", "Skipped repeated empty glob", cached)
+				a.emit("mauler:tool_result", map[string]string{
+					"id": tc.ID, "name": tc.Function.Name, "result": cached,
+				})
+				continue
+			}
 			if cached := cachedToolResultForCall(run, tc); cached != "" {
 				status := "cached"
-				eventKind := "tool_cache"
+				eventKind := "tool_cache_hit"
 				eventMessage := "Returned cached tool result"
 				if repeatedCachedToolCall(run, tc) {
 					status = "skipped"
@@ -3443,7 +3601,7 @@ agentLoop:
 					}
 				}
 			}
-			result = appendCriticalVerifierHint(tc, result)
+			result = appendCriticalVerifierHintWithTarget(tc, result, authoritativeTargetIPForRun(run, cfg.Context.Lab.Target))
 			if guarded, findings := guardToolResult(tc.Function.Name, result, cfg.Tools.RedactSecrets); len(findings) > 0 {
 				result = guarded
 				run.addEvent("guardrail", "Tool result guardrail applied", fmt.Sprintf("%s: %s", tc.Function.Name, strings.Join(findings, ", ")))
@@ -3485,6 +3643,7 @@ agentLoop:
 		finalSummary = textBuf.String()
 		a.maybeCheckpoint(run, *cfg, 4)
 	}
+	return
 }
 
 // awaitConfirm blocks until the user responds or context is cancelled.
@@ -4193,9 +4352,12 @@ func normalizeToolCallArguments(tc llm.ToolCallDef) llm.ToolCallDef {
 		}
 		normalizeShellCommandArg(args)
 		normalizeTerminalKeyArgs(args)
-	case "read":
+	case "read", "write", "edit", "sqlite":
 		if path := stringArg(args, "path"); path != "" {
 			args["path"] = cleanToolPathArg(path)
+		}
+		if strings.TrimSpace(tc.Function.Name) == "write" {
+			repairWriteArgsWithEmbeddedContent(args)
 		}
 	}
 	raw, err := marshalToolArgsNoHTMLEscape(args)
@@ -4250,6 +4412,26 @@ func cleanToolPathArg(path string) string {
 		}
 	}
 	return path
+}
+
+func repairWriteArgsWithEmbeddedContent(args map[string]interface{}) {
+	if strings.TrimSpace(stringArg(args, "content")) != "" {
+		return
+	}
+	path := stringArg(args, "path")
+	if path == "" {
+		return
+	}
+	lower := strings.ToLower(path)
+	marker := "<parameter=content>"
+	idx := strings.Index(lower, marker)
+	if idx < 0 {
+		return
+	}
+	before := strings.TrimSpace(path[:idx])
+	content := path[idx+len(marker):]
+	args["path"] = cleanToolPathArg(before)
+	args["content"] = content
 }
 
 func stringArg(args map[string]interface{}, name string) string {
@@ -5923,18 +6105,30 @@ func (a *App) ensureModelLoaded(ctx context.Context, client llm.Client, profile 
 	sameLoadedModel := key != "" && modelLoadKeySameRuntime(profile, a.loadedModelKey)
 	a.mu.Unlock()
 
-	if (alreadyLoaded || sameLoadedModel) && profile.CtxTokens > 0 {
+	if profile.CtxTokens > 0 {
 		if cq, ok2 := client.(contextQuerier); ok2 {
 			qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			actual := cq.ActualContextLength(qctx)
 			cancel()
-			if actual > 0 && actual >= profile.CtxTokens {
-				alreadyLoaded = true
-				a.mu.Lock()
-				a.loadedModelKey = key
-				a.mu.Unlock()
-			} else if actual > 0 && actual < profile.CtxTokens {
-				alreadyLoaded = false
+			if actual > 0 {
+				if actual >= profile.CtxTokens {
+					alreadyLoaded = true
+					a.mu.Lock()
+					a.loadedModelKey = key
+					a.mu.Unlock()
+					a.recordLedger(ledger.Event{
+						Kind:    "model_load",
+						Source:  "provider",
+						Status:  "backend_reused",
+						Message: key,
+						Metadata: map[string]string{
+							"configured_ctx": strconv.Itoa(profile.CtxTokens),
+							"actual_ctx":     strconv.Itoa(actual),
+						},
+					})
+				} else if alreadyLoaded || sameLoadedModel {
+					alreadyLoaded = false
+				}
 			}
 		}
 	}
@@ -6324,6 +6518,7 @@ type shellSession struct {
 	output    chan terminalOutput
 	interrupt chan struct{}
 	runMu     sync.Mutex
+	stateMu   sync.RWMutex
 	// scroll is an always-on rolling line buffer of the live terminal, populated
 	// by pipeShellOutput independently of the marker-protocol output channel. The
 	// interactive terminal_send/terminal_read tools snapshot it for a non-blocking,
@@ -6351,6 +6546,40 @@ type shellSession struct {
 	// connected remote session, so its running/finished/exit state is authoritative
 	// too. Cleared with remoteConnected on return to the local shell.
 	remoteIntegrated bool
+}
+
+type shellSessionState struct {
+	promptReady      bool
+	lastExit         int
+	hasLastExit      bool
+	lastCWD          string
+	lastDoneAt       time.Time
+	sawPromptMarker  bool
+	awaitingCommand  bool
+	remoteConnected  bool
+	remoteIntegrated bool
+}
+
+func (sess *shellSession) stateSnapshot() shellSessionState {
+	if sess == nil {
+		return shellSessionState{}
+	}
+	sess.stateMu.RLock()
+	defer sess.stateMu.RUnlock()
+	state := shellSessionState{
+		promptReady:      sess.promptReady,
+		lastCWD:          sess.lastCWD,
+		lastDoneAt:       sess.lastDoneAt,
+		sawPromptMarker:  sess.sawPromptMarker,
+		awaitingCommand:  sess.awaitingCommand,
+		remoteConnected:  sess.remoteConnected,
+		remoteIntegrated: sess.remoteIntegrated,
+	}
+	if sess.lastExit != nil {
+		state.lastExit = *sess.lastExit
+		state.hasLastExit = true
+	}
+	return state
 }
 
 type terminalOutput struct {
@@ -6406,6 +6635,12 @@ func maulerPowerShellInteractiveArgs() []string {
 // shells may be open at once; the first live shell remains the shared/agent
 // terminal used by terminal_send/terminal_read and shared shell tools.
 func (a *App) OpenShell() (string, error) {
+	a.mu.Lock()
+	evalRunning := a.evalRunning
+	a.mu.Unlock()
+	if evalRunning {
+		return "", fmt.Errorf("agent eval is running; wait for it to finish before opening a terminal")
+	}
 	a.shellMu.Lock()
 	defer a.shellMu.Unlock()
 
@@ -6693,6 +6928,8 @@ func updateShellSessionMarkerState(sess *shellSession, line string) {
 	if sess == nil {
 		return
 	}
+	sess.stateMu.Lock()
+	defer sess.stateMu.Unlock()
 	if cwd, ok := sharedTerminalAnyCWD(line); ok {
 		sess.lastCWD = cwd
 		return
@@ -6708,6 +6945,8 @@ func updateShellSessionOSCState(sess *shellSession, raw []byte) {
 	if sess == nil || len(raw) == 0 {
 		return
 	}
+	sess.stateMu.Lock()
+	defer sess.stateMu.Unlock()
 	sess.oscBuffer += decodeTerminalOutput(raw)
 	if len(sess.oscBuffer) > 8192 {
 		sess.oscBuffer = sess.oscBuffer[len(sess.oscBuffer)-4096:]
@@ -6728,7 +6967,7 @@ func updateShellSessionOSCState(sess *shellSession, raw []byte) {
 			return
 		}
 		payload := sess.oscBuffer[len("\x1b]133;"):end]
-		applyShellSessionOSCPayload(sess, payload)
+		applyShellSessionOSCPayloadLocked(sess, payload)
 		sess.oscBuffer = sess.oscBuffer[end+size:]
 	}
 }
@@ -6753,6 +6992,15 @@ func findOSCTerminator(s string) (int, int) {
 //   - R;<ec> / Q;cwd=      — an injected REMOTE/nested shell. Distinct letters so a
 //     remote completion is not mistaken for a return to the local shell.
 func applyShellSessionOSCPayload(sess *shellSession, payload string) {
+	if sess == nil {
+		return
+	}
+	sess.stateMu.Lock()
+	defer sess.stateMu.Unlock()
+	applyShellSessionOSCPayloadLocked(sess, payload)
+}
+
+func applyShellSessionOSCPayloadLocked(sess *shellSession, payload string) {
 	switch {
 	case strings.HasPrefix(payload, "D;"):
 		codeText := strings.TrimSpace(strings.TrimPrefix(payload, "D;"))
@@ -6809,13 +7057,19 @@ const remoteShellIntegrationScript = `__mauler_rpm(){ local ec=$?; printf '\033]
 // visible (so the remote is ready for input). This keeps terminal running/finished
 // and exit-code state authoritative across an ssh/nc/webshell handoff.
 func maybeInjectRemoteShellIntegration(sess *shellSession, tail []string) {
-	if sess == nil || sess.input == nil || sess.remoteIntegrated || !sess.remoteConnected {
+	if sess == nil || sess.input == nil {
 		return
 	}
 	if !endsWithShellPrompt(tail) {
 		return
 	}
+	sess.stateMu.Lock()
+	if sess.remoteIntegrated || !sess.remoteConnected {
+		sess.stateMu.Unlock()
+		return
+	}
 	sess.remoteIntegrated = true
+	sess.stateMu.Unlock()
 	_, _ = io.WriteString(sess.input, remoteShellIntegrationScript+"\r")
 }
 
@@ -6823,6 +7077,8 @@ func resetShellSessionPromptState(sess *shellSession) {
 	if sess == nil {
 		return
 	}
+	sess.stateMu.Lock()
+	defer sess.stateMu.Unlock()
 	sess.promptReady = false
 	sess.lastExit = nil
 	// A command is now in flight; it is running until a completion marker arrives.
@@ -7109,6 +7365,12 @@ func decodeTerminalOutput(data []byte) string {
 // "\r", backspace as "\x7f", arrows/function keys as "\x1b[…", Tab as "\t",
 // Ctrl-C as "\x03" — so we forward verbatim without munging line endings.
 func (a *App) ShellInput(id, text string) error {
+	a.mu.Lock()
+	evalRunning := a.evalRunning
+	a.mu.Unlock()
+	if evalRunning {
+		return fmt.Errorf("agent eval is running; terminal input is temporarily paused")
+	}
 	sess := a.shellSessionByID(id)
 	if sess == nil {
 		return fmt.Errorf("no active shell session %q", id)
@@ -7367,17 +7629,18 @@ func sharedTerminalStateSnapshot(sess *shellSession) TerminalStateSnapshot {
 	if sess == nil {
 		return TerminalStateSnapshot{State: "missing", Summary: "No shared terminal is open"}
 	}
+	state := sess.stateSnapshot()
 	snap := TerminalStateSnapshot{Session: sess.id, State: "ready", Summary: "Shared terminal is ready"}
 	if sess.scroll != nil {
 		snap.Lines = cleanTerminalLines(sess.scroll.tail(20))
 	}
-	if terminalSessionPromptReady(sess) {
+	if state.promptReady && !state.lastDoneAt.IsZero() && time.Since(state.lastDoneAt) < 30*time.Second {
 		snap.State = "ready"
-		if sess.lastExit != nil {
-			snap.Summary = fmt.Sprintf("Shared terminal is ready; last exit %d", *sess.lastExit)
+		if state.hasLastExit {
+			snap.Summary = fmt.Sprintf("Shared terminal is ready; last exit %d", state.lastExit)
 		}
-		if strings.TrimSpace(sess.lastCWD) != "" {
-			snap.Summary = strings.TrimSpace(snap.Summary + "; cwd " + sess.lastCWD)
+		if strings.TrimSpace(state.lastCWD) != "" {
+			snap.Summary = strings.TrimSpace(snap.Summary + "; cwd " + state.lastCWD)
 		}
 	}
 	if !sess.runMu.TryLock() {
@@ -7403,9 +7666,12 @@ func sharedTerminalStateSnapshot(sess *shellSession) TerminalStateSnapshot {
 	// applyShellSessionOSCPayload. This replaces the old per-snapshot tail heuristic,
 	// which stayed "connected" as long as the banner lingered in the visible tail.
 	if terminalTailLooksLikeConnectedSession(snap.Lines) {
+		sess.stateMu.Lock()
 		sess.remoteConnected = true
+		state.remoteConnected = true
+		sess.stateMu.Unlock()
 	}
-	if sess.remoteConnected {
+	if state.remoteConnected {
 		snap.State = "connected"
 		snap.Summary = "Shared terminal appears to contain a connected live session"
 		return snap
@@ -8639,6 +8905,7 @@ func buildProjectResumePrompt(cfg settings.Settings) string {
 	wd = tools.NormalizeHostPath(wd)
 	var sb strings.Builder
 	sb.WriteString("\n\nProject resume packet (use this before starting over):\n")
+	sb.WriteString("- Orientation rule: .mauler/project-recap.md and .mauler/progress.md excerpts are injected when present. Do not call read on those files just to get oriented; only read them if you need more detail than the excerpt provides.\n")
 	lab := normaliseAppLabContext(cfg.Context.Lab)
 	var labels []string
 	if lab.Name != "" {
@@ -8669,7 +8936,7 @@ func buildProjectResumePrompt(cfg settings.Settings) string {
 		sb.WriteString("- Current writeup/state excerpt:\n")
 		sb.WriteString(indentPromptBlock(excerpt, "  ") + "\n")
 	}
-	sb.WriteString("- Resume rule: before rescanning or re-exploiting, reconcile the latest user target/IP against this packet, read the writeup/progress/evidence files that are already listed, then create or update a fresh todo plan. Only start over when the user says the box reset or live checks prove the old state is stale.\n")
+	sb.WriteString("- Resume rule: before rescanning or re-exploiting, reconcile the latest user target/IP against this packet, use the injected recap/progress excerpts and listed evidence files, then create or update a fresh todo plan. Only start over when the user says the box reset or live checks prove the old state is stale.\n")
 	return sb.String()
 }
 
@@ -9731,6 +9998,49 @@ func sanitizeVisibleModelText(text string) string {
 	text = stripVisibleRepairMarkers(text)
 	text = stripVisibleThinkTags(text)
 	return strings.TrimLeft(text, " \t\r\n")
+}
+
+func splitModelTextForDisplay(text string) (visible string, thinking string) {
+	if text == "" {
+		return "", ""
+	}
+	var visibleOut strings.Builder
+	var thinkingOut strings.Builder
+	rest := text
+	for {
+		lower := strings.ToLower(rest)
+		start := strings.Index(lower, "<think")
+		if start < 0 {
+			visibleOut.WriteString(rest)
+			break
+		}
+		visibleOut.WriteString(rest[:start])
+		tagEnd := strings.Index(lower[start:], ">")
+		if tagEnd < 0 {
+			break
+		}
+		afterOpen := start + tagEnd + 1
+		closeRel := strings.Index(lower[afterOpen:], "</think>")
+		if closeRel < 0 {
+			appendThinkingText(&thinkingOut, rest[afterOpen:])
+			break
+		}
+		closeStart := afterOpen + closeRel
+		appendThinkingText(&thinkingOut, rest[afterOpen:closeStart])
+		rest = rest[closeStart+len("</think>"):]
+	}
+	return visibleOut.String(), thinkingOut.String()
+}
+
+func appendThinkingText(sb *strings.Builder, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString(text)
 }
 
 func stripVisibleRepairMarkers(text string) string {
@@ -11122,6 +11432,10 @@ func looksCodebaseTask(lower string) bool {
 func explicitWebResearchIntent(text string) bool {
 	lower := strings.ToLower(text)
 	return strings.Contains(lower, "research online") ||
+		strings.Contains(lower, "research current") ||
+		strings.Contains(lower, "current cve") ||
+		strings.Contains(lower, "latest cve") ||
+		strings.Contains(lower, "cve details") ||
 		strings.Contains(lower, "look online") ||
 		strings.Contains(lower, "web research") ||
 		strings.Contains(lower, "search the web") ||

@@ -59,3 +59,29 @@ func TestDeriveRunFactsCapsAndDedupes(t *testing.T) {
 		t.Fatalf("expected one deduped target, got %d facts: %#v", targets, facts)
 	}
 }
+
+func TestAuthoritativeTargetIPForRunPrefersCurrentPrompt(t *testing.T) {
+	run := TaskRun{
+		Prompt: "Target: 10.129.26.26\nContinue the box.",
+		Events: []TaskRunEvent{{
+			Kind:   "evidence_pin",
+			Detail: "Target IP: 10.129.14.129",
+		}},
+	}
+	if got := authoritativeTargetIPForRun(run, "10.129.23.41"); got != "10.129.26.26" {
+		t.Fatalf("authoritative target = %q, want current prompt target", got)
+	}
+}
+
+func TestAuthoritativeTargetIPForRunFallsBackToRunFactsThenSettings(t *testing.T) {
+	run := TaskRun{Events: []TaskRunEvent{{
+		Kind:   "evidence_pin",
+		Detail: "confirmed target: 10.129.26.26",
+	}}}
+	if got := authoritativeTargetIPForRun(run, "10.129.23.41"); got != "10.129.26.26" {
+		t.Fatalf("authoritative target = %q, want current run fact", got)
+	}
+	if got := authoritativeTargetIPForRun(TaskRun{}, "target 10.129.23.41"); got != "10.129.23.41" {
+		t.Fatalf("authoritative target fallback = %q, want configured target", got)
+	}
+}

@@ -1,0 +1,15 @@
+{
+  "name": "verify-blocks-compile-error",
+  "prompt": "Fix the compile error in main.go and finish only after the project builds.",
+  "workspace": {
+    "go.mod": "module example.com/verifyblocks\n\ngo 1.23\n",
+    "main.go": "package main\n\nfunc main() {}\n\nfunc answer() string {\n\treturn 42\n}\n"
+  },
+  "mode": "Fixer",
+  "max_tool_calls": 10,
+  "expect_status": "done",
+  "expect_files": {
+    "main.go": "return \"42\""
+  },
+  "max_auto_continues": 2
+}

@@ -47,7 +47,7 @@ func (a *App) RunDoctor() DoctorResult {
 	var checks []DoctorCheck
 	add := func(c DoctorCheck) { checks = append(checks, c) }
 
-	// â”€â”€ 1. Active provider reachability â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 1. Active provider reachability --------------------------------------
 	activeProfile := profiles.Profiles[cfg.ActiveProfile]
 	if strings.TrimSpace(cfg.ActiveProfile) == "" {
 		add(DoctorCheck{
@@ -112,7 +112,7 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// â”€â”€ 2. llama.cpp version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 2. llama.cpp version -------------------------------------------------
 	if hasProvider && provider.Backend == "llamacpp" {
 		versionOK, versionMsg, versionDetail := checkLlamacppVersion(provider.BaseURL)
 		add(DoctorCheck{
@@ -127,7 +127,7 @@ func (a *App) RunDoctor() DoctorResult {
 		add(DoctorCheck{
 			Name:    "llama.cpp version",
 			Status:  "info",
-			Message: "Using LM Studio â€” llama.cpp version check not applicable",
+			Message: "Using LM Studio - llama.cpp version check not applicable",
 		})
 	}
 
@@ -226,7 +226,7 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// â”€â”€ 3. Context window match â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 3. Context window match -----------------------------------------------
 	if hasProvider && activeProfile.CtxTokens > 0 {
 		if hasProvider && provider.Backend == "llamacpp" {
 			actualCtx, err := fetchLlamacppContext(provider.BaseURL)
@@ -305,7 +305,7 @@ func (a *App) RunDoctor() DoctorResult {
 
 	addGPUVRAMDoctorCheck(add, activeProfile)
 
-	// â”€â”€ 4. Thinking mode + no-think threshold â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 4. Thinking mode + no-think threshold --------------------------------
 	addRuntimeProfileChecks(add, activeProfile)
 	addProfileIdentityChecks(add, cfg.ActiveProfile, activeProfile)
 	addAgentPresetBudgetChecks(add, cfg, activeProfile)
@@ -325,13 +325,13 @@ func (a *App) RunDoctor() DoctorResult {
 		add(DoctorCheck{
 			Name:    "Thinking mode",
 			Status:  "ok",
-			Message: fmt.Sprintf("Enabled â€” thinking disabled automatically after %d tool calls per turn (Qwen3 tool-call collision fix)", threshold),
+			Message: fmt.Sprintf("Enabled - thinking disabled automatically after %d tool calls per turn (Qwen3 tool-call collision fix)", threshold),
 		})
 		if hasProvider && provider.Backend != "llamacpp" {
 			add(DoctorCheck{
 				Name:    "Thinking mode backend",
 				Status:  "warn",
-				Message: "Thinking mode is on but the active backend is not llama.cpp â€” chat_template_kwargs will be silently ignored",
+				Message: "Thinking mode is on but the active backend is not llama.cpp - chat_template_kwargs will be silently ignored",
 				Detail:  "Switch to a llamacpp provider or disable thinking for this profile",
 			})
 		}
@@ -339,26 +339,26 @@ func (a *App) RunDoctor() DoctorResult {
 		add(DoctorCheck{
 			Name:    "Thinking mode",
 			Status:  "info",
-			Message: "Disabled for active profile â€” tool calling will be most reliable in this mode",
+			Message: "Disabled for active profile - tool calling will be most reliable in this mode",
 		})
 	}
 
-	// â”€â”€ 5. MTP speculative decoding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 5. MTP speculative decoding -------------------------------------------
 	if activeProfile.SpecType != "" {
 		add(DoctorCheck{
 			Name:    "MTP speculative decoding",
 			Status:  "ok",
-			Message: fmt.Sprintf("Enabled: spec_type=%s draft_n_max=%d â€” expect 1.4â€“2.2Ã— faster generation", activeProfile.SpecType, activeProfile.SpecDraftNMax),
+			Message: fmt.Sprintf("Enabled: spec_type=%s draft_n_max=%d - expect 1.4-2.2x faster generation", activeProfile.SpecType, activeProfile.SpecDraftNMax),
 		})
 	} else {
 		add(DoctorCheck{
 			Name:    "MTP speculative decoding",
 			Status:  "info",
-			Message: "Disabled â€” set spec_type=draft-mtp in the profile for 1.4â€“2.2Ã— faster generation (llama.cpp b9180+ only)",
+			Message: "Disabled - set spec_type=draft-mtp in the profile for 1.4-2.2x faster generation (llama.cpp b9180+ only)",
 		})
 	}
 
-	// â”€â”€ 6. Shell backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 6. Shell backend -----------------------------------------------------
 	addRuntimeLockChecks(add)
 
 	shellBackend := cfg.Tools.ShellBackend
@@ -370,7 +370,7 @@ func (a *App) RunDoctor() DoctorResult {
 			add(DoctorCheck{
 				Name:    "Shell backend",
 				Status:  "warn",
-				Message: "Shell backend is set to 'bash' on Windows â€” this will fail unless Git Bash or WSL is in PATH",
+				Message: "Shell backend is set to 'bash' on Windows - this will fail unless Git Bash or WSL is in PATH",
 				Detail:  "Change to 'auto' (PowerShell) or 'wsl' for WSL bash",
 			})
 		} else {
@@ -407,7 +407,7 @@ func (a *App) RunDoctor() DoctorResult {
 	}
 	addToolAccessChecks(add, cfg)
 
-	// â”€â”€ 7. Memory DB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 7. Memory DB ---------------------------------------------------------
 	if entries, err := loadMemory(); err != nil {
 		add(DoctorCheck{Name: "Memory DB", Status: "warn", Message: "SQLite memory store could not be read", Detail: err.Error()})
 	} else {
@@ -419,46 +419,46 @@ func (a *App) RunDoctor() DoctorResult {
 		}
 	}
 
-	// â”€â”€ 8. Session recall DB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 8. Session recall DB -------------------------------------------------
 	cfgDir, err := settings.ConfigDir()
 	if err != nil {
 		add(DoctorCheck{Name: "Session recall DB", Status: "fail", Message: err.Error()})
 	} else {
 		dbPath := filepath.Join(cfgDir, "state.db")
 		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-			add(DoctorCheck{Name: "Session recall DB", Status: "info", Message: "state.db does not exist yet â€” created on first session save"})
+			add(DoctorCheck{Name: "Session recall DB", Status: "info", Message: "state.db does not exist yet - created on first session save"})
 		} else {
 			add(DoctorCheck{Name: "Session recall DB", Status: "ok", Message: dbPath})
 		}
 	}
 
-	// â”€â”€ 9. Skills directory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 9. Skills directory --------------------------------------------------
 	if dir, err := skillsDir(); err != nil {
 		add(DoctorCheck{Name: "Skills dir", Status: "fail", Message: err.Error()})
 	} else if _, err := os.Stat(dir); os.IsNotExist(err) {
-		add(DoctorCheck{Name: "Skills dir", Status: "info", Message: "No skills yet â€” skills dir will be created when you save the first skill"})
+		add(DoctorCheck{Name: "Skills dir", Status: "info", Message: "No skills yet - skills dir will be created when you save the first skill"})
 	} else {
 		skillList, _ := loadSkills()
 		add(DoctorCheck{Name: "Skills dir", Status: "ok", Message: fmt.Sprintf("%d skills in %s", len(skillList), dir)})
 	}
 	addMasterSkillDoctorChecks(add)
 
-	// â”€â”€ 10. USER.md â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 10. USER.md ----------------------------------------------------------
 	if up := loadUserProfile(); up == "" {
 		add(DoctorCheck{
 			Name:    "User profile",
 			Status:  "info",
-			Message: "USER.md not set â€” create one in the Memory tab so the agent learns your preferences",
+			Message: "USER.md not set - create one in the Memory tab so the agent learns your preferences",
 		})
 	} else {
 		words := len(strings.Fields(up))
 		add(DoctorCheck{Name: "User profile", Status: "ok", Message: fmt.Sprintf("USER.md: %d words", words)})
 	}
 
-	// â”€â”€ 11. Web search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- 11. Web search -------------------------------------------------------
 	addWebEngineChecks(add, cfg)
 
-	// â”€â”€ Score â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+	// -- Score ----------------------------------------------------------------
 	ok, warns, fails := 0, 0, 0
 	for _, c := range checks {
 		switch c.Status {
@@ -675,14 +675,14 @@ func checkLlamacppVersion(baseURL string) (status, message, detail string) {
 		// Fallback: just check /health
 		resp2, err2 := client.Get(base + "/health")
 		if err2 != nil {
-			return "warn", "Cannot reach llama.cpp /health â€” is the server running?", err2.Error()
+			return "warn", "Cannot reach llama.cpp /health - is the server running?", err2.Error()
 		}
 		defer resp2.Body.Close()
-		return "info", "llama.cpp is running (version unknown â€” /props not available)", ""
+		return "info", "llama.cpp is running (version unknown - /props not available)", ""
 	}
 	defer resp.Body.Close()
 	// We can't parse the full response without JSON parsing, but getting a 200 is enough.
-	return "ok", "llama.cpp is running (/props available â€” likely b9180+ for MTP support)", ""
+	return "ok", "llama.cpp is running (/props available - likely b9180+ for MTP support)", ""
 }
 
 func severeContextUndersize(requested, actual int) bool {
@@ -889,8 +889,11 @@ func addToolingSmokeChecks(add func(DoctorCheck)) {
 // fetchLlamacppContext reads the active llama.cpp context size from /slots,
 // /props, InferenceBridge's /v1/models/stats, then /v1/health KV cache metadata.
 func fetchLlamacppContext(baseURL string) (int, error) {
+	return fetchLlamacppContextWithClient(baseURL, &http.Client{Timeout: 3 * time.Second})
+}
+
+func fetchLlamacppContextWithClient(baseURL string, client *http.Client) (int, error) {
 	base := strings.TrimSuffix(baseURL, "/v1")
-	client := &http.Client{Timeout: 3 * time.Second}
 	if ctx, err := fetchLlamacppSlotsContextWithClient(base, client); err == nil && ctx > 0 {
 		return ctx, nil
 	}
@@ -1704,7 +1707,7 @@ func addRuntimeProfileChecks(add func(DoctorCheck), profile settings.Profile) {
 		add(DoctorCheck{
 			Name:    "MTP bridge build",
 			Status:  "info",
-			Message: "Self-MTP is enabled (no separate draft model) â€” this needs an InferenceBridge build that emits --spec-type without -md",
+			Message: "Self-MTP is enabled (no separate draft model) - this needs an InferenceBridge build that emits --spec-type without -md",
 			Detail:  "Confirm in the bridge log a \"Speculative decoding enabled\" (target=speculative) line and --spec-type in the llama-server args. An older bridge silently ignores self-MTP, so generation runs at normal speed with no error.",
 		})
 	}
@@ -1914,7 +1917,11 @@ func modelQuantTag(modelID string) string {
 }
 
 func addLlamacppLaunchAssertions(add func(DoctorCheck), baseURL string, profile settings.Profile) {
-	props, err := fetchLlamacppPropsAny(baseURL, &http.Client{Timeout: 3 * time.Second})
+	addLlamacppLaunchAssertionsWithClient(add, baseURL, profile, &http.Client{Timeout: 3 * time.Second})
+}
+
+func addLlamacppLaunchAssertionsWithClient(add func(DoctorCheck), baseURL string, profile settings.Profile, client *http.Client) {
+	props, err := fetchLlamacppPropsAny(baseURL, client)
 	if err != nil {
 		add(DoctorCheck{
 			Name:    "llama.cpp launch assertions",
@@ -1971,7 +1978,7 @@ func addLlamacppLaunchAssertions(add func(DoctorCheck), baseURL string, profile 
 
 // addModelTierCheck warns when the active model is below the parameter tier at
 // which local tool calling stays reliable. BFCL V4 shows a sharp cliff: a ~9B
-// general model scores ~66%, a 4B ~50%, a 2B ~44% â€” so multi-step agent runs
+// general model scores ~66%, a 4B ~50%, a 2B ~44% - so multi-step agent runs
 // spin out well before chat quality visibly drops. Docker's 21-model agent eval
 // makes the same point (a tool-tuned 14B beats a 70B that calls tools poorly):
 // size is a floor, not the goal.
@@ -1985,14 +1992,14 @@ func addModelTierCheck(add func(DoctorCheck), profile settings.Profile) {
 		add(DoctorCheck{
 			Name:    "Model tool-calling tier",
 			Status:  "warn",
-			Message: fmt.Sprintf("Active model looks ~%gB â€” below the reliable tool-calling tier", b),
-			Detail:  "Agent tool calling degrades sharply under ~7-9B (BFCL V4: ~9Bâ‰ˆ66%, 4Bâ‰ˆ50%, 2Bâ‰ˆ44%). Small models are fine for chat but spin out on multi-step tool use â€” prefer a 7B+ tool-tuned model for agent runs.",
+			Message: fmt.Sprintf("Active model looks ~%gB - below the reliable tool-calling tier", b),
+			Detail:  "Agent tool calling degrades sharply under ~7-9B (BFCL V4: ~9B~66%, 4B~50%, 2B~44%). Small models are fine for chat but spin out on multi-step tool use - prefer a 7B+ tool-tuned model for agent runs.",
 		})
 	case b < 7:
 		add(DoctorCheck{
 			Name:    "Model tool-calling tier",
 			Status:  "info",
-			Message: fmt.Sprintf("Active model is ~%gB â€” near the lower edge of reliable tool calling", b),
+			Message: fmt.Sprintf("Active model is ~%gB - near the lower edge of reliable tool calling", b),
 			Detail:  "Below ~7-9B, tool-call reliability starts to drop (BFCL V4). Watch for malformed or looping tool calls; move to a larger tool-tuned model if you see them.",
 		})
 	default:
@@ -2007,16 +2014,16 @@ func addModelTierCheck(add func(DoctorCheck), profile settings.Profile) {
 // addLlamacppAgentFlagAdvisory surfaces the research-backed llama.cpp launch
 // flags that make Qwen3-class local models stable as agents. These cannot all
 // be read back from /props, so it is an advisory (info) check rather than a
-// pass/fail â€” the chat_format, template, and MTP checks above cover the parts
+// pass/fail - the chat_format, template, and MTP checks above cover the parts
 // that are machine-detectable.
 func addLlamacppAgentFlagAdvisory(add func(DoctorCheck)) {
 	detail := strings.Join([]string{
-		"--jinja â€” convert native <tool_call> output into OpenAI tool_calls. Without it, tool calls and </think> leak as plain text (TheMauler repairs this, but it is a safety net, not a fix).",
-		"--reasoning-format deepseek â€” Qwen3 uses the same <think>/</think> delimiters as DeepSeek-R1.",
-		"Disable speculative/draft decoding if you see truncation or repetition loops â€” draft rejections at </think> spike the EOS probability and cause early termination.",
+		"--jinja - convert native <tool_call> output into OpenAI tool_calls. Without it, tool calls and </think> leak as plain text (TheMauler repairs this, but it is a safety net, not a fix).",
+		"--reasoning-format deepseek - Qwen3 uses the same <think>/</think> delimiters as DeepSeek-R1.",
+		"Disable speculative/draft decoding if you see truncation or repetition loops - draft rejections at </think> spike the EOS probability and cause early termination.",
 		"--presence-penalty up to 2.0 if the model loops inside <think> until it runs out of tokens.",
-		"Use the highest quant that fits 24 GB VRAM â€” UD-Q4_K_XL is the project default for Qwen3.6-27B on the RTX 3090; avoid sub-Q4 quants, which hurt tool-call accuracy.",
-		"--reasoning-budget N â€” cap thinking tokens at generation time (llama.cpp PR #20297) so a runaway <think> can't eat the whole turn.",
+		"Use the highest quant that fits 24 GB VRAM - UD-Q4_K_XL is the project default for Qwen3.6-27B on the RTX 3090; avoid sub-Q4 quants, which hurt tool-call accuracy.",
+		"--reasoning-budget N - cap thinking tokens at generation time (llama.cpp PR #20297) so a runaway <think> can't eat the whole turn.",
 	}, "\n")
 	add(DoctorCheck{
 		Name:    "llama.cpp agent flags",

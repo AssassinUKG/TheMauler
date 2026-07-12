@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import './HermesSidebar.css'
 
-type CenterTab = 'chat' | 'ops' | 'projects' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks'
+type CenterTab = 'chat' | 'ops' | 'projects' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks' | 'doctor'
 
 interface Props {
   sessions: string[]
@@ -18,14 +18,19 @@ interface Props {
 }
 
 const navItems: Array<{ id: CenterTab; label: string; icon: string }> = [
+  { id: 'projects', label: 'Home', icon: 'Home' },
   { id: 'chat', label: 'Chat', icon: 'Chat' },
   { id: 'ops', label: 'Run', icon: 'Run' },
-  { id: 'projects', label: 'Projects', icon: 'Projects' },
-  { id: 'logs', label: 'Logs', icon: 'Logs' },
-  { id: 'memory', label: 'Memory', icon: 'Memory' },
-  { id: 'brain', label: 'Brain', icon: 'Brain' },
-  { id: 'telegram', label: 'Telegram', icon: 'Telegram' },
   { id: 'benchmarks', label: 'Benchmarks', icon: 'Bench' },
+]
+
+const secondaryNavItems: Array<{ id: CenterTab; label: string }> = [
+  { id: 'services', label: 'Services' },
+  { id: 'logs', label: 'Logs' },
+  { id: 'memory', label: 'Memory' },
+  { id: 'brain', label: 'Brain' },
+  { id: 'telegram', label: 'Telegram' },
+  { id: 'doctor', label: 'Doctor' },
 ]
 
 export function HermesSidebar({
@@ -70,6 +75,10 @@ export function HermesSidebar({
           </button>
         ))}
       </div>
+      <select className="hermes-more-nav" value={secondaryNavItems.some(item => item.id === centerTab) ? centerTab : ''} onChange={e => { if (e.target.value) onSelectTab(e.target.value as CenterTab) }}>
+        <option value="">More workbench pages…</option>
+        {secondaryNavItems.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+      </select>
 
       <button className="hermes-new-chat" onClick={onClearChat}>+ New conversation</button>
       <input

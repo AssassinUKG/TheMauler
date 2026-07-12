@@ -15,26 +15,82 @@ func RouteEnvelope(env Envelope) Route {
 	if strings.HasPrefix(text, "/") {
 		return routeSlashCommand(text, fromVoice)
 	}
+	if looksEmergencyStopRequest(lower) {
+		return Route{Lane: LaneControl, Command: "stop", Reason: "emergency stop request", FromVoice: fromVoice}
+	}
 	if looksQuickTerminalAction(lower) {
 		return Route{Lane: LaneQuick, Command: "quick_terminal", Argument: text, Policy: WorkStartNow, Reason: "simple terminal action", FromVoice: fromVoice}
 	}
+	if looksCapabilityQuestion(lower) {
+		return Route{Lane: LaneSideChat, Command: "chat", Argument: text, ReadOnly: true, Reason: "capability question", FromVoice: fromVoice}
+	}
 	if strings.HasPrefix(lower, "run ") || strings.HasPrefix(lower, "do ") || strings.HasPrefix(lower, "ops ") {
-		return Route{Lane: LaneWork, Command: "run", Argument: text, Policy: WorkQueueIfBusy, Reason: "imperative work request", FromVoice: fromVoice}
+		return Route{Lane: LaneWork, Command: "cmd", Argument: text, Policy: WorkQueueIfBusy, Reason: "imperative work request", FromVoice: fromVoice}
 	}
 	if looksLocalSystemInfoRequest(lower) {
-		return Route{Lane: LaneWork, Command: "run", Argument: text, Policy: WorkQueueIfBusy, Reason: "local system information request", FromVoice: fromVoice}
+		return Route{Lane: LaneWork, Command: "cmd", Argument: text, Policy: WorkQueueIfBusy, Reason: "local system information request", FromVoice: fromVoice}
 	}
 	if looksNaturalWorkRequest(lower) {
-		return Route{Lane: LaneWork, Command: "run", Argument: text, Policy: WorkQueueIfBusy, Reason: "natural language work request", FromVoice: fromVoice}
-	}
-	if strings.Contains(lower, "stop the run") || strings.Contains(lower, "cancel the run") {
-		return Route{Lane: LaneControl, Command: "stop", Reason: "natural language stop command", FromVoice: fromVoice}
+		return Route{Lane: LaneWork, Command: "cmd", Argument: text, Policy: WorkQueueIfBusy, Reason: "natural language work request", FromVoice: fromVoice}
 	}
 	if strings.Contains(lower, "ask the running agent") || strings.HasPrefix(lower, "interrupt ") {
 		arg := strings.TrimSpace(strings.TrimPrefix(text, "interrupt "))
 		return Route{Lane: LaneInterrupt, Command: "interrupt", Argument: arg, Reason: "explicit interrupt request", FromVoice: fromVoice}
 	}
 	return Route{Lane: LaneSideChat, Command: "chat", Argument: text, ReadOnly: true, Reason: "remote side question", FromVoice: fromVoice}
+}
+
+func looksEmergencyStopRequest(lower string) bool {
+	lower = strings.TrimSpace(lower)
+	return hasAny(lower,
+		"stop the run",
+		"cancel the run",
+		"stop all",
+		"cancel all",
+		"stop everything",
+		"cancel everything",
+		"panic stop",
+		"emergency stop",
+		"kill all tasks",
+		"stop all tasks",
+		"cancel all tasks",
+		"stop all ai",
+		"stop the ai",
+	)
+}
+
+func looksCapabilityQuestion(lower string) bool {
+	lower = strings.TrimSpace(lower)
+	if !strings.Contains(lower, "?") {
+		return false
+	}
+	questionPrefix := strings.HasPrefix(lower, "can you ") ||
+		strings.HasPrefix(lower, "could you ") ||
+		strings.HasPrefix(lower, "do you ") ||
+		strings.HasPrefix(lower, "are you ") ||
+		strings.HasPrefix(lower, "will you ") ||
+		strings.HasPrefix(lower, "what can you ") ||
+		strings.HasPrefix(lower, "what are you able")
+	if !questionPrefix {
+		return false
+	}
+	if hasAny(lower,
+		"what can you do",
+		"what are you able",
+		"are you able to",
+		"can you use tools",
+		"can you access tools",
+		"can you run tools",
+		"can you run commands",
+		"can you run normal system commands",
+		"can you run system commands",
+		"could you run commands",
+		"do you have tools",
+		"do you have access",
+	) {
+		return true
+	}
+	return false
 }
 
 func looksLocalSystemInfoRequest(lower string) bool {
@@ -107,12 +163,15 @@ func routeSlashCommand(text string, fromVoice bool) Route {
 	switch cmd {
 	case "status", "facts", "plan", "logs", "brain", "terminal", "terminal_read", "files", "file", "artifact", "projects", "help":
 		return Route{Lane: LaneControl, Command: cmd, Argument: arg, ReadOnly: true, Reason: "read-only control command", FromVoice: fromVoice}
-	case "stop", "pause", "resume":
+	case "stop", "pause", "resume", "stopall", "panic", "abort", "cancel":
+		if cmd == "stopall" || cmd == "panic" || cmd == "abort" || cmd == "cancel" {
+			cmd = "stop"
+		}
 		return Route{Lane: LaneControl, Command: cmd, Argument: arg, Reason: "run control command", FromVoice: fromVoice}
 	case "terminal_send":
 		return Route{Lane: LaneControl, Command: cmd, Argument: arg, Reason: "terminal control command", FromVoice: fromVoice}
-	case "run", "ops":
-		return Route{Lane: LaneWork, Command: "run", Argument: arg, Policy: WorkQueueIfBusy, Reason: "explicit work command", FromVoice: fromVoice}
+	case "cmd", "run", "ops":
+		return Route{Lane: LaneWork, Command: "cmd", Argument: arg, Policy: WorkQueueIfBusy, Reason: "explicit work command", FromVoice: fromVoice}
 	case "interrupt":
 		return Route{Lane: LaneInterrupt, Command: cmd, Argument: arg, Reason: "explicit interrupt command", FromVoice: fromVoice}
 	case "note":

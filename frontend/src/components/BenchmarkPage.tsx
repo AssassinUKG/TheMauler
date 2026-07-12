@@ -7,6 +7,7 @@ import {
   ListModelsForProvider,
   LoadBenchmarkModel,
   RunAgentEval,
+  RunJHUTAgentEval,
   RunGrammarToolArgsProbe,
   RunMiniAgentLoopBenchmark,
   UpdateProfiles,
@@ -327,6 +328,16 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
     }
   }
 
+  const runJHUTEval = async () => {
+    if (!selectedProfile) return
+    setRunning(true); setAgentEval(null); setStatus(`Running browser-backed JHUT eval against ${selectedProfile}…`)
+    try {
+      const report = await RunJHUTAgentEval(selectedProfile)
+      setAgentEval(report)
+      setStatus(`JHUT browser eval complete: ${report.pass_count}/${report.total} passed`)
+    } catch (e) { setStatus(`JHUT eval failed: ${e}`) } finally { setRunning(false) }
+  }
+
   const runGrammarProbe = async () => {
     if (!selectedProfile) return
     setRunning(true)
@@ -543,6 +554,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
           onRunBenchmark={() => void runBenchmark()}
           onRunContextSweep={() => void runContextSweep()}
           onRunAgentEval={() => void runAgentEval()}
+          onRunJHUTEval={() => void runJHUTEval()}
           onRunGrammarProbe={() => void runGrammarProbe()}
         />
       )}
@@ -610,6 +622,7 @@ function AdvancedSuite({
   onRunBenchmark,
   onRunContextSweep,
   onRunAgentEval,
+  onRunJHUTEval,
   onRunGrammarProbe,
 }: {
   running: boolean
@@ -626,6 +639,7 @@ function AdvancedSuite({
   onRunBenchmark: () => void
   onRunContextSweep: () => void
   onRunAgentEval: () => void
+  onRunJHUTEval: () => void
   onRunGrammarProbe: () => void
 }) {
   return (
@@ -675,6 +689,7 @@ function AdvancedSuite({
           <div><strong>Reliability Probes</strong><span>Live checks for production agent path and grammar-constrained tool arguments.</span></div>
           <div className="advanced-actions">
             <button onClick={onRunAgentEval} disabled={running || !selectedProfile}>Run Agent Eval</button>
+            <button onClick={onRunJHUTEval} disabled={running || !selectedProfile}>Run JHUT Browser Eval</button>
             <button onClick={onRunGrammarProbe} disabled={running || !selectedProfile}>Grammar Probe</button>
           </div>
         </div>
@@ -703,9 +718,11 @@ function AgentEvalPanel({ report }: { report: AgentEvalReport | null }) {
               <span className={result.status_pass ? 'ok' : 'warn'}>status</span>
               <span className={result.artifact_pass ? 'ok' : 'warn'}>artifact</span>
               <span className={result.hygiene_pass ? 'ok' : 'warn'}>hygiene</span>
+              {result.verifier_version && <span className={result.runtime_pass ? 'ok' : 'warn'}>browser</span>}
               <span className={result.false_done ? 'warn' : 'ok'}>false-done</span>
             </div>
             {result.fail_reason && <div className="agent-eval-fail">{result.fail_reason}</div>}
+            {result.verifier_version && <div className="agent-eval-fail">{result.verifier_version} · {result.model_id} · {result.context_tokens} ctx · artifact {result.artifact_hash?.slice(0, 12) || 'missing'}<br />Desktop: {result.desktop_screenshot}<br />Mobile: {result.mobile_screenshot}</div>}
           </div>
         ))}
       </div>

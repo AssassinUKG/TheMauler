@@ -1,21 +1,25 @@
-# TheMauler — Agent-Loop Upgrade Roadmap (Hermes / Claude-Code-class patterns)
+# TheMauler - Agent-Loop Upgrade Roadmap (Hermes / Claude-Code-class patterns)
 
 **Created:** 2026-06-29
 **Owner doc:** live, implementable source of truth for the next agent-loop capability tier.
 **Analysis / why:** [agent-loop-upgrade-plan-2026-06.md](agent-loop-upgrade-plan-2026-06.md) (cross-project),
-building on the completed [agent-reliability-roadmap.md](agent-reliability-roadmap.md) (R1–R10) and
+building on the completed [agent-reliability-roadmap.md](agent-reliability-roadmap.md) (R1-R10) and
 [agent-loop-research-report.md](agent-loop-research-report.md).
-**Audience:** an engineer or AI agent picking this up cold. Every item is self-contained — files,
+**Audience:** an engineer or AI agent picking this up cold. Every item is self-contained - files,
 signatures, algorithm, wiring anchors, tests, and acceptance criteria are spelled out so you can
 implement without re-deriving context.
 
-## Current Status - 2026-07-06
+## Current Status - 2026-07-08
 
 Mauler-only next order:
-1. Run one live stability smoke on the current build and inspect RunLedger for repeated terminal/tool loops.
+1. Run one live stability smoke on the current build and inspect RunLedger for repeated terminal/tool loops, `session_repair`, `tool_cache_hit`, `loop_circuit_breaker`, malformed compact args, and false loop trips during legitimate polling/pagination.
 2. Fix any remaining compact-tool argument sanitation found by that run: `shell.command` aliases, XML-ish path tags, and residual HTML entities before routing/logging.
-3. Add `agent_eval` cases for those failure classes.
-4. Start U16 every-turn message-structure repair.
+3. Add or tune `agent_eval` cases for any failure classes that appear in the live run, especially same-result different-shell-input loops or period-2 tool ping-pong if they regress.
+4. Start U17 verification-gate loop only after the live smoke is clean.
+
+Implementation update 2026-07-08: outcome-aware loop detection, period-2/3 tool-cycle detection,
+read-only cached tool-result coverage, and U16 every-turn message-structure repair are implemented
+and locally verified. Production build output is `build\bin\TheMauler.exe`.
 
 Do not start U22/U23 task-DAG or experience learning until U16/U20/U18/U19/U17/U21 are green. Do not add provider/backend work here; the live path is TheMauler -> InferenceBridge OpenAI-compatible API.
 
@@ -31,33 +35,33 @@ Do not start U22/U23 task-DAG or experience learning until U16/U20/U18/U19/U17/U
 >   regression-graded. Build via `.\build.ps1`.
 
 ## Status legend
-- 🔨 **Spec ready** — not started; full spec below.
-- 🧪 **Held** — needs a live backend to validate before enabling.
+- [spec] **Spec ready** - not started; full spec below.
+- [test] **Held** - needs a live backend to validate before enabling.
 
 ## Item map
 
 | ID | Title | Tier | Effort | Status |
 |----|-------|------|--------|--------|
-| U1 | Dynamic reasoning-effort control (`set_reasoning_effort` tool) | 1 | S | ✅ first pass |
-| U2 | Tool-result disk offload + `read_tool_result` (replace blind truncation) | 1 | M | ✅ first pass |
-| U3 | InferenceBridge launch-flag + quant assertions in Doctor | 1 | S | ✅ first pass |
-| U4 | Programmatic tool calling (`run_script` over the registry) | 2 | M–L | ✅ first pass |
-| U5 | Graduated compaction ladder (add microcompact tier) | 2 | M | ✅ first pass |
-| U6 | Externalized `PROGRESS.md` resume artifact | 2 | S–M | ✅ first pass |
-| U7 | R7 grammar-constrained tool args — run the live probe, then ship gated | 3 | M | 🧪 |
-| U16 | Every-turn message-structure repair (port HelixClaw `session_repair`) | 4 | S–M | 🔨 |
-| U17 | Verification-gate loop (build/test/lint gates that block completion) | 4 | M | 🔨 |
-| U18 | Structural write-guards (protected paths, patch-size, file-count caps) | 4 | S–M | 🔨 |
-| U19 | Role-scoped tool sets (planner / executor / reviewer allowlists) | 4 | M | 🔨 |
-| U20 | Tool permission classes on `ToolSpec` (ReadOnly/Edit/Execute/Network/Delegate) | 4 | S | 🔨 |
-| U21 | Plan→review completion rails (spec-coverage + deliverable-exists) | 4 | M | 🔨 |
-| U22 | Experience / tool-sequence learning loop | 5 | L | 🔨 |
-| U23 | Task-DAG dispatcher (port HelixClaw `helix_graph`) | 5 | L | 🔨 |
+| U1 | Dynamic reasoning-effort control (`set_reasoning_effort` tool) | 1 | S | [done] first pass |
+| U2 | Tool-result disk offload + `read_tool_result` (replace blind truncation) | 1 | M | [done] first pass |
+| U3 | InferenceBridge launch-flag + quant assertions in Doctor | 1 | S | [done] first pass |
+| U4 | Programmatic tool calling (`run_script` over the registry) | 2 | M-L | [done] first pass |
+| U5 | Graduated compaction ladder (add microcompact tier) | 2 | M | [done] first pass |
+| U6 | Externalized `PROGRESS.md` resume artifact | 2 | S-M | [done] first pass |
+| U7 | R7 grammar-constrained tool args - run the live probe, then ship gated | 3 | M | [test] |
+| U16 | Every-turn message-structure repair (port HelixClaw `session_repair`) | 4 | S-M | [done] first pass |
+| U17 | Verification-gate loop (build/test/lint gates that block completion) | 4 | M | [spec] |
+| U18 | Structural write-guards (protected paths, patch-size, file-count caps) | 4 | S-M | [spec] |
+| U19 | Role-scoped tool sets (planner / executor / reviewer allowlists) | 4 | M | [spec] |
+| U20 | Tool permission classes on `ToolSpec` (ReadOnly/Edit/Execute/Network/Delegate) | 4 | S | [spec] |
+| U21 | Plan->review completion rails (spec-coverage + deliverable-exists) | 4 | M | [spec] |
+| U22 | Experience / tool-sequence learning loop | 5 | L | [spec] |
+| U23 | Task-DAG dispatcher (port HelixClaw `helix_graph`) | 5 | L | [spec] |
 
-> **U16–U23 are HelixClaw-parity ports.** They close the architectural gap catalogued in
+> **U16-U23 are HelixClaw-parity ports.** They close the architectural gap catalogued in
 > [helixclaw-parity-comparison-2026-07.md](helixclaw-parity-comparison-2026-07.md). HelixClaw is a
-> hierarchical multi-agent OS (CEO → supervisor actor → typed workers, each with an explicit
-> planner→executor→observer cycle); TheMauler is a single hardened loop. These items backport the
+> hierarchical multi-agent OS (CEO -> supervisor actor -> typed workers, each with an explicit
+> planner->executor->observer cycle); TheMauler is a single hardened loop. These items backport the
 > reliability and correctness machinery that makes HelixClaw's agents land tasks more often, in the
 > order that gives the most quality per unit effort. HelixClaw source lives under
 > `C:\Users\richa\Documents\HelixClaw\crates\helixclaw-agents\src\`.
@@ -260,7 +264,7 @@ without reading raw run logs.
 
 # Tier 1
 
-## U1. Dynamic reasoning-effort control ✅ first pass  ⭐ do first
+## U1. Dynamic reasoning-effort control [done] first pass  * do first
 
 **Goal.** Let the agent scale its own thinking depth per step via a state-modifying tool, and let
 the auto-router set a sensible default per mode. Directly attacks the dominant local-Qwen failure
@@ -273,17 +277,17 @@ is a coarse global per-profile toggle plus the blunt `forceNoThink` after N tool
 (`app.go:2360`).
 
 **Files.**
-- Touch: `internal/llm/client.go` (`Request` struct, ~`:88`) — add `ReasoningEffort string`.
-- Touch: `internal/app/app.go` — `buildChatRequest` (~`:5096`), `runAgentLoop` loop head (effort
+- Touch: `internal/llm/client.go` (`Request` struct, ~`:88`) - add `ReasoningEffort string`.
+- Touch: `internal/app/app.go` - `buildChatRequest` (~`:5096`), `runAgentLoop` loop head (effort
   state + per-turn override), tool-exec dispatch (intercept the new tool), `buildSystemPrompt`
   (~`:6749`, add the nudge).
-- Touch: `internal/app/agent_modes.go` — set a default effort per `AgentMode`.
-- New: `internal/app/reasoning_effort.go` + `_test.go` (the effort→params mapping helper).
+- Touch: `internal/app/agent_modes.go` - set a default effort per `AgentMode`.
+- New: `internal/app/reasoning_effort.go` + `_test.go` (the effort->params mapping helper).
 
 **Data / mapping.**
 ```go
 // effortToThinking maps an effort tier to thinking + budget knobs, layered on top
-// of the profile's active sampler family. minimal/low ⇒ thinking off or tight budget.
+// of the profile's active sampler family. minimal/low => thinking off or tight budget.
 type effortPlan struct {
     enableThinking bool
     maxTokensCap   int   // 0 = leave profile value; else min(profile.MaxTokens, cap)
@@ -331,7 +335,7 @@ scenario with a live/local backend to compare truncation/auto-continue rates.
 
 ---
 
-## U2. Tool-result disk offload + `read_tool_result` ✅ first pass
+## U2. Tool-result disk offload + `read_tool_result` [done] first pass
 
 **Goal.** Replace lossy truncation of large tool results with offload-to-disk + a head/tail preview
 + a retrieval handle, so nothing needed is permanently lost.
@@ -339,15 +343,15 @@ scenario with a live/local backend to compare truncation/auto-continue rates.
 **Why.** Claude Code offloads oversized results to disk and keeps a ~2 KB preview + handle in
 context (per-tool 50 KB, per-message 200 KB caps), run before every model call. TheMauler currently
 truncates (`truncateToolResult`, ~`app.go:3628`; `MaxToolResultChars` default 12000,
-`model.go:78`/`defaults.go:25`) — the dropped middle is unrecoverable. This also completes the
+`model.go:78`/`defaults.go:25`) - the dropped middle is unrecoverable. This also completes the
 "lazy context retrieval beyond master skills" backlog item in `AGENTS.md`.
 
 **Files.**
-- New: `internal/app/tool_result_store.go` + `_test.go` — run-scoped blob store.
-- New: `internal/tools/read_tool_result.go` + `_test.go` — retrieval tool.
-- Touch: `internal/app/app.go` tool-result handling (~`:2955`–`2980`, where
+- New: `internal/app/tool_result_store.go` + `_test.go` - run-scoped blob store.
+- New: `internal/tools/read_tool_result.go` + `_test.go` - retrieval tool.
+- Touch: `internal/app/app.go` tool-result handling (~`:2955`-`2980`, where
   `summarizeShellResultForContext` / `MaxToolResultChars` is applied) to offload instead of hard-cut.
-- Touch: `internal/settings/model.go` + `defaults.go` — add `ToolResultPreviewChars` (default 2000),
+- Touch: `internal/settings/model.go` + `defaults.go` - add `ToolResultPreviewChars` (default 2000),
   keep `MaxToolResultChars` as the offload trigger; add a per-message aggregate cap field.
 
 **Signature.**
@@ -361,7 +365,7 @@ func (a *App) loadToolResultSlice(runID, id string, offset, limit int) (string, 
 **Algorithm.**
 1. When a tool result length > `MaxToolResultChars`: write the full text to
    `~/.config/mauler/run-artifacts/<runID>/<id>.txt` (or the sessionstore), then replace the
-   in-context content with: `head (preview/2) + "\n…[offloaded N chars, id=<id>; call read_tool_result to page]…\n" + tail (preview/2)`. Record id on the run for cleanup.
+   in-context content with: `head (preview/2) + "\n...[offloaded N chars, id=<id>; call read_tool_result to page]...\n" + tail (preview/2)`. Record id on the run for cleanup.
 2. Track a per-message aggregate; if several results in one turn exceed the aggregate cap, offload
    the largest first until under budget.
 3. `read_tool_result(result_id, offset?, limit?)` tool (read-only) returns the slice via
@@ -389,17 +393,17 @@ model can use `read_tool_result` instead of rerunning the same command. Remainin
 
 ---
 
-## U3. InferenceBridge launch-flag + quant assertions in Doctor ✅ first pass
+## U3. InferenceBridge launch-flag + quant assertions in Doctor [done] first pass
 
 **Goal.** Make the Doctor assert the backend launch configuration that is the *root cause* fix for
 several failures the loop currently recovers from, and warn on an under-capable quant.
 
-**Why.** `agent-loop-research-report.md` §6.4 + ISSUES R7/R8: without `--jinja` (or `use_jinja`),
+**Why.** `agent-loop-research-report.md` section 6.4 + ISSUES R7/R8: without `--jinja` (or `use_jinja`),
 Qwen emits `<tool_call>` XML / `</think>` as text; `--reasoning-format deepseek` aligns the parser;
-**speculative decoding** rejections at `</think>` spike EOS probability → the early-termination the
+**speculative decoding** rejections at `</think>` spike EOS probability -> the early-termination the
 loop defends against; very low quants sit below the tool-calling accuracy cliff, while Q4_K_S should
 be benchmarked against the project default UD-Q4_K_XL on the RTX 3090. Existing
-`addLlamacppAgentFlagAdvisory` + `addModelTierCheck` (`doctor.go`) are the hook — extend them.
+`addLlamacppAgentFlagAdvisory` + `addModelTierCheck` (`doctor.go`) are the hook - extend them.
 
 **Files.** Touch: `internal/app/doctor.go` (extend the advisory funcs), and wherever live process /
 `/props` is read (`recordBackendRuntimeMismatch`).
@@ -407,7 +411,7 @@ be benchmarked against the project default UD-Q4_K_XL on the RTX 3090. Existing
 **Algorithm.**
 1. From `/props` (and the managed-bridge launch line if available), assert: `--jinja`/`use_jinja`,
    `--reasoning-format deepseek` (or equivalent), flash-attention on, and **speculative decoding
-   off** (or warn if on while truncation/repetition telemetry is high — cross-ref R10 metrics).
+   off** (or warn if on while truncation/repetition telemetry is high - cross-ref R10 metrics).
 2. Quant check: parse the model name for known GGUF quant tags. Warn on sub-Q4, call out Q4_K_S as
    a benchmark/watch item, and keep UD-Q4_K_XL as the 24 GB RTX 3090 default. Do not recommend Q6_K
    for Qwen3.6-class 32K profiles on this machine.
@@ -418,7 +422,7 @@ Q4 warns, fully-correct passes.
 
 **Acceptance.** Doctor flags a misconfigured bridge with actionable fixes; a correct bridge passes.
 
-**Effort.** S. (Highest ROI per the research — zero loop risk; shared with HelixClaw, see §U-shared.)
+**Effort.** S. (Highest ROI per the research - zero loop risk; shared with HelixClaw, see section U-shared.)
 
 **Done so far.** Doctor now reads `/props` for launch/config signals, reports Jinja, Qwen
 reasoning-format, flash-attention, and speculative/draft decoding state, and parses GGUF quant tags
@@ -430,40 +434,40 @@ line if/when that endpoint exposes exact argv.
 
 # Tier 2
 
-## U4. Programmatic tool calling (`run_script`) ✅ first pass
+## U4. Programmatic tool calling (`run_script`) [done] first pass
 
 **Goal.** One tool that runs a short, sandboxed script which can call other (curated) tools and do
-control flow inside a single inference turn — collapsing N round-trips into one.
+control flow inside a single inference turn - collapsing N round-trips into one.
 
 **Why.** Hermes' `execute_code` / the CodeAct paradigm: "programmatic tool calling collapses
 multi-step pipelines into single inference calls." On a local 3090 every extra turn is the
 expensive, failure-prone part. TheMauler already has the artifact runner (`RunArtifact(lang, code)`,
-~`app.go:1693`) and a clean tool registry — this is a thin, guarded layer on top.
+~`app.go:1693`) and a clean tool registry - this is a thin, guarded layer on top.
 
 **Files.**
 - New: `internal/tools/run_script.go` + `_test.go`.
-- Touch: `internal/app/app.go` — wire a script→registry bridge so the script's tool calls reuse the
+- Touch: `internal/app/app.go` - wire a script->registry bridge so the script's tool calls reuse the
   *real* registry path (guardrails, mutation verify, rollback, budgets, confirm gate).
 - Touch: `defaults.go` toolsets (gate behind `local-code`/`unrestricted`, not `safe`).
 
 **Design (start minimal + sandboxed).**
 - Expose a tiny API to the script: `read(path)`, `glob(pat)`, `grep(pat, paths)`, `write(path, s)`,
-  `sh(cmd)` — each call routes back through `tools.Registry.Run` so every existing guardrail,
+  `sh(cmd)` - each call routes back through `tools.Registry.Run` so every existing guardrail,
   budget counter (`MaxToolCalls`, wall-clock), mutation verify, and confirm gate still applies.
 - Language: one to start (Python via the artifact runner, or a Go-embedded JS like `goja`). Hard
-  per-script timeout + step cap (e.g. ≤30 tool calls/script). Return combined stdout + a structured
+  per-script timeout + step cap (e.g. <=30 tool calls/script). Return combined stdout + a structured
   results array as one tool result (offloaded via U2 if large).
 - Destructive: `run_script` is `Destructive()=true`; in non-autonomous mode it hits the confirm
   gate; in autonomous mode each inner mutating/`sh` call still respects per-tool permissions.
 
 **Tests.** `TestRunScriptRoutesThroughRegistry`, `TestRunScriptRespectsBudgetAndTimeout`,
 `TestRunScriptGuardrailBlocksSecretWrite`, `agent_eval` `read-grep-summarize` scenario finishing in
-1–2 model turns vs N.
+1-2 model turns vs N.
 
-**Acceptance.** A multi-file read+grep+summarize completes in 1–2 turns; a script that tries a
+**Acceptance.** A multi-file read+grep+summarize completes in 1-2 turns; a script that tries a
 blocked command or secret write is stopped by the same guardrails as a direct call.
 
-**Effort.** M–L. Biggest token/latency payoff once U1+U2 land.
+**Effort.** M-L. Biggest token/latency payoff once U1+U2 land.
 
 **Done so far.** `run_script` is wired as a Go-native orchestration tool that can call curated
 Mauler tools through the registry path with budgets, cancellation, ledgering, tool-result offload,
@@ -475,9 +479,9 @@ multi-step workflows use fewer model turns without losing evidence.
 
 ---
 
-## U5. Graduated compaction ladder ✅ first pass
+## U5. Graduated compaction ladder [done] first pass
 
-**Goal.** Formalize a cheap→expensive compaction ladder so summarization is the last resort, and add
+**Goal.** Formalize a cheap->expensive compaction ladder so summarization is the last resort, and add
 a microcompact tier that drops old thinking traces first.
 
 **Why.** Claude Code runs a 5-layer ladder; no single strategy fits all pressure, and the cheap
@@ -489,13 +493,13 @@ an explicit ordering, plus "keep critical rules in MAULER.md, not mid-history."
 `MicroCompact`), `internal/app/app.go` compaction decision site (sequence the tiers by threshold).
 
 **Ladder (apply in order, each gated by a rising threshold).**
-1. **Offload** oversized tool results (U2) — already trims the biggest contributor.
-2. **Snip** old tool results (`ClearOldToolResults`) — keep each assistant→tool *pair* intact (never
+1. **Offload** oversized tool results (U2) - already trims the biggest contributor.
+2. **Snip** old tool results (`ClearOldToolResults`) - keep each assistant->tool *pair* intact (never
    orphan a tool result from its call).
-3. **Microcompact** — `DropOldReasoning`: strip `<think>`/reasoning from turns older than keepRecent
+3. **Microcompact** - `DropOldReasoning`: strip `<think>`/reasoning from turns older than keepRecent
    (cheap, lossless for the task; reasoning is already a separable field).
-4. **Collapse** — protect last N turns verbatim, summarize the middle.
-5. **Auto-summarize** — existing `doCompact` (last resort).
+4. **Collapse** - protect last N turns verbatim, summarize the middle.
+5. **Auto-summarize** - existing `doCompact` (last resort).
 - After any tier fires, re-inject goal + todo state (R9 already does this on `contextDropped`) and
   ensure critical rules live in MAULER.md (system prompt), which survives all tiers.
 
@@ -515,14 +519,14 @@ proves summarization fires less often than the old two-tier path.
 
 ---
 
-## U6. Externalized `PROGRESS.md` resume artifact ✅ first pass
+## U6. Externalized `PROGRESS.md` resume artifact [done] first pass
 
 **Goal.** A single workspace-scoped, human- and model-readable progress file the agent maintains, so
 a fresh/cold context resumes long work with intent intact.
 
 **Why.** Anthropic's long-running-agents guidance pairs compaction with externalized state
 (`progress.txt` + init + git commit). TheMauler has the storage (R3 checkpoint/resume
-`run_checkpoint.go:46`; milestone memory M1–M4; session FTS) but no single canonical "where am I"
+`run_checkpoint.go:46`; milestone memory M1-M4; session FTS) but no single canonical "where am I"
 artifact the model owns.
 
 **Files.** New: `internal/app/progress_artifact.go` + `_test.go`. Touch: `runAgentLoop` (flush a
@@ -544,7 +548,7 @@ repo.
 **Acceptance.** Kill a long run mid-task; cold restart resumes with correct objective/next step from
 PROGRESS.md.
 
-**Effort.** S–M.
+**Effort.** S-M.
 
 **Done so far.** Added the `progress` tool backed by workspace `.mauler/progress.md`, append hooks on
 context drop and run finish, `run_script` helper access, ledger `progress_update` events, and prompt
@@ -555,10 +559,10 @@ to explicitly show the progress packet it used and add a kill/resume eval.
 
 # Tier 3
 
-## U7. R7 grammar-constrained tool args — probe then ship 🧪
+## U7. R7 grammar-constrained tool args - probe then ship [test]
 
 **Goal.** Force valid tool-call JSON at generation time for the single-tool/`required` case,
-eliminating the malformed-args class — but only after the live probe confirms it's safe.
+eliminating the malformed-args class - but only after the live probe confirms it's safe.
 
 **Why / held.** Spec is in `agent-reliability-roadmap.md` R7; the `RunGrammarToolArgsProbe` Benchmark
 action already exists. llama.cpp `json_schema` constrains message *content*, not the tool-call
@@ -569,41 +573,47 @@ valid `tool_calls` envelope, gate it exactly in `buildChatRequest`/`toolDefsAndC
 `toolChoice=="required"` and `len(toolDefs)==1`, attach `JSONSchema = toolDefs[0].Function.Parameters`
 behind a `Profile.GrammarToolArgs` flag (default off). Otherwise leave unset.
 
-**Acceptance.** With the flag on + gated condition met, malformed-arg recoveries → ~0 in the eval
+**Acceptance.** With the flag on + gated condition met, malformed-arg recoveries -> ~0 in the eval
 harness; flag-off path unchanged.
 
 **Effort.** M (once a live server is on hand).
 
 ---
 
-# Tier 4 — HelixClaw Parity Ports
+# Tier 4 - HelixClaw Parity Ports
 
 These backport the reliability/correctness spine that HelixClaw already ships. Full architectural
 comparison and rationale: [helixclaw-parity-comparison-2026-07.md](helixclaw-parity-comparison-2026-07.md).
-Grade each on both loops with the same multi-step scenarios (see §U-shared).
+Grade each on both loops with the same multi-step scenarios (see section U-shared).
 
-## U16. Every-turn message-structure repair 🔨  ⭐ do first of Tier 4
+## U16. Every-turn message-structure repair [done] first pass
 
 **Goal.** Sanitize the *message history structure* before every model call, not just during
 compaction, so a malformed transcript can never wedge the loop or a local model.
+
+**Implementation update 2026-07-08.** `internal/agent/history.go` now exposes
+`RepairStructure() []RepairAction` / `RepairMessages(...)` covering the seven repair phases, and
+`internal/app/app.go` calls it before each model request while logging `session_repair` events.
+The 2026-07-08 pass split dangling trailing assistant tool calls into explicit phase 7
+`strip_trailing_tool_call` actions and added no-op clean-history coverage.
 
 **Why.** HelixClaw's `session_repair.rs` runs a 7-phase repair on every packet and is a large part
 of why its agents "just work" on local models: it strips invalid roles, drops a leading assistant
 turn, merges consecutive user messages, strips assistant tool-calls that have no matching results,
 removes orphaned tool-results, fills empty content with a placeholder, and strips trailing tool-calls.
-TheMauler only does a subset (`sanitizeCompactedMessages`, `history.go:343` — orphaned tool-result +
+TheMauler only does a subset (`sanitizeCompactedMessages`, `history.go:343` - orphaned tool-result +
 trailing tool-call handling) and only during compaction. The other phases (leading assistant,
 consecutive-user merge, invalid role, empty-content fill) are missing, and none run on the normal
 per-turn path.
 
-**Reference.** `helixclaw-agents/src/session_repair.rs` — `pub fn repair(messages) -> Vec<RepairAction>`
+**Reference.** `helixclaw-agents/src/session_repair.rs` - `pub fn repair(messages) -> Vec<RepairAction>`
 plus `is_repair_placeholder`; its tests enumerate all 7 phases and the multiple-consecutive-tool-results
 allowance.
 
 **Files.**
-- Touch: `internal/agent/history.go` — generalize `sanitizeCompactedMessages` into
+- Touch: `internal/agent/history.go` - generalize `sanitizeCompactedMessages` into
   `RepairStructure() []RepairAction` covering all phases; keep the existing behavior as phases 4/5/7.
-- Touch: `internal/app/app.go` — call it in `runAgentLoop` just before `buildChatRequest`
+- Touch: `internal/app/app.go` - call it in `runAgentLoop` just before `buildChatRequest`
   (idempotent; no-op when history is already clean).
 - New test data: extend `history_test.go`.
 
@@ -629,9 +639,11 @@ allowance.
 content) is repaired to a valid packet with no backend 400; a clean transcript is unchanged and
 returns zero actions.
 
-**Effort.** S–M. Highest reliability ROI of the parity set; fully self-contained and offline-testable.
+**Verified.** `go test ./internal/agent`, `go test ./internal/app/...`, `go test ./...`,
+`go vet ./...`, `npm run --prefix frontend build`, and `.\build.ps1 -SkipTests` passed on
+2026-07-08.
 
-## U17. Verification-gate loop 🔨
+## U17. Verification-gate loop [spec]
 
 **Goal.** Gate task completion on real build/test/lint evidence with a structured verdict, so the
 agent cannot declare success on code that doesn't compile or pass.
@@ -639,7 +651,7 @@ agent cannot declare success on code that doesn't compile or pass.
 **Why.** HelixClaw runs `verification::run_verification_gates` (build/clippy/test gates) and a
 `verify_loop` that parses a `GateVerdictEnvelope` and carries `VerifierImprovement` items with a
 **blocking** severity (`is_blocking`) that *prevents completion* and feeds the exact failures back to
-the model. TheMauler verifies individual mutations (`mutation_verifier.go` — per-write lint) and
+the model. TheMauler verifies individual mutations (`mutation_verifier.go` - per-write lint) and
 appends verifier hints (`critical_verifier.go`), but never gates the whole task on "does the project
 build / do tests pass." This is the difference between "the file changed" and "the change works."
 
@@ -649,18 +661,18 @@ build / do tests pass." This is the difference between "the file changed" and "t
 
 **Files.**
 - New: `internal/app/verify_gate.go` + `_test.go`.
-- Touch: `internal/app/app.go` — before a `done`/final assistant turn on a coding task, run the gate;
+- Touch: `internal/app/app.go` - before a `done`/final assistant turn on a coding task, run the gate;
   if it blocks, inject the failures as a system message and continue the loop instead of finishing.
 - Reuse: `mutation_verifier.go` stays the per-file layer; this is the whole-task layer.
 
 **Design.**
 - Gate command set is project-type-detected (Go: `go build ./...`, `go vet ./...`, `go test ./...`;
-  generic: a configurable command list). Do not hardcode cargo — that is HelixClaw's stack.
+  generic: a configurable command list). Do not hardcode cargo - that is HelixClaw's stack.
 - Parse each gate into a `GateResult{name, passed, summary, output}` and a `VerifyVerdict{status:
   pass|fail|error, blocking bool, improvements []string}`. Truncate/offload large gate output via U2.
 - Only gate when the run actually mutated files (track via the existing rollback/mutation signal) and
-  only in Builder/Fixer modes — never gate a pure research/recon run.
-- Cap gate re-runs per task (e.g. 3) to avoid an infinite fix→verify→fix loop; after the cap, surface
+  only in Builder/Fixer modes - never gate a pure research/recon run.
+- Cap gate re-runs per task (e.g. 3) to avoid an infinite fix->verify->fix loop; after the cap, surface
   the residual failures in the final output honestly rather than looping.
 
 **Tests.** `TestVerifyGateParsesPassFail`, `TestVerifyGateBlocksCompletionOnFailure`,
@@ -672,31 +684,31 @@ instead of declaring success; a passing run finishes normally; a research run is
 
 **Effort.** M.
 
-## U18. Structural write-guards 🔨
+## U18. Structural write-guards [spec]
 
 **Goal.** Hard limits on what the agent can mutate in one run: protected paths, max patch size, max
-file count — enforced at the tool boundary, not by prompt.
+file count - enforced at the tool boundary, not by prompt.
 
 **Why.** HelixClaw's `guard.rs` has `GuardConfig` (protected-path denylist, `check_patch_size`,
 `check_file_count`) plus a `GuardTracker` that accumulates modifications across the run and refuses
 once caps are hit. TheMauler's `guardrails.go` only redacts secrets and labels injection in tool
-*output* — it cannot stop the model from rewriting 40 files or touching a protected path. Its rollback
+*output* - it cannot stop the model from rewriting 40 files or touching a protected path. Its rollback
 (`internal/agent/rollback.go`) is in-memory only and dies with the process.
 
-**Reference.** `helixclaw-agents/src/guard.rs` — `GuardConfig::{check_protected_path, check_patch_size,
+**Reference.** `helixclaw-agents/src/guard.rs` - `GuardConfig::{check_protected_path, check_patch_size,
 check_file_count}`, `GuardViolation`, `GuardTracker::record_modification`, `normalize_path`.
 
 **Files.**
 - New: `internal/app/write_guard.go` + `_test.go` (config load + per-run tracker).
 - Touch: `write_file` / `edit_file` dispatch in `internal/app/app.go` (the registry-run path) to
   consult the guard before executing and return a `guard_violation` contract on refusal.
-- Config: add a `.mauler/guard.toml` (or a `settings.Settings` block) — protected globs, max patch
+- Config: add a `.mauler/guard.toml` (or a `settings.Settings` block) - protected globs, max patch
   lines, max files/run; sensible defaults (deny `.git/`, secrets, the guard config itself).
 
 **Algorithm.**
 1. Load `GuardConfig` from repo/workspace at run start (defaults if absent).
-2. On each mutating tool call: `normalizePath`, check protected globs → refuse with the reason; check
-   accumulated file count and this patch's line count against caps → refuse when exceeded.
+2. On each mutating tool call: `normalizePath`, check protected globs -> refuse with the reason; check
+   accumulated file count and this patch's line count against caps -> refuse when exceeded.
 3. Track modifications in a run-scoped `GuardTracker`; expose the count in loop metrics / Run cockpit.
 4. Refusals return a structured contract (`state=guard_violation, next_tool, do_not_repeat`) so the
    model adapts instead of retrying.
@@ -708,29 +720,29 @@ check_file_count}`, `GuardViolation`, `GuardTracker::record_modification`, `norm
 **Acceptance.** An attempt to write into a protected path or exceed the file/patch caps is refused with
 an actionable contract; normal edits within caps pass unchanged.
 
-**Effort.** S–M. High safety value, low loop risk.
+**Effort.** S-M. High safety value, low loop risk.
 
-## U19. Role-scoped tool sets 🔨
+## U19. Role-scoped tool sets [spec]
 
 **Goal.** Give planner / executor / reviewer phases *different tool allowlists*, so a planning or
 review phase structurally cannot edit files and a reviewer cannot run destructive commands.
 
 **Why.** HelixClaw's `claude/executor.rs` exposes `planner_tools()`, `executor_tools()`,
-`reviewer_tools()` — the role bounds capability, not just the prompt. TheMauler swaps a *persona*
+`reviewer_tools()` - the role bounds capability, not just the prompt. TheMauler swaps a *persona*
 (`agent_modes.go`) but keeps the same tool set, so a "Reviewer" run still has write/shell tools and can
 drift into editing. This composes with U20 (permission classes) and the existing phase router
 (`tool_router.go`, U11).
 
 **Files.**
-- Touch: `internal/app/agent_modes.go` — attach an allowed-tool-class set (or explicit allowlist) to
+- Touch: `internal/app/agent_modes.go` - attach an allowed-tool-class set (or explicit allowlist) to
   each `AgentMode`.
-- Touch: `internal/app/tool_router.go` — intersect the phase toolset (U11) with the mode's role
+- Touch: `internal/app/tool_router.go` - intersect the phase toolset (U11) with the mode's role
   allowlist when building `toolDefsAndChoiceForTurn`.
 - Depends on: U20 for the class taxonomy (or use explicit tool-name lists in the interim).
 
 **Design.**
-- Planner/Reviewer/Researcher → ReadOnly + Network + Delegate classes (no Edit/Execute).
-- Builder/Fixer/Ops → full set (Edit + Execute) as today.
+- Planner/Reviewer/Researcher -> ReadOnly + Network + Delegate classes (no Edit/Execute).
+- Builder/Fixer/Ops -> full set (Edit + Execute) as today.
 - Keep it a *narrowing* on top of the existing enabled/allowed gates; never widen beyond what the user
   enabled.
 
@@ -741,7 +753,7 @@ drift into editing. This composes with U20 (permission classes) and the existing
 
 **Effort.** M.
 
-## U20. Tool permission classes on `ToolSpec` 🔨
+## U20. Tool permission classes on `ToolSpec` [spec]
 
 **Goal.** Tag every tool with a permission class so gating (U18/U19), confirm prompts, and the UI can
 reason about capability uniformly instead of the current binary `Destructive()`.
@@ -751,17 +763,17 @@ reason about capability uniformly instead of the current binary `Destructive()`.
 (`internal/tools/registry.go:25`), which can't distinguish "reads the network" from "runs code" from
 "edits files." A class taxonomy is the clean substrate for role-scoping and phase routing.
 
-**Reference.** `helixclaw-agents/src/tools.rs` — `runtime_tool_permission_class`,
+**Reference.** `helixclaw-agents/src/tools.rs` - `runtime_tool_permission_class`,
 `ToolPermissionClass`.
 
 **Files.**
-- Touch: `internal/tools/registry.go` — add `PermissionClass` to `ToolSpec` and a
+- Touch: `internal/tools/registry.go` - add `PermissionClass` to `ToolSpec` and a
   `Class() ToolClass` method (default derived from `Destructive()` for back-compat).
 - Touch: each tool (or a central classifier func like HelixClaw's) to assign classes.
 - Touch: confirm-gate + `tool_router.go` to read the class.
 
 **Design.** `type ToolClass int` with `ReadOnly, Edit, Execute, Network, Delegate`. Keep
-`Destructive()` working (Edit/Execute ⇒ destructive). Additive; no behavior change until U18/U19
+`Destructive()` working (Edit/Execute => destructive). Additive; no behavior change until U18/U19
 consume it.
 
 **Tests.** `TestToolClassAssignments` (table over the registry), `TestDestructiveDerivedFromClass`.
@@ -770,27 +782,27 @@ consume it.
 
 **Effort.** S. Do this before U19 (it's the substrate).
 
-## U21. Plan→review completion rails 🔨
+## U21. Plan->review completion rails [spec]
 
 **Goal.** Semantic completion gates: before finishing, check the plan covered every asked-for feature
-and that an actual deliverable exists — not just that the loop ran out of steps.
+and that an actual deliverable exists - not just that the loop ran out of steps.
 
 **Why.** HelixClaw's `guardrails.rs` has `SpecCoverageRail` (fails a plan that doesn't cover every
 extracted goal feature) and `DeliverableExistsRail` (fails an approval with no deliverable), run
 through a `GuardrailPipeline`. TheMauler has nothing checking "did we actually do what the user
-asked" — false-done detection exists in benchmarks (U13) but isn't a completion gate.
+asked" - false-done detection exists in benchmarks (U13) but isn't a completion gate.
 
-**Reference.** `helixclaw-agents/src/guardrails.rs` — `Guardrail` trait, `SpecCoverageRail`,
+**Reference.** `helixclaw-agents/src/guardrails.rs` - `Guardrail` trait, `SpecCoverageRail`,
 `DeliverableExistsRail`, `GuardrailPipeline::{check_plan, check_review}`, `extract_goal_features`.
 
 **Files.**
 - New: `internal/app/completion_rails.go` + `_test.go`.
-- Touch: `runAgentLoop` finalization — run the rails before emitting `done`; on failure, inject the
+- Touch: `runAgentLoop` finalization - run the rails before emitting `done`; on failure, inject the
   gap ("goal feature X not addressed / no deliverable produced") and continue.
 - Reuse: the U9 run-facts / evidence layer for deliverable detection.
 
 **Design.**
-- `extractGoalFeatures(goal)` → keyword/feature set (port the stopword + keyword logic).
+- `extractGoalFeatures(goal)` -> keyword/feature set (port the stopword + keyword logic).
 - Spec-coverage: compare features against work done (files touched, todos closed, evidence pins).
 - Deliverable-exists: require at least one artifact/file/evidence when the task implied one.
 - Advisory-then-blocking: start advisory (log only) to tune against false positives, then flip to
@@ -804,9 +816,9 @@ without extra turns.
 
 **Effort.** M.
 
-# Tier 5 — Deeper architecture (defer until Tier 4 lands)
+# Tier 5 - Deeper architecture (defer until Tier 4 lands)
 
-## U22. Experience / tool-sequence learning loop 🔨
+## U22. Experience / tool-sequence learning loop [spec]
 
 **Goal.** Learn from past runs: suggest a likely tool sequence for a new task and a complexity
 override, and track per-model success rates to inform routing.
@@ -819,7 +831,7 @@ loops. TheMauler collects raw signal (`learning_candidates.go`, `spec_calibratio
 **Reference.** `helixclaw-agents/src/experience.rs`.
 
 **Files.** New `internal/app/experience.go` (+ store), consuming existing `learning_candidates` /
-milestone data; inject a compact "past runs like this used: read→grep→edit→test" hint at run start.
+milestone data; inject a compact "past runs like this used: read->grep->edit->test" hint at run start.
 
 **Design.** Log `ExperienceEntry{task_type, keywords, tool_sequence, outcome_quality, model}` per run;
 on a new task, classify + match keywords, suggest a sequence and complexity. Keep it advisory (a
@@ -833,17 +845,17 @@ sequence/complexity hint; cold start degrades gracefully to no hint.
 
 **Effort.** L.
 
-## U23. Task-DAG dispatcher 🔨
+## U23. Task-DAG dispatcher [spec]
 
-**Goal.** Let the model emit a task DAG once, then run it deterministically — parallel independent
-branches, dependency gates, retries — with no further LLM tokens for orchestration.
+**Goal.** Let the model emit a task DAG once, then run it deterministically - parallel independent
+branches, dependency gates, retries - with no further LLM tokens for orchestration.
 
 **Why.** HelixClaw's `helix_graph.rs` (`HelixGraph` + `HelixDispatcher`) fans out parallel branches
 and enforces dependency gates from a single JSON plan. TheMauler is strictly sequential; multi-part
 tasks pay a full model turn per step. This is the largest build and should follow the reliability
-items — a DAG over an unreliable step executor just fails in parallel.
+items - a DAG over an unreliable step executor just fails in parallel.
 
-**Reference.** `helixclaw-agents/src/helix_graph.rs` — `HelixGraph`, `HelixDispatcher`,
+**Reference.** `helixclaw-agents/src/helix_graph.rs` - `HelixGraph`, `HelixDispatcher`,
 dependency/retry handling; and `submit_helix_graph` in `tools.rs`.
 
 **Files.** New `internal/app/task_graph.go` + a `submit_task_graph` tool; the dispatcher reuses the
@@ -864,7 +876,7 @@ and the dependent after both, in fewer wall-clock seconds than sequential, with 
 
 ---
 
-## U-shared. Cross-project (InferenceBridge) — see the cross-project plan
+## U-shared. Cross-project (InferenceBridge) - see the cross-project plan
 
 U1, U2, U3, U5, U6 are mirrored in HelixClaw
 (`C:\Users\richa\Documents\HelixClaw\HELIXCLAW_AGENT_LOOP_UPGRADE.md`). Because both hit the same
@@ -879,21 +891,21 @@ Remaining cross-project work is live benchmark proof for structured output, Anth
 embedding-model runs.
 
 ## Suggested order
-1. **U1** (reasoning-effort) — smallest, highest ROI.
-2. **U2** (tool-result offload) — kills lossy truncation; closes a backlog item.
-3. **U3** (Doctor launch-flag/quant) — root cause, zero loop risk.
-4. **U4** (programmatic tool calling) — biggest token/latency win after U1+U2.
-5. **U5** (compaction ladder) → **U6** (PROGRESS.md).
+1. **U1** (reasoning-effort) - smallest, highest ROI.
+2. **U2** (tool-result offload) - kills lossy truncation; closes a backlog item.
+3. **U3** (Doctor launch-flag/quant) - root cause, zero loop risk.
+4. **U4** (programmatic tool calling) - biggest token/latency win after U1+U2.
+5. **U5** (compaction ladder) -> **U6** (PROGRESS.md).
 6. **U7** (grammar args) once a live server validates the probe.
 
 **HelixClaw-parity ports (Tier 4, do in this order):**
-7. **U16** (session-structure repair) — biggest reliability ROI, self-contained, offline-testable.
-8. **U20** (permission classes) — cheap substrate for the next two.
-9. **U18** (structural write-guards) — high safety, low risk.
-10. **U19** (role-scoped tool sets) — builds on U20.
-11. **U17** (verification gates) — correctness gate for coding runs.
-12. **U21** (plan→review completion rails) — semantic done-check, advisory-then-blocking.
+7. **U16** (session-structure repair) - biggest reliability ROI, self-contained, offline-testable.
+8. **U20** (permission classes) - cheap substrate for the next two.
+9. **U18** (structural write-guards) - high safety, low risk.
+10. **U19** (role-scoped tool sets) - builds on U20.
+11. **U17** (verification gates) - correctness gate for coding runs.
+12. **U21** (plan->review completion rails) - semantic done-check, advisory-then-blocking.
 
 **Deeper architecture (Tier 5, defer until Tier 4 is green):**
 13. **U22** (experience/tool-sequence learning).
-14. **U23** (task-DAG dispatcher) — last; needs U16+U17 underneath it.
+14. **U23** (task-DAG dispatcher) - last; needs U16+U17 underneath it.

@@ -1,0 +1,11 @@
+{
+  "name": "compact-arg-repair",
+  "prompt": "Read config.json and report the service name. If a tool call fails due to malformed JSON arguments, retry once with complete valid JSON only.",
+  "workspace": {
+    "config.json": "{\"service\":\"mauler-eval\",\"enabled\":true}\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 6,
+  "expect_status": "done",
+  "max_auto_continues": 2
+}

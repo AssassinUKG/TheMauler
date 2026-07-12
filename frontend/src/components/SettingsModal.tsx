@@ -13,6 +13,10 @@ import {
   UseProfile,
   GetChannelBusStatus,
   ListChannelWorkQueue,
+  GetAudioHealth,
+  RestartAudioWorker,
+  SynthesizeSpeech,
+  ListKokoroVoices,
   type Settings,
   type ProfilesFile,
   type Profile,
@@ -21,6 +25,7 @@ import {
   type ProfileBenchmarkResult,
   type StorageItem,
   type ChannelWorkItem,
+  type AudioHealth,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
 import './SettingsModal.css'
@@ -30,7 +35,7 @@ interface Props {
   onSaved?: () => void
 }
 
-type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'environment' | 'tools' | 'telegram' | 'context' | 'storage' | 'ui' | 'image'
+type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'environment' | 'tools' | 'telegram' | 'audio' | 'context' | 'storage' | 'ui' | 'image'
 
 type ToolRisk = 'low' | 'medium' | 'high'
 
@@ -42,6 +47,7 @@ const settingsTabs: Array<{ id: Tab; label: string; description: string }> = [
   { id: 'environment', label: 'Environment', description: 'VPN, listener, shell paths' },
   { id: 'tools', label: 'Tools', description: 'Toolsets, shell, web limits' },
   { id: 'telegram', label: 'Telegram', description: 'Bot, voice, remote control' },
+  { id: 'audio', label: 'Audio / Voice', description: 'Microphone and spoken replies' },
   { id: 'context', label: 'Context', description: 'Workspace and memory' },
   { id: 'storage', label: 'Storage', description: 'Caches and local state' },
   { id: 'ui', label: 'Interface', description: 'Theme and layout' },
@@ -94,6 +100,13 @@ const themeOptions = [
 
 const accentSwatches = ['#4ade80', '#16a34a', '#22c55e', '#007acc', '#0ea5e9', '#7c3aed', '#f59e0b', '#ef4444', '#ec4899']
 
+function voiceLabel(id: string): string {
+  const accents: Record<string, string> = { af: 'American female', am: 'American male', bf: 'British female', bm: 'British male' }
+  const [prefix, ...name] = id.split('_')
+  const display = name.join(' ').replace(/\b\w/g, char => char.toUpperCase())
+  return `${display || id} — ${accents[prefix] || 'Kokoro'} (${id})`
+}
+
 function previewTheme(theme: string) {
   const next = theme === 'dark' ? 'mauler-ops' : theme
   document.documentElement.setAttribute('data-theme', next)
@@ -143,6 +156,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [storageStatus, setStorageStatus] = useState('')
   const [channelStatus, setChannelStatus] = useState<Record<string, string>>({})
   const [channelQueue, setChannelQueue] = useState<ChannelWorkItem[]>([])
+  const [audioHealth, setAudioHealth] = useState<AudioHealth | null>(null)
+  const [audioTesting, setAudioTesting] = useState(false)
+  const [kokoroVoices, setKokoroVoices] = useState<string[]>([])
 
   useEffect(() => {
     void Promise.all([GetSettings(), GetProfiles()]).then(([s, pf]) => {
@@ -161,11 +177,20 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     void ListWSLDistros().then(setWslDistros).catch(() => setWslDistros([]))
     void refreshStorage()
     void refreshChannelBus()
+    void refreshAudioHealth()
+    void ListKokoroVoices().then(setKokoroVoices).catch(() => setKokoroVoices(['af_heart']))
   }, [])
 
   useEffect(() => {
     if (tab !== 'telegram') return
     const id = window.setInterval(() => { void refreshChannelBus() }, 3000)
+    return () => window.clearInterval(id)
+  }, [tab])
+
+  useEffect(() => {
+    if (tab !== 'audio') return
+    void refreshAudioHealth()
+    const id = window.setInterval(() => { void refreshAudioHealth() }, 4000)
     return () => window.clearInterval(id)
   }, [tab])
 
@@ -181,6 +206,36 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     ])
     setChannelStatus(status)
     setChannelQueue(queue)
+  }
+
+  const refreshAudioHealth = async () => {
+    setAudioHealth(await GetAudioHealth().catch(() => null))
+  }
+
+  const testVoice = async () => {
+    setAudioTesting(true)
+    try {
+      if (dirty) await save(false)
+      const result = await SynthesizeSpeech('Voice system is ready.')
+      const player = new Audio(result.data_uri)
+      await player.play()
+      setSaveStatus(`Voice test passed using ${result.engine}`)
+    } catch (error) {
+      setSaveStatus(`Voice test failed: ${String(error)}`)
+    } finally {
+      setAudioTesting(false)
+      await refreshAudioHealth()
+    }
+  }
+
+  const restartVoice = async () => {
+    setAudioTesting(true)
+    try {
+      setAudioHealth(await RestartAudioWorker())
+      setSaveStatus('Voice worker stopped; it will start cleanly on the next spoken reply.')
+    } finally {
+      setAudioTesting(false)
+    }
   }
 
   const clearStorage = async (item: StorageItem) => {
@@ -234,6 +289,11 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const updateTelegram = (patch: Partial<Settings['telegram']>) => {
     if (!settings) return
     updateSettings('telegram', { ...settings.telegram, ...patch })
+  }
+
+  const updateAudio = (patch: Partial<Settings['audio']>) => {
+    if (!settings) return
+    updateSettings('audio', { ...settings.audio, ...patch })
   }
 
   const updateLab = (patch: Partial<Settings['context']['lab']>) => {
@@ -1090,6 +1150,138 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   <span className="field-hint">Qwen3 fix: disables &lt;think&gt; once this many tool calls have been made (default 2)</span>
                 </Field>
 
+                <h3>Self-review loop</h3>
+                <Field label="Review loop">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.agents.review_loop?.enabled ?? true}
+                      onChange={e => updateSettings('agents', {
+                        ...settings.agents,
+                        review_loop: { ...settings.agents.review_loop, enabled: e.target.checked }
+                      })}
+                    />
+                    Gate automated run completion with verification and review
+                  </label>
+                </Field>
+                <Field label="Autonomous only">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.agents.review_loop?.only_autonomous ?? true}
+                      onChange={e => updateSettings('agents', {
+                        ...settings.agents,
+                        review_loop: { ...settings.agents.review_loop, only_autonomous: e.target.checked }
+                      })}
+                    />
+                    Skip manual/read-only runs
+                  </label>
+                </Field>
+                <Field label="Max review cycles">
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={settings.agents.review_loop?.max_review_cycles ?? 2}
+                    onChange={e => updateSettings('agents', {
+                      ...settings.agents,
+                      review_loop: { ...settings.agents.review_loop, max_review_cycles: parseInt(e.target.value, 10) || 0 }
+                    })}
+                  />
+                  <span className="field-hint">Hard cap on fix-review retries before the run stops honestly.</span>
+                </Field>
+                <Field label="Verify gate">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.agents.review_loop?.verify_gate ?? true}
+                      onChange={e => updateSettings('agents', {
+                        ...settings.agents,
+                        review_loop: { ...settings.agents.review_loop, verify_gate: e.target.checked }
+                      })}
+                    />
+                    Run detected build/test/lint commands before done
+                  </label>
+                </Field>
+                <Field label="Verify timeout">
+                  <input
+                    type="number"
+                    min={1}
+                    max={3600}
+                    value={settings.agents.review_loop?.verify_timeout_sec ?? 120}
+                    onChange={e => updateSettings('agents', {
+                      ...settings.agents,
+                      review_loop: { ...settings.agents.review_loop, verify_timeout_sec: parseInt(e.target.value, 10) || 120 }
+                    })}
+                  />
+                  <span className="field-hint">Seconds per verification command.</span>
+                </Field>
+                <Field label="Verify commands">
+                  <input
+                    value={(settings.agents.review_loop?.verify_commands ?? []).join('; ')}
+                    placeholder="auto-detect"
+                    onChange={e => updateSettings('agents', {
+                      ...settings.agents,
+                      review_loop: {
+                        ...settings.agents.review_loop,
+                        verify_commands: e.target.value.split(';').map(v => v.trim()).filter(Boolean)
+                      }
+                    })}
+                  />
+                  <span className="field-hint">Optional semicolon-separated override. Empty means auto-detect.</span>
+                </Field>
+                <Field label="Completion rails">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.agents.review_loop?.completion_rails ?? true}
+                      onChange={e => updateSettings('agents', {
+                        ...settings.agents,
+                        review_loop: { ...settings.agents.review_loop, completion_rails: e.target.checked }
+                      })}
+                    />
+                    Check requested deliverables and feature coverage
+                  </label>
+                </Field>
+                <Field label="Completion blocking">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.agents.review_loop?.completion_blocking ?? false}
+                      onChange={e => updateSettings('agents', {
+                        ...settings.agents,
+                        review_loop: { ...settings.agents.review_loop, completion_blocking: e.target.checked }
+                      })}
+                    />
+                    Let completion rails send the run back for fixes
+                  </label>
+                </Field>
+                <Field label="Reviewer pass">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.agents.review_loop?.reviewer_pass ?? true}
+                      onChange={e => updateSettings('agents', {
+                        ...settings.agents,
+                        review_loop: { ...settings.agents.review_loop, reviewer_pass: e.target.checked }
+                      })}
+                    />
+                    Run a fresh same-profile read-only review before done
+                  </label>
+                </Field>
+                <Field label="Reviewer tool cap">
+                  <input
+                    type="number"
+                    min={1}
+                    max={40}
+                    value={settings.agents.review_loop?.reviewer_max_tools ?? 15}
+                    onChange={e => updateSettings('agents', {
+                      ...settings.agents,
+                      review_loop: { ...settings.agents.review_loop, reviewer_max_tools: parseInt(e.target.value, 10) || 15 }
+                    })}
+                  />
+                </Field>
+
                 <div className="preset-editor-list">
                   {['Auto', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(name => {
                     const preset = settings.agents.presets?.[name]
@@ -1711,6 +1903,86 @@ export function SettingsModal({ onClose, onSaved }: Props) {
               </div>
             )}
 
+            {tab === 'audio' && (
+              <div className="settings-section">
+                <h3>Desktop Voice</h3>
+                <div className={`audio-health-card audio-health-${audioHealth?.overall || 'checking'}`}>
+                  <div className="audio-health-head">
+                    <div><span>Voice health</span><strong>{audioHealth?.overall || 'checking'}</strong></div>
+                    <div className="audio-health-actions">
+                      <button onClick={() => void refreshAudioHealth()} disabled={audioTesting}>Refresh</button>
+                      <button onClick={() => void testVoice()} disabled={audioTesting || !(settings.audio?.enabled ?? true)}>{audioTesting ? 'Working...' : 'Play test voice'}</button>
+                      <button onClick={() => void restartVoice()} disabled={audioTesting}>Restart worker</button>
+                    </div>
+                  </div>
+                  <div className="audio-health-grid">
+                    <div><span>TTS configured</span><strong>{audioHealth?.configured_tts || settings.audio?.tts_engine || 'auto'}</strong></div>
+                    <div><span>Actually used</span><strong>{audioHealth?.actual_tts || 'not tested'}</strong></div>
+                    <div><span>Kokoro worker</span><strong>{audioHealth?.worker_state || 'checking'}{audioHealth?.worker_pid ? ` · PID ${audioHealth.worker_pid}` : ''}</strong></div>
+                    <div><span>Speech recognition</span><strong>{audioHealth?.stt_ready ? `${audioHealth.stt_engine} ${audioHealth.stt_worker_state || 'ready'}` : `${audioHealth?.stt_engine || 'whisper'} missing`}</strong></div>
+                    <div><span>Whisper worker</span><strong>{audioHealth?.stt_worker_state || 'checking'}{audioHealth?.stt_worker_pid ? ` · PID ${audioHealth.stt_worker_pid}` : ''}</strong></div>
+                    <div><span>Whisper model</span><strong>{audioHealth?.stt_model || 'tiny.en'}</strong></div>
+                    <div><span>Last transcription</span><strong>{audioHealth?.stt_last_duration_ms ? `${(audioHealth.stt_last_duration_ms / 1000).toFixed(2)}s for ${(audioHealth.stt_last_audio_ms / 1000).toFixed(2)}s audio` : 'none yet'}</strong></div>
+                    <div><span>Worker window</span><strong>{audioHealth?.worker_hidden ? 'hidden background process' : 'unknown'}</strong></div>
+                    <div><span>Last success</span><strong>{audioHealth?.last_success ? new Date(audioHealth.last_success).toLocaleString() : 'none yet'}</strong></div>
+                  </div>
+                  {audioHealth?.last_error && <div className="audio-health-error">{audioHealth.last_error}</div>}
+                  {audioHealth?.stt_last_error && <div className="audio-health-error">Whisper: {audioHealth.stt_last_error}</div>}
+                </div>
+                <Field label="Enable audio">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.audio?.enabled ?? true} onChange={e => updateAudio({ enabled: e.target.checked })} />
+                    Show the Talk control and allow local speech input
+                  </label>
+                </Field>
+                <Field label="Conversation mode">
+                  <select value={settings.audio?.mode || 'push_to_talk'} onChange={e => updateAudio({ mode: e.target.value })}>
+                    <option value="push_to_talk">Push to talk</option>
+                    <option value="open_mic">Open mic (VAD milestone)</option>
+                  </select>
+                  <span className="field-hint">Push to talk is active now. Open mic is reserved for the Silero VAD pass.</span>
+                </Field>
+                <Field label="Speech recognition">
+                  <select value={settings.audio?.stt_engine || 'whisper'} onChange={e => updateAudio({ stt_engine: e.target.value })}>
+                    <option value="whisper">Local Whisper</option>
+                    <option value="parakeet">Parakeet (when installed)</option>
+                  </select>
+                </Field>
+                <Field label="Speech engine">
+                  <select value={settings.audio?.tts_engine || 'auto'} onChange={e => updateAudio({ tts_engine: e.target.value })}>
+                    <option value="auto">Kokoro, then Piper fallback</option>
+                    <option value="kokoro">Kokoro</option>
+                    <option value="piper">Piper</option>
+                  </select>
+                </Field>
+                <Field label="Kokoro voice">
+                  <select value={settings.audio?.voice || 'af_heart'} onChange={e => updateAudio({ voice: e.target.value })}>
+                    {(kokoroVoices.length ? kokoroVoices : ['af_heart']).map(voice => <option key={voice} value={voice}>{voiceLabel(voice)}</option>)}
+                  </select>
+                  <span className="field-hint">All installed Kokoro voices. af_heart remains the default.</span>
+                </Field>
+                <Field label="Voice speed">
+                  <input type="number" min={0.8} max={1.4} step={0.05} value={settings.audio?.speed || 1} onChange={e => updateAudio({ speed: parseFloat(e.target.value) || 1 })} />
+                </Field>
+                <Field label="Streaming speech">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.audio?.speak_replies ?? true} onChange={e => updateAudio({ speak_replies: e.target.checked })} />
+                    Speak completed clauses while the model is still generating
+                  </label>
+                </Field>
+                <Field label="Barge in">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.audio?.barge_in ?? true} onChange={e => updateAudio({ barge_in: e.target.checked })} />
+                    Starting a new recording stops speech and interrupts the current run
+                  </label>
+                </Field>
+                <Field label="Clause size">
+                  <input type="number" min={16} max={240} value={settings.audio?.clause_min_chars || 36} onChange={e => updateAudio({ clause_min_chars: parseInt(e.target.value, 10) || 36 })} />
+                  <span className="field-hint">Lower starts speaking sooner; higher produces smoother prosody.</span>
+                </Field>
+              </div>
+            )}
+
             {tab === 'context' && (
               <div className="settings-section">
                 <h3>Context</h3>
@@ -1994,6 +2266,32 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   <input type="number" min={50} max={2000} step={50} value={settings.image.max_display_width}
                     onChange={e => updateSettings('image', { ...settings.image, max_display_width: parseInt(e.target.value) })} />
                   <span className="field-hint">px</span>
+                </Field>
+
+                <h3>Video</h3>
+                <Field label="Video enabled">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.image.video_enabled}
+                      onChange={e => updateSettings('image', { ...settings.image, video_enabled: e.target.checked })} />
+                    Analyze pasted/dropped video (samples keyframes via ffmpeg)
+                  </label>
+                </Field>
+                <Field label="Max keyframes">
+                  <input type="number" min={1} max={32} step={1} value={settings.image.video_max_frames}
+                    onChange={e => updateSettings('image', { ...settings.image, video_max_frames: parseInt(e.target.value) })} />
+                  <span className="field-hint">frames sampled evenly across the clip</span>
+                </Field>
+                <Field label="Keyframe width">
+                  <input type="number" min={128} max={2048} step={64} value={settings.image.video_frame_width}
+                    onChange={e => updateSettings('image', { ...settings.image, video_frame_width: parseInt(e.target.value) })} />
+                  <span className="field-hint">px</span>
+                </Field>
+                <Field label="Transcribe audio">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.image.video_transcribe}
+                      onChange={e => updateSettings('image', { ...settings.image, video_transcribe: e.target.checked })} />
+                    Include an audio transcript (requires whisper in PATH)
+                  </label>
                 </Field>
               </div>
             )}

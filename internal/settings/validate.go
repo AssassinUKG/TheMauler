@@ -35,9 +35,49 @@ func (s *Settings) Validate() []string {
 		adjustments = append(adjustments, fmt.Sprintf("agents.max_run_seconds clamped from %d to 0", s.Agents.MaxRunSeconds))
 		s.Agents.MaxRunSeconds = 0
 	}
+	if s.Agents.ReviewLoop.MaxReviewCycles < 0 {
+		adjustments = append(adjustments, fmt.Sprintf("agents.review_loop.max_review_cycles clamped from %d to 0", s.Agents.ReviewLoop.MaxReviewCycles))
+		s.Agents.ReviewLoop.MaxReviewCycles = 0
+	} else if s.Agents.ReviewLoop.MaxReviewCycles > 5 {
+		adjustments = append(adjustments, fmt.Sprintf("agents.review_loop.max_review_cycles clamped from %d to 5", s.Agents.ReviewLoop.MaxReviewCycles))
+		s.Agents.ReviewLoop.MaxReviewCycles = 5
+	}
+	if s.Agents.ReviewLoop.VerifyTimeoutSec <= 0 {
+		adjustments = append(adjustments, fmt.Sprintf("agents.review_loop.verify_timeout_sec clamped from %d to 120", s.Agents.ReviewLoop.VerifyTimeoutSec))
+		s.Agents.ReviewLoop.VerifyTimeoutSec = 120
+	}
+	if s.Agents.ReviewLoop.ReviewerMaxTools <= 0 {
+		adjustments = append(adjustments, fmt.Sprintf("agents.review_loop.reviewer_max_tools clamped from %d to 15", s.Agents.ReviewLoop.ReviewerMaxTools))
+		s.Agents.ReviewLoop.ReviewerMaxTools = 15
+	} else if s.Agents.ReviewLoop.ReviewerMaxTools > 40 {
+		adjustments = append(adjustments, fmt.Sprintf("agents.review_loop.reviewer_max_tools clamped from %d to 40", s.Agents.ReviewLoop.ReviewerMaxTools))
+		s.Agents.ReviewLoop.ReviewerMaxTools = 40
+	}
 	if s.Telegram.ProgressIntervalS < 3 {
 		adjustments = append(adjustments, fmt.Sprintf("telegram.progress_interval_s clamped from %d to 3", s.Telegram.ProgressIntervalS))
 		s.Telegram.ProgressIntervalS = 3
+	}
+	if s.Audio.Mode != "push_to_talk" && s.Audio.Mode != "open_mic" {
+		s.Audio.Mode = "push_to_talk"
+	}
+	if s.Audio.STTEngine == "" {
+		s.Audio.STTEngine = "whisper"
+	}
+	if s.Audio.TTSEngine == "" {
+		s.Audio.TTSEngine = "auto"
+	}
+	if s.Audio.Voice == "" {
+		s.Audio.Voice = "af_heart"
+	}
+	if s.Audio.Speed < 0.8 || s.Audio.Speed > 1.4 {
+		adjustments = append(adjustments, fmt.Sprintf("audio.speed clamped from %.2f to 1.00", s.Audio.Speed))
+		s.Audio.Speed = 1
+	}
+	if s.Audio.VADThreshold <= 0 || s.Audio.VADThreshold >= 1 {
+		s.Audio.VADThreshold = 0.55
+	}
+	if s.Audio.ClauseMinChars < 16 || s.Audio.ClauseMinChars > 240 {
+		s.Audio.ClauseMinChars = 36
 	}
 	switch strings.ToLower(strings.TrimSpace(s.Agents.ReasoningEffort)) {
 	case "", "auto":

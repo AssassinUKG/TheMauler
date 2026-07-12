@@ -1,0 +1,17 @@
+{
+  "name": "completion-covers-both-asks",
+  "prompt": "Add a min and a max helper to mathutil.go, then finish only after both helpers are present.",
+  "workspace": {
+    "go.mod": "module example.com/completioncovers\n\ngo 1.23\n",
+    "mathutil.go": "package completioncovers\n\nfunc existing() int { return 1 }\n"
+  },
+  "mode": "Builder",
+  "max_tool_calls": 12,
+  "completion_blocking": true,
+  "reviewer_pass": false,
+  "expect_status": "done",
+  "expect_files": {
+    "mathutil.go": "max"
+  },
+  "max_auto_continues": 3
+}

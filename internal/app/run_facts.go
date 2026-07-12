@@ -103,6 +103,86 @@ func deriveRunFacts(events []ledger.Event, limit int) []runFact {
 	return facts
 }
 
+func currentTargetIP(events []ledger.Event) string {
+	for _, fact := range deriveRunFacts(events, maxRunFactsPromptItems) {
+		if fact.Kind != "target" {
+			continue
+		}
+		if ip := firstIPv4(fact.Text); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func authoritativeTargetIPForRun(run TaskRun, configuredTarget string) string {
+	if ip := labelledTargetIP(run.Prompt); ip != "" {
+		return ip
+	}
+	if ip := currentRunFactTargetIP(run); ip != "" {
+		return ip
+	}
+	if ip := firstIPv4(configuredTarget); ip != "" {
+		return ip
+	}
+	if ip := firstIPv4(run.Prompt); ip != "" {
+		return ip
+	}
+	return ""
+}
+
+func labelledTargetIP(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "target") {
+			continue
+		}
+		if ip := firstIPv4(line); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func currentRunFactTargetIP(run TaskRun) string {
+	for _, event := range run.Events {
+		if ip := labelledTargetIP(event.Message); ip != "" {
+			return ip
+		}
+		if ip := labelledTargetIP(event.Detail); ip != "" {
+			return ip
+		}
+		if strings.EqualFold(event.Kind, "evidence_pin") {
+			if ip := firstTargetFactIP(event.Detail); ip != "" {
+				return ip
+			}
+		}
+	}
+	for _, tool := range run.Tools {
+		if strings.EqualFold(tool.Name, "progress") || strings.EqualFold(tool.Name, "memory") || strings.EqualFold(tool.Name, "evidence_bundle") {
+			if ip := firstTargetFactIP(tool.Result); ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+func firstTargetFactIP(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		var found string
+		classifyRunFactLine(line, "", func(kind, text, source string) {
+			if found == "" && kind == "target" {
+				found = firstIPv4(text)
+			}
+		})
+		if found != "" {
+			return found
+		}
+	}
+	return ""
+}
+
 func classifyRunFactLine(line, source string, add func(kind, text, source string)) {
 	line = strings.TrimSpace(line)
 	if line == "" {

@@ -5,9 +5,22 @@ import (
 	"strings"
 	"testing"
 
+	"mauler/internal/agent"
 	"mauler/internal/settings"
 	"mauler/internal/tools"
 )
+
+func TestThinkingSiblingProfileMatchesSameProviderAndModel(t *testing.T) {
+	base := settings.Profile{Name: "qwen3.6-nothink", Provider: "ib", ModelID: "qwen.gguf", Thinking: false}
+	app := &App{profiles: &settings.ProfilesFile{Profiles: map[string]settings.Profile{
+		"wrong-model-think": {Provider: "ib", ModelID: "other.gguf", Thinking: true},
+		"qwen3.6-think":     {Provider: "ib", ModelID: "qwen.gguf", Thinking: true},
+	}}, history: agent.NewHistory(8192)}
+	got, ok := app.thinkingSiblingProfile(base)
+	if !ok || !got.Thinking || got.ModelID != base.ModelID || got.Provider != base.Provider {
+		t.Fatalf("thinking sibling = %#v ok=%v", got, ok)
+	}
+}
 
 func TestEffortToThinkingMapping(t *testing.T) {
 	profile := settings.Profile{

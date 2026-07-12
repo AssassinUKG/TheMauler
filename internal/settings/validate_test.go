@@ -24,6 +24,57 @@ func TestValidateClampsCompaction(t *testing.T) {
 	}
 }
 
+func TestReviewLoopConfigDefaultsPopulate(t *testing.T) {
+	cfg := DefaultSettings()
+
+	rl := cfg.Agents.ReviewLoop
+	if !rl.Enabled || !rl.OnlyAutonomous || !rl.VerifyGate || !rl.CompletionRails || !rl.ReviewerPass {
+		t.Fatalf("review loop defaults should enable the gate chain: %#v", rl)
+	}
+	if rl.MaxReviewCycles != 2 || rl.VerifyTimeoutSec != 120 || rl.ReviewerMaxTools != 15 {
+		t.Fatalf("unexpected review loop numeric defaults: %#v", rl)
+	}
+	if len(rl.VerifyCommands) != 0 {
+		t.Fatalf("verify commands should default to auto-detection, got %#v", rl.VerifyCommands)
+	}
+}
+
+func TestReviewLoopConfigClamps(t *testing.T) {
+	cfg := DefaultSettings()
+	cfg.Agents.ReviewLoop.MaxReviewCycles = 99
+	cfg.Agents.ReviewLoop.VerifyTimeoutSec = 0
+	cfg.Agents.ReviewLoop.ReviewerMaxTools = 99
+
+	adjustments := cfg.Validate()
+
+	if cfg.Agents.ReviewLoop.MaxReviewCycles != 5 {
+		t.Fatalf("max_review_cycles = %d, want 5", cfg.Agents.ReviewLoop.MaxReviewCycles)
+	}
+	if cfg.Agents.ReviewLoop.VerifyTimeoutSec != 120 {
+		t.Fatalf("verify_timeout_sec = %d, want 120", cfg.Agents.ReviewLoop.VerifyTimeoutSec)
+	}
+	if cfg.Agents.ReviewLoop.ReviewerMaxTools != 40 {
+		t.Fatalf("reviewer_max_tools = %d, want 40", cfg.Agents.ReviewLoop.ReviewerMaxTools)
+	}
+	if len(adjustments) != 3 {
+		t.Fatalf("adjustments = %#v, want 3 entries", adjustments)
+	}
+}
+
+func TestReviewLoopConfigClampNegativeCycleToZero(t *testing.T) {
+	cfg := DefaultSettings()
+	cfg.Agents.ReviewLoop.MaxReviewCycles = -1
+
+	adjustments := cfg.Validate()
+
+	if cfg.Agents.ReviewLoop.MaxReviewCycles != 0 {
+		t.Fatalf("max_review_cycles = %d, want 0", cfg.Agents.ReviewLoop.MaxReviewCycles)
+	}
+	if len(adjustments) != 1 {
+		t.Fatalf("adjustments = %#v, want 1 entry", adjustments)
+	}
+}
+
 func TestValidateClampsMaxTokensToHalfCtx(t *testing.T) {
 	pf := ProfilesFile{
 		Providers: map[string]Provider{"local": {Name: "local"}},

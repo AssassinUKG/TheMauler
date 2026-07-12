@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -106,11 +105,14 @@ func (a *App) runPythonToolScript(parent context.Context, userCode string, timeo
 
 	var stderrBuf bytes.Buffer
 	var stdoutBuf bytes.Buffer
-	var mu sync.Mutex
 	lastTool := ""
 	failedTool := ""
 	failedError := ""
-	go func() { _, _ = io.Copy(&stderrBuf, stderr) }()
+	stderrDone := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(&stderrBuf, stderr)
+		stderrDone <- copyErr
+	}()
 
 	toolCalls := 0
 	scanner := bufio.NewScanner(stdout)
@@ -118,10 +120,8 @@ func (a *App) runPythonToolScript(parent context.Context, userCode string, timeo
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "__MAULER_TOOL__") {
-			mu.Lock()
 			stdoutBuf.WriteString(line)
 			stdoutBuf.WriteByte('\n')
-			mu.Unlock()
 			continue
 		}
 		var req scriptToolRequest
@@ -164,15 +164,18 @@ func (a *App) runPythonToolScript(parent context.Context, userCode string, timeo
 	}
 	scanErr := scanner.Err()
 	waitErr := cmd.Wait()
-	if ctx.Err() != nil {
-		return formatRunScriptResult("timeout", toolCalls, lastTool, failedTool, fmt.Sprintf("timeout after %d seconds", timeoutSeconds), "", "", "", maxToolCalls, timeoutSeconds), fmt.Errorf("run_script: timeout after %d seconds", timeoutSeconds)
-	}
-	if scanErr != nil {
-		return formatRunScriptResult("error", toolCalls, lastTool, failedTool, scanErr.Error(), stdoutBuf.String(), stderrBuf.String(), "", maxToolCalls, timeoutSeconds), fmt.Errorf("run_script: read stdout: %w", scanErr)
-	}
-
+	stderrErr := <-stderrDone
 	out := strings.TrimSpace(stdoutBuf.String())
 	errText := strings.TrimSpace(stderrBuf.String())
+	if ctx.Err() != nil {
+		return formatRunScriptResult("timeout", toolCalls, lastTool, failedTool, fmt.Sprintf("timeout after %d seconds", timeoutSeconds), out, errText, "", maxToolCalls, timeoutSeconds), fmt.Errorf("run_script: timeout after %d seconds", timeoutSeconds)
+	}
+	if scanErr != nil {
+		return formatRunScriptResult("error", toolCalls, lastTool, failedTool, scanErr.Error(), out, errText, "", maxToolCalls, timeoutSeconds), fmt.Errorf("run_script: read stdout: %w", scanErr)
+	}
+	if stderrErr != nil {
+		return formatRunScriptResult("error", toolCalls, lastTool, failedTool, stderrErr.Error(), out, errText, "", maxToolCalls, timeoutSeconds), fmt.Errorf("run_script: read stderr: %w", stderrErr)
+	}
 	state := "done"
 	if waitErr != nil {
 		state = "error"

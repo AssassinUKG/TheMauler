@@ -415,6 +415,9 @@ func (c *OpenAICompat) ActualContextLength(ctx context.Context) int {
 
 func (c *OpenAICompat) actualLlamaContext(ctx context.Context) (int, error) {
 	base := strings.TrimSuffix(c.baseURL, "/v1")
+	if actual, ok := c.actualInferenceBridgeContext(ctx, base); ok {
+		return actual, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/props", nil)
 	if err != nil {
 		return 0, err
@@ -458,6 +461,62 @@ func (c *OpenAICompat) actualLlamaContext(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return health.KVCache.TotalTokens, nil
+}
+
+func (c *OpenAICompat) actualInferenceBridgeContext(ctx context.Context, base string) (int, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models/stats", nil)
+	if err != nil {
+		return 0, false
+	}
+	c.setHeaders(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return 0, false
+	}
+	var stats struct {
+		RequestedModel     string `json:"requested_model"`
+		ActiveModel        string `json:"active_model"`
+		MatchesActiveModel bool   `json:"matches_active_model"`
+		State              string `json:"state"`
+		Progress           struct {
+			Done  bool   `json:"done"`
+			Error string `json:"error"`
+			Stage string `json:"stage"`
+		} `json:"progress"`
+		Stats struct {
+			Model       string `json:"model"`
+			ContextSize int    `json:"context_size"`
+		} `json:"stats"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return 0, false
+	}
+	if stats.Stats.ContextSize <= 0 {
+		return 0, true
+	}
+	want := normalizeModelID(c.modelID)
+	active := normalizeModelID(firstNonEmptyString(stats.ActiveModel, stats.Stats.Model, stats.RequestedModel))
+	state := strings.ToLower(strings.TrimSpace(firstNonEmptyString(stats.State, stats.Progress.Stage)))
+	if active != want || (!stats.MatchesActiveModel && stats.ActiveModel != "") {
+		return 0, true
+	}
+	if strings.Contains(state, "loaded") || stats.Progress.Done {
+		return stats.Stats.ContextSize, true
+	}
+	return 0, true
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (c *OpenAICompat) matchesLMStudioModel(key, selectedVariant string, variants []string) bool {

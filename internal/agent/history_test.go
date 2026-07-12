@@ -110,9 +110,10 @@ func TestRepairMessagesStripsToolCallsWithoutResults(t *testing.T) {
 	msgs, actions := RepairMessages([]llm.Message{
 		llm.NewTextMessage(llm.RoleUser, "task"),
 		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCallDef{testToolCall("call-1", "read")}},
+		llm.NewTextMessage(llm.RoleAssistant, "continued without a tool result"),
 	})
 
-	if len(msgs) != 2 {
+	if len(msgs) != 3 {
 		t.Fatalf("expected assistant message to remain as repaired text, got %#v", msgs)
 	}
 	if len(msgs[1].ToolCalls) != 0 {
@@ -172,6 +173,44 @@ func TestRepairMessagesKeepsMatchedMultipleToolResults(t *testing.T) {
 	}
 	if len(msgs) != len(input) || len(msgs[1].ToolCalls) != 2 {
 		t.Fatalf("expected all matched tool calls/results to remain, got %#v", msgs)
+	}
+}
+
+func TestRepairMessagesStripsTrailingToolCalls(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCallDef{testToolCall("call-1", "read")}},
+	})
+
+	if len(msgs) != 2 {
+		t.Fatalf("expected assistant message to remain as repaired text, got %#v", msgs)
+	}
+	if len(msgs[1].ToolCalls) != 0 {
+		t.Fatalf("expected trailing tool call to be stripped, got %#v", msgs[1].ToolCalls)
+	}
+	if !hasRepairAction(actions, "strip_trailing_tool_call") {
+		t.Fatalf("expected strip_trailing_tool_call action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesNoopOnCleanHistory(t *testing.T) {
+	input := []llm.Message{
+		llm.NewTextMessage(llm.RoleSystem, "system"),
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		llm.NewTextMessage(llm.RoleAssistant, "done"),
+	}
+	msgs, actions := RepairMessages(input)
+
+	if len(actions) != 0 {
+		t.Fatalf("expected no repair actions, got %#v", actions)
+	}
+	if len(msgs) != len(input) {
+		t.Fatalf("expected clean transcript to stay same length, got %#v", msgs)
+	}
+	for i := range input {
+		if msgs[i].Role != input[i].Role || messageContentText(msgs[i]) != messageContentText(input[i]) {
+			t.Fatalf("clean transcript changed at %d: got %#v want %#v", i, msgs[i], input[i])
+		}
 	}
 }
 

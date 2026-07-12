@@ -13,6 +13,9 @@ import { LiveOpsPage } from './components/LiveOpsPage'
 import { BrainPage } from './components/BrainPage'
 import { ProjectsPage } from './components/ProjectsPage'
 import { TelegramPage } from './components/TelegramPage'
+import { DoctorPage } from './components/DoctorPage'
+import { SideChatPage } from './components/SideChatPage'
+import { ServicesPage } from './components/ServicesPage'
 import { StatusBar } from './components/StatusBar'
 import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -22,6 +25,7 @@ import { StreamPane } from './components/StreamPane'
 import { JobsPane } from './components/JobsPane'
 import {
   ClearHistory,
+  ClearTodos,
   AddToolSafeRule,
   DeleteSession,
   ListSessions,
@@ -39,7 +43,6 @@ import {
   SendMessage,
   UpdateSettings,
   type ChatAttachment,
-  InterruptShellTool,
   StopAgent,
   type ChatRole,
   type SessionChatMessage,
@@ -192,7 +195,8 @@ export default function App() {
   const [activeProfile, setActiveProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks'>('chat')
+  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks' | 'doctor'>('projects')
+  const [chatLane, setChatLane] = useState<'project' | 'quick'>('project')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
   const [artifactOutput, setArtifactOutput] = useState('')
@@ -595,14 +599,6 @@ export default function App() {
     setPendingInterrupt(null)
   }, [])
 
-  const handleCancelTool = useCallback((name: string) => {
-    if (name === 'shell' || name === 'bash') {
-      void InterruptShellTool()
-      return
-    }
-    void StopAgent()
-  }, [])
-
   const handleConfirmRespond = useCallback(async (allow: boolean, remember = false) => {
     const payload = confirm
     setConfirm(null)
@@ -711,16 +707,18 @@ export default function App() {
   const handleClearChat = useCallback(() => {
     setConfirmAction({
       title: 'Clear Chat',
-      message: 'Clear chat history?',
+      message: 'Clear this conversation and its active plan? Project files, saved sessions, and memory are preserved.',
       confirmLabel: 'Clear',
       onConfirm: async () => {
         await ClearHistory()
+        await ClearTodos()
         setMessages([])
         setStreamBuffer('')
+        refreshTodos()
         setStatsVersion(v => v + 1)
       },
     })
-  }, [])
+  }, [refreshTodos])
 
   const startResize = useCallback((side: 'left' | 'right') => (e: ReactMouseEvent) => {
     const startX = e.clientX
@@ -776,7 +774,7 @@ export default function App() {
           <button
             className="titlebar-doctor"
             onClick={() => {
-              setRightOpen(true)
+              setCenterTab('doctor')
               setDoctorRunRequest(v => v + 1)
             }}
             title="Run Doctor diagnostics"
@@ -830,23 +828,22 @@ export default function App() {
 
         <main className="center-pane">
           <div className="center-tabs">
+            <button className={centerTab === 'projects' ? 'active' : ''} onClick={() => setCenterTab('projects')}>Home</button>
             <button className={centerTab === 'chat' ? 'active' : ''} onClick={() => setCenterTab('chat')}>Chat</button>
             <button className={centerTab === 'ops' ? 'active' : ''} onClick={() => setCenterTab('ops')}>Run</button>
-            <button className={centerTab === 'projects' ? 'active' : ''} onClick={() => setCenterTab('projects')}>Projects</button>
-            <button className={centerTab === 'logs' ? 'active' : ''} onClick={() => setCenterTab('logs')}>Logs</button>
-            <button className={centerTab === 'memory' ? 'active' : ''} onClick={() => setCenterTab('memory')}>Memory</button>
-            <button className={centerTab === 'brain' ? 'active' : ''} onClick={() => setCenterTab('brain')}>Brain</button>
-            <button className={centerTab === 'telegram' ? 'active' : ''} onClick={() => setCenterTab('telegram')}>Telegram</button>
             <button className={centerTab === 'benchmarks' ? 'active' : ''} onClick={() => setCenterTab('benchmarks')}>Benchmarks</button>
+            <select className="center-more-select" value={['services','logs','memory','brain','telegram','doctor'].includes(centerTab) ? centerTab : ''} onChange={e => { if (e.target.value) setCenterTab(e.target.value as typeof centerTab) }} title="Secondary workbench pages">
+              <option value="">More…</option><option value="services">Services</option><option value="logs">Logs</option><option value="memory">Memory</option><option value="brain">Brain</option><option value="telegram">Telegram</option><option value="doctor">Doctor</option>
+            </select>
             {openFiles.map((f, i) => (
               <span key={`${f.path || f.name}-${i}`} className={`center-file-tab ${centerTab === 'file' && activeFileIdx === i ? 'active' : ''}`}>
                 <button onClick={() => { setActiveFileIdx(i); setCenterTab('file') }}>{f.name}</button>
-                <button className="tab-close" onClick={() => closeFile(i)} title="Close">×</button>
+                <button className="tab-close" onClick={() => closeFile(i)} title="Close">x</button>
               </span>
             ))}
           </div>
           <div className="center-content">
-            {centerTab === 'chat' ? (
+            {centerTab === 'chat' && chatLane === 'project' ? (
               <ChatPane
                 messages={messages}
                 streaming={streaming}
@@ -859,14 +856,18 @@ export default function App() {
                 runState={runState}
                 todos={todos}
                 activity={activity}
+                settingsVersion={statsVersion}
                 onSubmitMessage={handleSubmitMessage}
                 onCancelPending={handleCancelPending}
-                onCancelTool={handleCancelTool}
                 onStopAgent={() => void StopAgent()}
                 onClearChat={handleClearChat}
                 onArtifact={handleArtifact}
                 onAutonomousChange={handleToggleAutonomous}
+                onOpenQuickChat={() => setChatLane('quick')}
+                onClearPlan={async () => { await ClearTodos(); refreshTodos() }}
               />
+            ) : centerTab === 'chat' ? (
+              <SideChatPage streaming={streaming} onOpenProjectChat={() => setChatLane('project')} />
             ) : centerTab === 'ops' ? (
               <LiveOpsPage
                 streaming={streaming}
@@ -879,12 +880,18 @@ export default function App() {
                 runStartedAt={runStartedAt}
                 onOpenFile={handleOpenFile}
               />
+            ) : centerTab === 'services' ? (
+              <ServicesPage jobs={backgroundJobs} onOpenSettings={() => setShowSettings(true)} onOpenJobs={() => { setShowTerminal(true); setBottomTab('jobs') }} />
             ) : centerTab === 'projects' ? (
               <ProjectsPage
                 version={statsVersion + workspaceVersion}
-                onProjectChanged={() => {
+                onProjectChanged={(project, previousName) => {
                   setWorkspaceVersion(v => v + 1)
                   setStatsVersion(v => v + 1)
+                  setMessages([])
+                  setStreamBuffer('')
+                  setCenterTab('chat')
+                  pushToast(`Opened ${project.name || project.id}. Previous: ${previousName}. Project files and saved sessions preserved; chat and terminal reset.`, 'success')
                 }}
               />
             ) : centerTab === 'logs' ? (
@@ -895,6 +902,8 @@ export default function App() {
               <BrainPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'telegram' ? (
               <TelegramPage version={taskRunVersion + statsVersion} />
+            ) : centerTab === 'doctor' ? (
+              <DoctorPage runRequest={doctorRunRequest} />
             ) : centerTab === 'benchmarks' ? (
               <BenchmarkPage version={statsVersion} onProfilesChanged={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
             ) : (
@@ -1021,7 +1030,7 @@ export default function App() {
           </span>
         </div>
         <div className="bottom-panel-body">
-          <TerminalPane visible={showTerminal && bottomTab === 'terminal'} />
+          <TerminalPane key={`terminal-${workspaceVersion}`} visible={showTerminal && bottomTab === 'terminal'} />
           <StreamPane
             visible={showTerminal && bottomTab === 'stream'}
             streaming={streaming}

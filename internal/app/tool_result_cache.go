@@ -3,10 +3,12 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"mauler/internal/llm"
+	"mauler/internal/tools"
 )
 
 var cachedToolResultIDPattern = regexp.MustCompile(`result_id="?([A-Za-z0-9._/\-]+)"?`)
@@ -69,6 +71,54 @@ func repeatedCachedToolCall(run TaskRun, tc llm.ToolCallDef) bool {
 	return false
 }
 
+func cachedEmptyGlobResultForCall(run TaskRun, tc llm.ToolCallDef) string {
+	if !strings.EqualFold(strings.TrimSpace(tc.Function.Name), "glob") {
+		return ""
+	}
+	key := globCallKey(tc.Function.Arguments)
+	if key == "" {
+		return ""
+	}
+	for i := len(run.Tools) - 1; i >= 0; i-- {
+		tool := run.Tools[i]
+		if !strings.EqualFold(strings.TrimSpace(tool.Name), "glob") || !strings.EqualFold(strings.TrimSpace(tool.Status), "done") {
+			continue
+		}
+		if globCallKey(json.RawMessage(tool.Input)) != key {
+			continue
+		}
+		result := strings.TrimSpace(tool.Result)
+		if !strings.Contains(result, "state: empty") && !strings.Contains(result, "matches: 0") {
+			continue
+		}
+		return "[empty_glob_cached]\ncontract:\n  state: cached_empty\n  tool: glob\n  next_tool: proceed\n  do_not_repeat: this glob pattern already returned zero matches in this run; use the empty result unless files were created or the pattern/dir changes meaningfully\n  cache_key: " + cacheContractValue(key) + "\n\n" + truncateRunes(result, 1200)
+	}
+	return ""
+}
+
+func globCallKey(raw json.RawMessage) string {
+	var args struct {
+		Pattern string `json:"pattern"`
+		Dir     string `json:"dir"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &args) != nil {
+		return ""
+	}
+	pattern := strings.TrimSpace(args.Pattern)
+	if pattern == "" {
+		return ""
+	}
+	dir := strings.TrimSpace(args.Dir)
+	if dir == "" {
+		dir = "."
+	}
+	dir = strings.TrimRight(filepath.ToSlash(tools.NormalizeHostPath(dir)), "/")
+	if dir == "" {
+		dir = "."
+	}
+	return strings.ToLower(dir + "\x00" + pattern)
+}
+
 func cacheContractValue(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "-"
@@ -84,14 +134,6 @@ func cacheableToolCallKey(tc llm.ToolCallDef) string {
 	if key := idempotentReadKey(name, tc.Function.Arguments); key != "" {
 		return key
 	}
-	if isShellTool(name) {
-		command := shellCommandFromToolArgs(tc.Function.Arguments)
-		key := repeatShellCommandKey(command)
-		if key == "" {
-			return ""
-		}
-		return "shell\x00" + key
-	}
 	return ""
 }
 
@@ -103,14 +145,6 @@ func cacheableStoredToolKey(tool TaskToolEvent) string {
 	raw := json.RawMessage(tool.Input)
 	if key := idempotentReadKey(name, raw); key != "" {
 		return key
-	}
-	if isShellTool(name) {
-		command := shellCommandFromToolArgs(raw)
-		key := repeatShellCommandKey(command)
-		if key == "" {
-			return ""
-		}
-		return "shell\x00" + key
 	}
 	return ""
 }

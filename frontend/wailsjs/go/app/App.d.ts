@@ -55,6 +55,10 @@ export function DeleteTelegramMessage(arg1:string,arg2:string):Promise<void>;
 
 export function DispatchChannelMessage(arg1:channelbus.Envelope):Promise<channelbus.Response>;
 
+export function DispatchSideChatMessage(arg1:channelbus.Envelope):Promise<channelbus.Response>;
+
+export function EmergencyStop():Promise<Record<string, number>>;
+
 export function EncodeFileBase64(arg1:string):Promise<string>;
 
 export function ExportMemoryJSON():Promise<string>;
@@ -62,6 +66,8 @@ export function ExportMemoryJSON():Promise<string>;
 export function ExportTaskRunsJSON():Promise<string>;
 
 export function GetAgentMode():Promise<string>;
+
+export function GetAudioHealth():Promise<app.AudioHealth>;
 
 export function GetAutoAgents():Promise<boolean>;
 
@@ -83,6 +89,8 @@ export function GetProfiles():Promise<settings.ProfilesFile>;
 
 export function GetProjectInstructionsSummary():Promise<string>;
 
+export function GetServiceHealth():Promise<Array<app.ServiceHealth>>;
+
 export function GetSettings():Promise<settings.Settings>;
 
 export function GetSharedTerminalState():Promise<app.TerminalStateSnapshot>;
@@ -101,6 +109,10 @@ export function ImportMemoryJSON(arg1:string):Promise<number>;
 
 export function ImportTaskRunsJSON(arg1:string):Promise<number>;
 
+export function IngestVideo(arg1:string,arg2:string):Promise<app.VideoIngest>;
+
+export function IngestVideoPath(arg1:string):Promise<app.VideoIngest>;
+
 export function InterruptShellTool():Promise<void>;
 
 export function KillLocalInferenceServers():Promise<app.MaintenanceResult>;
@@ -110,6 +122,8 @@ export function ListAgentSessions():Promise<Array<app.AgentSession>>;
 export function ListBenchmarkRuns():Promise<Array<app.ProfileBenchmarkResult>>;
 
 export function ListChannelWorkQueue():Promise<Array<channelbus.WorkItem>>;
+
+export function ListKokoroVoices():Promise<Array<string>>;
 
 export function ListLearningCandidates(arg1:number):Promise<Array<app.LearningCandidate>>;
 
@@ -167,6 +181,8 @@ export function RenameFile(arg1:string,arg2:string):Promise<void>;
 
 export function RespondConfirm(arg1:boolean):Promise<void>;
 
+export function RestartAudioWorker():Promise<app.AudioHealth>;
+
 export function RestartWSL():Promise<app.MaintenanceResult>;
 
 export function ResumeRun(arg1:string):Promise<void>;
@@ -180,6 +196,10 @@ export function RunArtifact(arg1:string,arg2:string):Promise<void>;
 export function RunDoctor():Promise<app.DoctorResult>;
 
 export function RunGrammarToolArgsProbe(arg1:string):Promise<app.GrammarToolArgsProbeResult>;
+
+export function RunJHUTAgentEval(arg1:string):Promise<app.AgentEvalReport>;
+
+export function RunJHUTBrowserVerification(arg1:string):Promise<app.JHUTBrowserReport>;
 
 export function RunMiniAgentLoopBenchmark(arg1:settings.Profile,arg2:settings.Provider):Promise<app.AgentEvalResult>;
 
@@ -230,6 +250,10 @@ export function StopAgent():Promise<void>;
 export function StopArtifact():Promise<void>;
 
 export function SwitchProfile(arg1:string):Promise<void>;
+
+export function SynthesizeSpeech(arg1:string):Promise<app.SpeechAudio>;
+
+export function TranscribeVoiceClip(arg1:string):Promise<string>;
 
 export function Undo():Promise<string>;
 

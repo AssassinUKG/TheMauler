@@ -21,41 +21,57 @@ import (
 var agentEvalFS embed.FS
 
 var agentEvalMu sync.Mutex
+var processStateMu sync.Mutex
 
 type AgentEvalScenario struct {
-	Name             string            `json:"name"`
-	Prompt           string            `json:"prompt"`
-	Workspace        map[string]string `json:"workspace"`
-	Mode             string            `json:"mode"`
-	MaxToolCalls     int               `json:"max_tool_calls"`
-	ExpectFiles      map[string]string `json:"expect_files"`
-	ExpectStatus     string            `json:"expect_status"`
-	ForbidSubstr     []string          `json:"forbid_substr"`
-	MaxAutoContinues int               `json:"max_auto_continues"`
+	Name               string            `json:"name"`
+	Prompt             string            `json:"prompt"`
+	Workspace          map[string]string `json:"workspace"`
+	Mode               string            `json:"mode"`
+	MaxToolCalls       int               `json:"max_tool_calls"`
+	ExpectFiles        map[string]string `json:"expect_files"`
+	ExpectStatus       string            `json:"expect_status"`
+	ForbidSubstr       []string          `json:"forbid_substr"`
+	MaxAutoContinues   int               `json:"max_auto_continues"`
+	CompletionBlocking *bool             `json:"completion_blocking,omitempty"`
+	ReviewerPass       *bool             `json:"reviewer_pass,omitempty"`
+	RuntimeVerifier    string            `json:"runtime_verifier,omitempty"`
 }
 
 type AgentEvalResult struct {
-	Name               string `json:"name"`
-	Pass               bool   `json:"pass"`
-	ArtifactPass       bool   `json:"artifact_pass"`
-	HygienePass        bool   `json:"hygiene_pass"`
-	StatusPass         bool   `json:"status_pass"`
-	Status             string `json:"status"`
-	ToolCalls          int    `json:"tool_calls"`
-	ToolSuccessRate    int    `json:"tool_success_rate"`
-	AutoContinues      int    `json:"auto_continues"`
-	Truncations        int    `json:"truncations"`
-	ToolErrors         int    `json:"tool_errors"`
-	RepeatedToolInputs int    `json:"repeated_tool_inputs"`
-	RepeatedSkips      int    `json:"repeated_skips"`
-	RepeatToolRate     int    `json:"repeat_tool_rate"`
-	VerifierPrompts    int    `json:"verifier_prompts"`
-	MaxRoutedTools     int    `json:"max_routed_tools"`
-	PromptWarnings     int    `json:"prompt_warnings"`
-	StabilityScore     int    `json:"stability_score"`
-	FalseDone          bool   `json:"false_done"`
-	DurationMs         int64  `json:"duration_ms"`
-	FailReason         string `json:"fail_reason,omitempty"`
+	Name               string          `json:"name"`
+	Pass               bool            `json:"pass"`
+	ArtifactPass       bool            `json:"artifact_pass"`
+	HygienePass        bool            `json:"hygiene_pass"`
+	StatusPass         bool            `json:"status_pass"`
+	Status             string          `json:"status"`
+	ToolCalls          int             `json:"tool_calls"`
+	ToolSuccessRate    int             `json:"tool_success_rate"`
+	AutoContinues      int             `json:"auto_continues"`
+	Truncations        int             `json:"truncations"`
+	ToolErrors         int             `json:"tool_errors"`
+	RepeatedToolInputs int             `json:"repeated_tool_inputs"`
+	RepeatedSkips      int             `json:"repeated_skips"`
+	RepeatToolRate     int             `json:"repeat_tool_rate"`
+	VerifierPrompts    int             `json:"verifier_prompts"`
+	MaxRoutedTools     int             `json:"max_routed_tools"`
+	PromptWarnings     int             `json:"prompt_warnings"`
+	StabilityScore     int             `json:"stability_score"`
+	FalseDone          bool            `json:"false_done"`
+	DurationMs         int64           `json:"duration_ms"`
+	FailReason         string          `json:"fail_reason,omitempty"`
+	RuntimePass        bool            `json:"runtime_pass,omitempty"`
+	DesktopScreenshot  string          `json:"desktop_screenshot,omitempty"`
+	MobileScreenshot   string          `json:"mobile_screenshot,omitempty"`
+	RuntimeFailures    []string        `json:"runtime_failures,omitempty"`
+	ModelID            string          `json:"model_id,omitempty"`
+	Provider           string          `json:"provider,omitempty"`
+	ContextTokens      int             `json:"context_tokens,omitempty"`
+	Seed               int64           `json:"seed,omitempty"`
+	ArtifactHash       string          `json:"artifact_hash,omitempty"`
+	VerifierVersion    string          `json:"verifier_version,omitempty"`
+	StopReason         string          `json:"stop_reason,omitempty"`
+	ToolTrace          []TaskToolEvent `json:"tool_trace,omitempty"`
 }
 
 type AgentEvalReport struct {
@@ -86,9 +102,32 @@ func (a *App) RunAgentEval(profileName string) AgentEvalReport {
 	return report
 }
 
+func (a *App) RunJHUTAgentEval(profileName string) AgentEvalReport {
+	home, _ := os.UserHomeDir()
+	root := strings.TrimSpace(os.Getenv("MAULER_BENCH_ROOT"))
+	if root == "" {
+		root = filepath.Join(home, "Documents", "MaulerBench")
+	}
+	promptPath := filepath.Join(root, "jhut-threejs", "MAULER.md")
+	prompt, err := os.ReadFile(promptPath)
+	if err != nil {
+		return AgentEvalReport{Profile: profileName, Total: 1, Results: []AgentEvalResult{{Name: "jhut-browser-e2e", Status: "error", FailReason: "read shared JHUT prompt: " + err.Error()}}}
+	}
+	scenario := AgentEvalScenario{Name: "jhut-browser-e2e", Prompt: string(prompt), Workspace: map[string]string{"MAULER.md": string(prompt)}, Mode: "Builder", MaxToolCalls: 40, ExpectFiles: map[string]string{"jhut.html": ""}, ExpectStatus: "done", MaxAutoContinues: 8, RuntimeVerifier: "jhut"}
+	report := a.runAgentEvalScenarios(profileName, []AgentEvalScenario{scenario})
+	_ = saveAgentEvalReport(report)
+	return report
+}
+
 func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalScenario) AgentEvalReport {
 	agentEvalMu.Lock()
 	defer agentEvalMu.Unlock()
+	processStateMu.Lock()
+	defer processStateMu.Unlock()
+	if err := a.beginAgentEval(); err != nil {
+		return agentEvalPreflightFailure(profileName, err)
+	}
+	defer a.endAgentEval()
 
 	cfg := settings.DefaultSettings()
 	profiles := settings.DefaultProfiles()
@@ -129,6 +168,80 @@ func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalSce
 		report.Results = append(report.Results, result)
 	}
 	return report
+}
+
+func (a *App) beginAgentEval() error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	if a.evalRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("agent eval is already running")
+	}
+	if a.agentRunning || a.artifactRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("agent eval requires an idle app: a task or artifact is active")
+	}
+	a.evalRunning = true
+	queue := a.channelQueue
+	a.mu.Unlock()
+
+	fail := func(err error) error {
+		a.endAgentEval()
+		return err
+	}
+	if queue != nil && len(queue.ListActive()) > 0 {
+		return fail(fmt.Errorf("agent eval requires an empty channel work queue"))
+	}
+	a.channelDrainMu.Lock()
+	draining := a.channelDrainRunning
+	a.channelDrainMu.Unlock()
+	if draining {
+		return fail(fmt.Errorf("agent eval requires idle channel dispatch"))
+	}
+	a.bgMu.Lock()
+	backgroundJobs := len(a.bgJobs)
+	a.bgMu.Unlock()
+	if backgroundJobs > 0 {
+		return fail(fmt.Errorf("agent eval requires no tracked background terminal jobs"))
+	}
+	a.shellMu.Lock()
+	sessions := make([]*shellSession, 0, len(a.shellSessions))
+	for _, session := range a.shellSessions {
+		sessions = append(sessions, session)
+	}
+	a.shellMu.Unlock()
+	for _, session := range sessions {
+		if session != nil && !session.runMu.TryLock() {
+			return fail(fmt.Errorf("agent eval requires idle terminal commands"))
+		}
+		if session != nil {
+			session.runMu.Unlock()
+		}
+	}
+	return nil
+}
+
+func (a *App) endAgentEval() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.evalRunning = false
+	a.mu.Unlock()
+}
+
+func agentEvalPreflightFailure(profileName string, err error) AgentEvalReport {
+	return AgentEvalReport{
+		Profile: strings.TrimSpace(profileName),
+		Total:   1,
+		Results: []AgentEvalResult{{
+			Name:       "eval-preflight",
+			Status:     "blocked",
+			FailReason: err.Error(),
+		}},
+	}
 }
 
 func agentEvalReportsPath() (string, error) {
@@ -210,7 +323,7 @@ func runOneAgentEvalScenario(cfg settings.Settings, profiles settings.ProfilesFi
 		result.FailReason = err.Error()
 		return result
 	}
-	defer os.Chdir(oldWD)
+	defer func() { _ = os.Chdir(oldWD) }()
 	if err := seedAgentEvalWorkspace(workspace, scenario.Workspace); err != nil {
 		result.Status = "error"
 		result.FailReason = err.Error()
@@ -234,10 +347,17 @@ func runOneAgentEvalScenario(cfg settings.Settings, profiles settings.ProfilesFi
 		contextWindow:  profile.CtxTokens,
 	}
 	runApp.registerAppTools()
-	tools.SetConfigSnapshot(cfg.Tools)
+	restoreToolConfig := tools.SwapConfigSnapshot(cfg.Tools)
+	defer restoreToolConfig()
 
 	if scenario.MaxToolCalls > 0 {
 		cfg.Agents.MaxToolCalls = scenario.MaxToolCalls
+	}
+	if scenario.CompletionBlocking != nil {
+		cfg.Agents.ReviewLoop.CompletionBlocking = *scenario.CompletionBlocking
+	}
+	if scenario.ReviewerPass != nil {
+		cfg.Agents.ReviewLoop.ReviewerPass = *scenario.ReviewerPass
 	}
 	modeName := firstNonEmpty(scenario.Mode, "Builder")
 	mode := applyPresetToMode(baseMode(modeName), cfg.Agents.Presets)
@@ -245,7 +365,32 @@ func runOneAgentEvalScenario(cfg settings.Settings, profiles settings.ProfilesFi
 	run := startTaskRun(scenario.Prompt, mode.Name, cfg.ActiveProfile, profile.ModelID)
 	finished := runApp.runAgentLoop(context.Background(), userMsg, profile, &cfg, true, mode, nil, nil, run)
 	result.DurationMs = time.Since(start).Milliseconds()
+	result.ModelID, result.Provider, result.ContextTokens = profile.ModelID, profile.Provider, profile.CtxTokens
+	result.Seed = profile.ActiveParams(true).Seed
+	result.StopReason = finished.StopReason
+	result.ToolTrace = append([]TaskToolEvent(nil), finished.Tools...)
 	scoreAgentEvalResult(&result, finished, workspace, scenario)
+	if scenario.RuntimeVerifier == "jhut" {
+		configDir, _ := settings.ConfigDir()
+		evidenceDir := filepath.Join(configDir, "agent-eval-artifacts", fmt.Sprintf("%s-%d", scenario.Name, time.Now().Unix()))
+		report, _ := verifyJHUTBrowser(context.Background(), workspace, evidenceDir)
+		result.RuntimePass = report.Pass
+		result.DesktopScreenshot = report.DesktopScreenshot
+		result.MobileScreenshot = report.MobileScreenshot
+		result.RuntimeFailures = report.Failures
+		result.VerifierVersion = report.VerifierVersion
+		if artifact, err := os.ReadFile(filepath.Join(workspace, "jhut.html")); err == nil {
+			result.ArtifactHash = byteHash(artifact)
+		}
+		if !report.Pass {
+			result.ArtifactPass = false
+			result.Pass = false
+			if result.FailReason != "" {
+				result.FailReason += "; "
+			}
+			result.FailReason += "runtime verification: " + strings.Join(report.Failures, ", ")
+		}
+	}
 	return result
 }
 

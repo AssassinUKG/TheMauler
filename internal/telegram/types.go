@@ -21,12 +21,15 @@ type Chat struct {
 }
 
 type Message struct {
-	MessageID int64  `json:"message_id"`
-	From      *User  `json:"from,omitempty"`
-	Chat      Chat   `json:"chat"`
-	Text      string `json:"text,omitempty"`
-	Voice     *Voice `json:"voice,omitempty"`
-	Audio     *Audio `json:"audio,omitempty"`
+	MessageID int64       `json:"message_id"`
+	From      *User       `json:"from,omitempty"`
+	Chat      Chat        `json:"chat"`
+	Text      string      `json:"text,omitempty"`
+	Caption   string      `json:"caption,omitempty"`
+	Voice     *Voice      `json:"voice,omitempty"`
+	Audio     *Audio      `json:"audio,omitempty"`
+	Photo     []PhotoSize `json:"photo,omitempty"`
+	Document  *Document   `json:"document,omitempty"`
 }
 
 type Voice struct {
@@ -44,6 +47,20 @@ type Audio struct {
 	FileSize  int64  `json:"file_size,omitempty"`
 	Performer string `json:"performer,omitempty"`
 	Title     string `json:"title,omitempty"`
+}
+
+type PhotoSize struct {
+	FileID   string `json:"file_id"`
+	FileSize int64  `json:"file_size,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+}
+
+type Document struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
 }
 
 type Update struct {

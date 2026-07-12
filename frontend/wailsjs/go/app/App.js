@@ -98,6 +98,14 @@ export function DispatchChannelMessage(arg1) {
   return window['go']['app']['App']['DispatchChannelMessage'](arg1);
 }
 
+export function DispatchSideChatMessage(arg1) {
+  return window['go']['app']['App']['DispatchSideChatMessage'](arg1);
+}
+
+export function EmergencyStop() {
+  return window['go']['app']['App']['EmergencyStop']();
+}
+
 export function EncodeFileBase64(arg1) {
   return window['go']['app']['App']['EncodeFileBase64'](arg1);
 }
@@ -112,6 +120,10 @@ export function ExportTaskRunsJSON() {
 
 export function GetAgentMode() {
   return window['go']['app']['App']['GetAgentMode']();
+}
+
+export function GetAudioHealth() {
+  return window['go']['app']['App']['GetAudioHealth']();
 }
 
 export function GetAutoAgents() {
@@ -154,6 +166,10 @@ export function GetProjectInstructionsSummary() {
   return window['go']['app']['App']['GetProjectInstructionsSummary']();
 }
 
+export function GetServiceHealth() {
+  return window['go']['app']['App']['GetServiceHealth']();
+}
+
 export function GetSettings() {
   return window['go']['app']['App']['GetSettings']();
 }
@@ -190,6 +206,14 @@ export function ImportTaskRunsJSON(arg1) {
   return window['go']['app']['App']['ImportTaskRunsJSON'](arg1);
 }
 
+export function IngestVideo(arg1, arg2) {
+  return window['go']['app']['App']['IngestVideo'](arg1, arg2);
+}
+
+export function IngestVideoPath(arg1) {
+  return window['go']['app']['App']['IngestVideoPath'](arg1);
+}
+
 export function InterruptShellTool() {
   return window['go']['app']['App']['InterruptShellTool']();
 }
@@ -208,6 +232,10 @@ export function ListBenchmarkRuns() {
 
 export function ListChannelWorkQueue() {
   return window['go']['app']['App']['ListChannelWorkQueue']();
+}
+
+export function ListKokoroVoices() {
+  return window['go']['app']['App']['ListKokoroVoices']();
 }
 
 export function ListLearningCandidates(arg1) {
@@ -322,6 +350,10 @@ export function RespondConfirm(arg1) {
   return window['go']['app']['App']['RespondConfirm'](arg1);
 }
 
+export function RestartAudioWorker() {
+  return window['go']['app']['App']['RestartAudioWorker']();
+}
+
 export function RestartWSL() {
   return window['go']['app']['App']['RestartWSL']();
 }
@@ -348,6 +380,14 @@ export function RunDoctor() {
 
 export function RunGrammarToolArgsProbe(arg1) {
   return window['go']['app']['App']['RunGrammarToolArgsProbe'](arg1);
+}
+
+export function RunJHUTAgentEval(arg1) {
+  return window['go']['app']['App']['RunJHUTAgentEval'](arg1);
+}
+
+export function RunJHUTBrowserVerification(arg1) {
+  return window['go']['app']['App']['RunJHUTBrowserVerification'](arg1);
 }
 
 export function RunMiniAgentLoopBenchmark(arg1, arg2) {
@@ -448,6 +488,14 @@ export function StopArtifact() {
 
 export function SwitchProfile(arg1) {
   return window['go']['app']['App']['SwitchProfile'](arg1);
+}
+
+export function SynthesizeSpeech(arg1) {
+  return window['go']['app']['App']['SynthesizeSpeech'](arg1);
+}
+
+export function TranscribeVoiceClip(arg1) {
+  return window['go']['app']['App']['TranscribeVoiceClip'](arg1);
 }
 
 export function Undo() {

@@ -92,7 +92,7 @@ func (t *Glob) Run(_ context.Context, raw json.RawMessage) (string, error) {
 		if hint := registeredMasterSkillSearchHint(p.Pattern); hint != "" {
 			return "no files matched\n\n" + hint, nil
 		}
-		return "no files matched", nil
+		return fmt.Sprintf("[glob_result]\nstate: empty\npattern: %s\ndir: %s\nmatches: 0\nnext_tool: proceed\nrepeat_policy: do_not_re_glob_same_path\nmessage: no files matched; this directory/pattern is known empty for this run unless files are created or the search pattern changes meaningfully", p.Pattern, filepath.ToSlash(root)), nil
 	}
 
 	var sb strings.Builder

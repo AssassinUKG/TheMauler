@@ -81,8 +81,10 @@ func TestGlobNoMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "no files matched" {
-		t.Fatalf("expected no match message, got %q", out)
+	for _, want := range []string{"[glob_result]", "state: empty", "matches: 0", "repeat_policy: do_not_re_glob_same_path"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected structured no match result to contain %q, got %q", want, out)
+		}
 	}
 }
 
@@ -152,5 +154,18 @@ func TestShouldSkipDir(t *testing.T) {
 	}
 	if shouldSkipDir("src") || shouldSkipDir("internal") {
 		t.Error("normal dirs should not be skipped")
+	}
+}
+
+func TestEmptyGlobResultAdvisesNoRepeat(t *testing.T) {
+	dir := t.TempDir()
+	got, err := runGlob(t, map[string]any{"pattern": "*.nmap", "dir": dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[glob_result]", "state: empty", "matches: 0", "repeat_policy: do_not_re_glob_same_path", "next_tool: proceed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("empty glob result missing %q:\n%s", want, got)
+		}
 	}
 }
