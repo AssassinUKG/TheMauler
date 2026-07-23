@@ -6,6 +6,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+inference-bridge-logs-export-*.json
+mauler-task-runs-export-*.json
 
 # Dependencies
 node_modules/
