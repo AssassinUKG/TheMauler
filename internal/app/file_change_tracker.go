@@ -126,19 +126,16 @@ func (a *App) recordFileChange(runID string, tc llm.ToolCallDef, before fileChan
 			"after_exists":   fmt.Sprintf("%t", after.Exists),
 			"after_size":     fmt.Sprintf("%d", after.Size),
 			"after_sha256":   after.SHA256,
-			"cleanup_hint":   cleanupHint(after.DisplayPath, action),
+			"cleanup_hint":   cleanupHint(action),
 			"verification":   verificationStatus(verification),
 			"requested_path": fileChangePath(tc),
 		},
 	})
 }
 
-func cleanupHint(path, action string) string {
+func cleanupHint(action string) string {
 	if action == "created" {
 		return "safe candidate for cleanup if it was temporary and is not a requested deliverable"
-	}
-	if strings.Contains(path, ".mauler_artifacts/") || strings.Contains(path, "/tmp/") {
-		return "review before cleanup; modified existing artifact/temp file"
 	}
 	return "modified existing file; do not delete during cleanup unless the user explicitly asks"
 }

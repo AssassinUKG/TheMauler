@@ -205,7 +205,11 @@ func normaliseSettings(s *Settings) {
 func normaliseTelegram(cfg *TelegramConfig, defaults TelegramConfig) {
 	cfg.Token = strings.TrimSpace(cfg.Token)
 	cfg.BotUsername = strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@")
-	cfg.DefaultProject = filepath.ToSlash(strings.TrimSpace(cfg.DefaultProject))
+	cfg.DefaultProject = strings.ReplaceAll(
+		filepath.ToSlash(strings.TrimSpace(cfg.DefaultProject)),
+		`\`,
+		"/",
+	)
 	cfg.DefaultProfile = strings.TrimSpace(cfg.DefaultProfile)
 	cfg.DefaultMode = strings.TrimSpace(cfg.DefaultMode)
 	if cfg.DefaultMode == "" {

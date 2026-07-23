@@ -173,7 +173,11 @@ func protectedPathVariants() []string {
 }
 
 func normaliseComparePath(path string) string {
-	path = NormalizeHostPath(strings.TrimSpace(path))
+	// filepath only recognises the current OS separator. Canonicalise Windows
+	// separators first so protected Windows paths remain comparable when policy
+	// checks run under WSL or Linux CI.
+	path = strings.ReplaceAll(strings.TrimSpace(path), `\`, "/")
+	path = NormalizeHostPath(path)
 	if path == "" {
 		return ""
 	}

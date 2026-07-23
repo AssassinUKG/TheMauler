@@ -15,6 +15,13 @@ wails build
 Use `./build.ps1 -Run` to build and relaunch the Windows production app. Use `wails dev` for hot
 reload. On Linux/WSL use the documented `build.sh` variants.
 
+## GitHub clean-checkout gate
+
+The GitHub Go job runs on Ubuntu and must build `frontend/dist` before any `go build`, `go vet`, or
+`go test` command that compiles `main.go`; the embedded frontend output is intentionally ignored by
+Git. Keep Windows paths in settings and policy tests host-independent so the Linux gate continues to
+exercise WSL/relay portability rather than being replaced with a Windows-only runner.
+
 ## Focused gates
 
 - Control plane/store: `go test -race ./internal/controlplane ./internal/store -count=1`

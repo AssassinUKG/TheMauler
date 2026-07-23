@@ -693,6 +693,12 @@ func (c *OpenAICompat) watchStreamingCancel(ctx context.Context, body io.Closer,
 		_ = body.Close()
 		c.cancelActiveInference()
 	case <-done:
+		// ParseSSE can observe the closed response body and finish at the same
+		// time as ctx is cancelled. If the done case wins that race, the
+		// backend still needs the explicit llama.cpp cancellation request.
+		if ctx.Err() != nil {
+			c.cancelActiveInference()
+		}
 	}
 }
 
