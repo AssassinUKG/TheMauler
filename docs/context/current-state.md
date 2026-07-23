@@ -78,6 +78,13 @@ through an explicit Matrix `Use` action.
 
 ## Latest verified baseline
 
+The 2026-07-23 clean-build follow-up repaired GitHub CI, updated the frontend toolchain to Vite
+8.1.5, pinned Monaco's sanitizer to patched DOMPurify 3.4.12, and reduced the largest JavaScript
+chunk from roughly 1.12 MB to 473 KB. `npm audit` reports zero known vulnerabilities. Strict
+execution ordering protects the manually split bundle inside WebView2; a native production smoke
+confirmed normal startup, Monaco file rendering, the ready xterm terminal, preserved resizable
+workbench surfaces, the 35K profile, and a healthy InferenceBridge backend.
+
 Context M5 phase A passed the production gate on 2026-07-21: the seven-class/three-paraphrase
 deterministic harness, canonical-envelope override isolation, hostile-content checks, stable packet
 and tool identities, repeated Agent Eval telemetry, full Go tests, vet, app/tools race tests,

@@ -59,6 +59,13 @@ checking is the current gate unless a task explicitly scopes lint cleanup.
 
 ## Latest recorded baseline
 
+- 2026-07-23 GitHub/frontend dependency closure: clean-checkout CI builds the ignored embedded
+  frontend before Go compilation and uses the current Node 24/action toolchain. Vite 8.1.5,
+  Monaco 0.56.0, patched DOMPurify 3.4.12, Babel 7.29.7, and brace-expansion 5.0.8 produce a zero-
+  vulnerability `npm audit`. Rolldown size-based vendor splitting with strict execution ordering
+  removes the oversized-chunk warning without blanking WebView2. Full Go tests, vet, frontend
+  production build, Wails production build, and a native Monaco/xterm/resizable-workbench/backend
+  smoke passed.
 - 2026-07-21 Huihui live Agent Eval: the active `qwen3.6-nothink-copy-copy` profile uses the exact
   `Huihui-Qwen3.6-27B-abliterated-ggml-model-Q4_K.gguf` alias at 35K, no-thinking sampling
   (`temperature=0.2`, `top_p=0.95`, `top_k=20`, `repeat_penalty=1.05`, `max_tokens=8192`) and native
