@@ -21,6 +21,7 @@ func (t *WriteFile) Destructive() bool { return true }
 func (t *WriteFile) Description() string {
 	return "Write content to a file, overwriting it entirely. " +
 		"Set append=true to add content to the end of an existing file instead of overwriting. " +
+		"After appending to a path in an agent run, set overwrite=true only when intentionally replacing the accumulated file. " +
 		"Creates the file and any missing parent directories if they don't exist."
 }
 
@@ -30,7 +31,8 @@ func (t *WriteFile) Schema() json.RawMessage {
   "properties": {
     "path":    {"type": "string", "description": "Destination file path"},
     "content": {"type": "string", "description": "Full file content to write"},
-    "append":  {"type": "boolean", "description": "If true, append content to the end of the file instead of overwriting (default false)"}
+    "append":  {"type": "boolean", "description": "If true, append content to the end of the file instead of overwriting (default false)"},
+    "overwrite": {"type": "boolean", "description": "Explicitly allow replacing a path already appended to during this run. Leave false when continuing chunked output (default false)"}
   },
   "required": ["path", "content"],
   "additionalProperties": false
@@ -38,9 +40,10 @@ func (t *WriteFile) Schema() json.RawMessage {
 }
 
 type writeFileParams struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Append  bool   `json:"append"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Append    bool   `json:"append"`
+	Overwrite bool   `json:"overwrite"`
 }
 
 func (t *WriteFile) Run(_ context.Context, raw json.RawMessage) (string, error) {

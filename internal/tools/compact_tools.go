@@ -137,7 +137,7 @@ type Write struct{}
 func (t *Write) Name() string      { return "write" }
 func (t *Write) Destructive() bool { return true }
 func (t *Write) Description() string {
-	return "Create a new file, fully replace a file, or append content. For partial edits use edit; for multi-hunk changes use apply_patch."
+	return "Create a new file, fully replace a file, or append content. Continue chunked output with append=true; after appending, intentional replacement requires overwrite=true. For partial edits use edit; for multi-hunk changes use apply_patch."
 }
 func (t *Write) Schema() json.RawMessage { return (&WriteFile{}).Schema() }
 func (t *Write) Run(ctx context.Context, raw json.RawMessage) (string, error) {

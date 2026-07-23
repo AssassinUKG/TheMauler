@@ -91,6 +91,43 @@ func TestAgentEvalScoringFailures(t *testing.T) {
 	}
 }
 
+func TestAgentEvalScoringAcceptsAlternativeArtifactOutcomes(t *testing.T) {
+	t.Run("accepts valid alternate repair", func(t *testing.T) {
+		workspace := t.TempDir()
+		if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("func answer() int {\n\treturn 42\n}\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		scenario := AgentEvalScenario{
+			ExpectStatus:   "done",
+			ExpectFilesAny: map[string][]string{"main.go": {`return "42"`, "func answer() int"}},
+		}
+		var result AgentEvalResult
+		scoreAgentEvalResult(&result, TaskRun{Status: "done"}, workspace, scenario)
+		if !result.Pass || !result.ArtifactPass || result.FalseDone {
+			t.Fatalf("valid alternate repair was rejected: %#v", result)
+		}
+	})
+
+	t.Run("rejects unrecognized repair", func(t *testing.T) {
+		workspace := t.TempDir()
+		if err := os.WriteFile(filepath.Join(workspace, "main.go"), []byte("func main() {}\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		scenario := AgentEvalScenario{
+			ExpectStatus:   "done",
+			ExpectFilesAny: map[string][]string{"main.go": {`return "42"`, "func answer() int"}},
+		}
+		var result AgentEvalResult
+		scoreAgentEvalResult(&result, TaskRun{Status: "done"}, workspace, scenario)
+		if result.Pass || result.ArtifactPass || !result.FalseDone {
+			t.Fatalf("unrecognized repair was accepted: %#v", result)
+		}
+		if !strings.Contains(result.FailReason, "missing every accepted substring") {
+			t.Fatalf("missing alternate-artifact failure reason: %q", result.FailReason)
+		}
+	})
+}
+
 func TestAgentEvalReliabilityCounters(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "ok.txt"), []byte("fixed"), 0o640); err != nil {

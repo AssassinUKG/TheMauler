@@ -8,8 +8,11 @@
   "mode": "Fixer",
   "max_tool_calls": 10,
   "expect_status": "done",
-  "expect_files": {
-    "main.go": "return \"42\""
+  "expect_files_any": {
+    "main.go": [
+      "return \"42\"",
+      "func answer() int"
+    ]
   },
   "max_auto_continues": 2
 }

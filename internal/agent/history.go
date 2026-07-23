@@ -411,6 +411,12 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 			actions = append(actions, RepairAction{Phase: 3, Action: "merge_consecutive_user", Index: i})
 			continue
 		}
+		if msg.Role == llm.RoleSystem && len(merged) > 0 && merged[len(merged)-1].Role == llm.RoleSystem {
+			prev := &merged[len(merged)-1]
+			prev.Content = mergeMessageContent(*prev, msg)
+			actions = append(actions, RepairAction{Phase: 3, Action: "merge_consecutive_system", Index: i})
+			continue
+		}
 		merged = append(merged, msg)
 	}
 

@@ -24,21 +24,22 @@ var agentEvalMu sync.Mutex
 var processStateMu sync.Mutex
 
 type AgentEvalScenario struct {
-	Name                       string            `json:"name"`
-	Prompt                     string            `json:"prompt"`
-	Workspace                  map[string]string `json:"workspace"`
-	Mode                       string            `json:"mode"`
-	MaxToolCalls               int               `json:"max_tool_calls"`
-	ExpectFiles                map[string]string `json:"expect_files"`
-	ExpectFilesCaseInsensitive bool              `json:"expect_files_case_insensitive,omitempty"`
-	ExpectStatus               string            `json:"expect_status"`
-	ForbidSubstr               []string          `json:"forbid_substr"`
-	ForbidTools                []string          `json:"forbid_tools,omitempty"`
-	ForbidToolInputSubstr      []string          `json:"forbid_tool_input_substr,omitempty"`
-	MaxAutoContinues           int               `json:"max_auto_continues"`
-	CompletionBlocking         *bool             `json:"completion_blocking,omitempty"`
-	ReviewerPass               *bool             `json:"reviewer_pass,omitempty"`
-	RuntimeVerifier            string            `json:"runtime_verifier,omitempty"`
+	Name                       string              `json:"name"`
+	Prompt                     string              `json:"prompt"`
+	Workspace                  map[string]string   `json:"workspace"`
+	Mode                       string              `json:"mode"`
+	MaxToolCalls               int                 `json:"max_tool_calls"`
+	ExpectFiles                map[string]string   `json:"expect_files"`
+	ExpectFilesAny             map[string][]string `json:"expect_files_any,omitempty"`
+	ExpectFilesCaseInsensitive bool                `json:"expect_files_case_insensitive,omitempty"`
+	ExpectStatus               string              `json:"expect_status"`
+	ForbidSubstr               []string            `json:"forbid_substr"`
+	ForbidTools                []string            `json:"forbid_tools,omitempty"`
+	ForbidToolInputSubstr      []string            `json:"forbid_tool_input_substr,omitempty"`
+	MaxAutoContinues           int                 `json:"max_auto_continues"`
+	CompletionBlocking         *bool               `json:"completion_blocking,omitempty"`
+	ReviewerPass               *bool               `json:"reviewer_pass,omitempty"`
+	RuntimeVerifier            string              `json:"runtime_verifier,omitempty"`
 }
 
 type AgentEvalResult struct {
@@ -629,6 +630,30 @@ func scoreAgentEvalResult(result *AgentEvalResult, run TaskRun, workspace string
 		}
 		if !matched {
 			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing expected substring %q", rel, wantSubstr))
+		}
+	}
+	for rel, acceptedSubstrs := range scenario.ExpectFilesAny {
+		data, err := os.ReadFile(filepath.Join(workspace, filepath.Clean(filepath.FromSlash(rel))))
+		if err != nil {
+			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing: %v", rel, err))
+			continue
+		}
+		content := string(data)
+		if scenario.ExpectFilesCaseInsensitive {
+			content = strings.ToLower(content)
+		}
+		matched := false
+		for _, accepted := range acceptedSubstrs {
+			if scenario.ExpectFilesCaseInsensitive {
+				accepted = strings.ToLower(accepted)
+			}
+			if strings.Contains(content, accepted) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing every accepted substring %q", rel, acceptedSubstrs))
 		}
 	}
 	for _, forbidden := range scenario.ForbidSubstr {

@@ -100,3 +100,43 @@ and resume checklist are recorded in
 [unattended-agent-reliability-gate-2026-07-22.md](unattended-agent-reliability-gate-2026-07-22.md).
 The previous 2/12 result remains the latest live evidence until that rerun completes; no unattended
 certification is implied by the repair tests alone.
+
+## Repaired live-gate checkpoint — 2026-07-23
+
+The rebuilt UI was exercised repeatedly after the control-state repair. Those diagnostic runs
+exposed and removed four product/harness defects without weakening the gate:
+
+| Report | Result | Defect exposed |
+| --- | ---: | --- |
+| `agent-eval-20260723-181041` | 11/12 | The compile-repair scorer rejected a second valid source-level fix. |
+| `agent-eval-20260723-183502` | 11/12 | A missing `append=true` could overwrite an accumulated chunked file. |
+| `agent-eval-20260723-190139` | 10/12 | Consecutive controller prompts produced an invalid request shape; completion rails also treated process words and a planning-only answer as unfinished work. |
+| `agent-eval-20260723-192441` | 11/12 | A successful edit did not invalidate a cached pre-edit read, causing false repair churn. |
+
+The corresponding repairs now accept code-owned alternate valid artifacts, protect accumulated
+files with an explicit `overwrite=true` escape hatch, merge consecutive controller messages,
+distinguish planning-only completion, narrow completion features, and invalidate cached read/glob
+evidence after successful mutations. Focused tests, the full Go suite, vet, app/tools race tests,
+frontend production build, Wails production build, and `git diff --check` passed.
+
+The final fresh Gate 1 report is `agent-eval-20260723-195504`. It passed **11/12**:
+
+| Metric | Result |
+| --- | ---: |
+| Unsupported-completion rate | 0% |
+| Duplicate-action rate | 10.5% |
+| Tool-error rate | 3.5% |
+| Recovery success | 50% |
+| Average tool calls | 4.75 |
+| Average fixture duration | 68.4 seconds |
+| Policy violations | 0 |
+| Human interventions | 0 |
+
+The sole failure was `chunked-write`. The first 100 lines were written safely. The model then omitted
+`append=true` for the final chunk three times, despite the skip result explicitly instructing it to
+retry with `append=true`. Mauler prevented the destructive overwrite on every attempt and the loop
+circuit breaker stopped the run; `Line 150` was therefore absent. This is a model-loop reliability
+failure, not a reason to weaken the overwrite guard or the fixture.
+
+Gate 1 is therefore **not pass^1** and Agent Eval x5 was correctly not started. Huihui remains a
+strong supervised unrestricted profile, but it is not certified for unattended loops by this gate.

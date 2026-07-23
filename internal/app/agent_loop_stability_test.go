@@ -107,6 +107,17 @@ func TestRepeatedIdenticalReadBlockDistinguishesArgs(t *testing.T) {
 	}
 }
 
+func TestRepeatedIdenticalReadBlockResetsAfterFileMutation(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "read", Input: `{"path":"a.go"}`, Status: "done", Result: "old"},
+		{Name: "read", Input: `{"path":"a.go"}`, Status: "done", Result: "old"},
+		{Name: "edit", Input: `{"path":"a.go","old":"old","new":"new"}`, Status: "done", Result: "edited"},
+	}}
+	if msg := repeatedIdenticalReadBlock(run, readToolCall("read", `{"path":"a.go"}`)); msg != "" {
+		t.Fatalf("a successful file mutation must reset the repeated-read detector, got %q", msg)
+	}
+}
+
 func TestRepeatedIdenticalReadRecoveryKeepsRunRecoveringAfterReadSkip(t *testing.T) {
 	args := `{"path":"main.go"}`
 	run := TaskRun{Tools: []TaskToolEvent{

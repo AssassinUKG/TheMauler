@@ -106,6 +106,23 @@ func TestRepairMessagesMergesConsecutiveUserMessages(t *testing.T) {
 	}
 }
 
+func TestRepairMessagesMergesConsecutiveSystemMessages(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		llm.NewTextMessage(llm.RoleAssistant, "initial answer"),
+		llm.NewTextMessage(llm.RoleSystem, "first controller repair"),
+		llm.NewTextMessage(llm.RoleSystem, "second controller repair"),
+	})
+
+	if len(msgs) != 3 || msgs[2].Role != llm.RoleSystem ||
+		messageContentText(msgs[2]) != "first controller repair\nsecond controller repair" {
+		t.Fatalf("expected merged controller messages, got %#v", msgs)
+	}
+	if !hasRepairAction(actions, "merge_consecutive_system") {
+		t.Fatalf("expected merge_consecutive_system action, got %#v", actions)
+	}
+}
+
 func TestRepairMessagesStripsToolCallsWithoutResults(t *testing.T) {
 	msgs, actions := RepairMessages([]llm.Message{
 		llm.NewTextMessage(llm.RoleUser, "task"),

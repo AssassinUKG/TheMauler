@@ -83,6 +83,9 @@ func repeatedIdenticalReadBlock(run TaskRun, tc llm.ToolCallDef) string {
 	cached := ""
 	for i := len(run.Tools) - 1; i >= 0; i-- {
 		tool := run.Tools[i]
+		if successfulFileMutation(tool) {
+			break
+		}
 		if tool.Name != tc.Function.Name {
 			continue
 		}

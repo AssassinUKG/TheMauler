@@ -2796,6 +2796,21 @@ func TestInvalidDoneReasonRejectsActionIntentFinalSummary(t *testing.T) {
 	}
 }
 
+func TestInvalidDoneReasonAllowsExplicitPlanningOnlyAnswer(t *testing.T) {
+	run := startTaskRun(
+		"Using only existing notes, summarize the next safe check. This is a planning-only question: do not run network tools.",
+		"Builder",
+		"qwen3.6-nothink",
+		"qwen",
+	)
+	run.addTool("read", `{"path":"notes.md"}`, "confirmed target notes", "done", 1)
+
+	reason := invalidDoneReason(run, "The next safe check is a basic reachability probe before proceeding to service discovery.")
+	if reason != "" {
+		t.Fatalf("planning-only answer should not be forced to execute its proposed check: %q", reason)
+	}
+}
+
 func TestParseInlineToolMarkupRepairsLocalModelToolText(t *testing.T) {
 	toolDefs := []llm.ToolDef{
 		{Function: llm.ToolFunctionDef{Name: "shell"}},
@@ -3630,6 +3645,67 @@ func TestDuplicateFetchURLSkip(t *testing.T) {
 	decision := evaluateSkipRecoveryPolicy(run, tc)
 	if decision.ToolStatus != "skipped" || decision.RunState != "recovering" || !strings.Contains(decision.Message, "already fetched") {
 		t.Fatalf("duplicate fetch policy did not return skip decision: %#v", decision)
+	}
+}
+
+func TestSkipRecoveryPolicyBlocksAccidentalOverwriteAfterAppend(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "write", Status: "done", Input: `{"path":"generated/long.txt","content":"Line 1\n"}`},
+		{Name: "write", Status: "done", Input: `{"path":"generated\\long.txt","content":"Line 2\n","append":true}`},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "write",
+		Arguments: json.RawMessage(`{"path":"generated/long.txt","content":"Line 3\n"}`),
+	}}
+
+	decision := evaluateSkipRecoveryPolicy(run, tc)
+	if decision.ToolStatus != "skipped" || decision.RunState != "recovering" {
+		t.Fatalf("expected accidental overwrite to be skipped for recovery: %#v", decision)
+	}
+	if !strings.Contains(decision.Message, "already appended") ||
+		!strings.Contains(decision.Message, "append=true") ||
+		!strings.Contains(decision.Message, "overwrite=true") {
+		t.Fatalf("expected actionable append recovery guidance: %q", decision.Message)
+	}
+}
+
+func TestSkipRecoveryPolicyAllowsSafeWriteVariants(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "write", Status: "done", Input: `{"path":"generated/long.txt","content":"Line 1\n"}`},
+		{Name: "write", Status: "done", Input: `{"path":"generated/long.txt","content":"Line 2\n","append":true}`},
+	}}
+	tests := []struct {
+		name string
+		args string
+	}{
+		{name: "continue append", args: `{"path":"generated/long.txt","content":"Line 3\n","append":true}`},
+		{name: "explicit replacement", args: `{"path":"generated/long.txt","content":"replacement\n","overwrite":true}`},
+		{name: "different path", args: `{"path":"generated/other.txt","content":"new\n"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := llm.ToolCallDef{Function: llm.FunctionCall{
+				Name:      "write",
+				Arguments: json.RawMessage(tt.args),
+			}}
+			if decision := evaluateSkipRecoveryPolicy(run, tc); decision.Message != "" {
+				t.Fatalf("safe write was unexpectedly skipped: %#v", decision)
+			}
+		})
+	}
+}
+
+func TestSkipRecoveryPolicyAllowsOrdinaryReplacementBeforeAnyAppend(t *testing.T) {
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "write", Status: "done", Input: `{"path":"generated/report.txt","content":"draft\n"}`},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "write",
+		Arguments: json.RawMessage(`{"path":"generated/report.txt","content":"final\n"}`),
+	}}
+
+	if decision := evaluateSkipRecoveryPolicy(run, tc); decision.Message != "" {
+		t.Fatalf("ordinary replacement before an append was unexpectedly skipped: %#v", decision)
 	}
 }
 

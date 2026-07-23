@@ -191,8 +191,10 @@ code and a targeted document from `docs/context/README.md`.
 
 1. Context M5 closure: the 105-attempt deterministic paraphrase/hostile preflight and reusable live
    pass^k telemetry are implemented. The shared Agent Eval/control-state repairs pass focused, race,
-   and production build gates. When the workstation is free, run one repaired 12-fixture UI suite;
-   only after a clean 12/12 run the selected local profile's full Agent Eval x5. Follow
+   and production build gates. The final 2026-07-23 Huihui UI Gate 1 reached 11/12: Mauler safely
+   blocked three missing-append overwrites, then the circuit breaker stopped the model. This is not
+   pass^1 and x5 remains locked. After a deliberate model/profile/control change, require a fresh
+   12/12 Gate 1 before the selected local profile's full Agent Eval x5. Follow
    `docs/unattended-agent-reliability-gate-2026-07-22.md` and do not claim the model-reliability
    milestone complete before pass^5 evidence exists.
 2. Finish Bug Bounty/Chat workspace reliability edges: hostile/paraphrase fixtures, exact agent

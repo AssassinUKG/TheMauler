@@ -93,6 +93,13 @@ The rebuilt app reported pass^5, 7/7 fixtures, 105/105 attempts, hostile guard p
 calls against the selected Gemma profile/workspace context. The full live model Agent Eval x5 remains
 an explicit separate closure gate. See `verification.md`.
 
+On 2026-07-23 the repaired live Huihui 27B/35K Gate 1 reached 11/12 after product-level scorer,
+overwrite-protection, controller-message, completion-rail, planning-only, and cache-invalidation
+repairs. The final failure was genuine model-loop behavior: `chunked-write` omitted `append=true`
+three times after explicit correction. Mauler prevented data loss and stopped through its circuit
+breaker. Gate 1 is not pass^1, x5 was not started, and Huihui remains supervised-only for agent
+loops. See `../huihui-qwen36-agent-eval-2026-07-21.md`.
+
 The same date's local-model comparison measured Qwen3.6 27B Fable/Fus Q4_K_M at 90/100 and 33.3
 tok/s versus the installed HauhauCS Gemma 4 26B-A4B QAT at 55/100 and 4.3 tok/s. The Gemma 31B
 profile referenced a missing artifact and was not scored. Family templates, repeat-penalty transport,

@@ -113,6 +113,13 @@ func TestWriteFileAppendCreatesFileIfMissing(t *testing.T) {
 	}
 }
 
+func TestWriteFileSchemaExposesExplicitOverwriteIntent(t *testing.T) {
+	schema := string((&WriteFile{}).Schema())
+	if !strings.Contains(schema, `"overwrite"`) || !strings.Contains(schema, `"append"`) {
+		t.Fatalf("write schema must advertise append and explicit overwrite intent: %s", schema)
+	}
+}
+
 func TestShouldWriteViaWSLRequiresLinuxAbsolutePathOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("WSL write routing is Windows-specific")

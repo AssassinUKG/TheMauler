@@ -20,6 +20,11 @@ func cachedToolResultForCall(run TaskRun, tc llm.ToolCallDef) string {
 	}
 	for i := len(run.Tools) - 1; i >= 0; i-- {
 		tool := run.Tools[i]
+		if successfulFileMutation(tool) {
+			// A cached file read predating a successful write/edit is stale.
+			// Force the current call to observe the changed workspace.
+			return ""
+		}
 		if strings.EqualFold(strings.TrimSpace(tool.Status), "error") || strings.EqualFold(strings.TrimSpace(tool.Status), "blocked") {
 			continue
 		}
@@ -81,6 +86,9 @@ func cachedEmptyGlobResultForCall(run TaskRun, tc llm.ToolCallDef) string {
 	}
 	for i := len(run.Tools) - 1; i >= 0; i-- {
 		tool := run.Tools[i]
+		if successfulFileMutation(tool) {
+			return ""
+		}
 		if !strings.EqualFold(strings.TrimSpace(tool.Name), "glob") || !strings.EqualFold(strings.TrimSpace(tool.Status), "done") {
 			continue
 		}
@@ -94,6 +102,11 @@ func cachedEmptyGlobResultForCall(run TaskRun, tc llm.ToolCallDef) string {
 		return "[empty_glob_cached]\ncontract:\n  state: cached_empty\n  tool: glob\n  next_tool: proceed\n  do_not_repeat: this glob pattern already returned zero matches in this run; use the empty result unless files were created or the pattern/dir changes meaningfully\n  cache_key: " + cacheContractValue(key) + "\n\n" + truncateRunes(result, 1200)
 	}
 	return ""
+}
+
+func successfulFileMutation(tool TaskToolEvent) bool {
+	return isWriteTool(strings.ToLower(strings.TrimSpace(tool.Name))) &&
+		strings.EqualFold(strings.TrimSpace(tool.Status), "done")
 }
 
 func globCallKey(raw json.RawMessage) string {

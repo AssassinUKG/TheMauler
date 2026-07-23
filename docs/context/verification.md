@@ -59,6 +59,17 @@ checking is the current gate unless a task explicitly scopes lint cleanup.
 
 ## Latest recorded baseline
 
+- 2026-07-23 repaired live Agent Eval closure: four diagnostic 12-fixture UI runs exposed and
+  regression-closed alternate-valid-artifact scoring, accidental chunk overwrite, consecutive
+  controller-message request shape, planning-only/completion-feature classification, and stale
+  read-cache defects. Full Go tests, vet, app/tools race tests, frontend production build, Wails
+  production build, and `git diff --check` passed. The final fresh Huihui 27B/35K report
+  `agent-eval-20260723-195504` passed 11/12 with zero unsupported completions, policy violations,
+  and human interventions. `chunked-write` remained a genuine model-loop failure: the model omitted
+  `append=true` three times after explicit correction; Mauler preserved the existing 100 lines,
+  blocked every overwrite, and stopped through the circuit breaker. Gate 1 is not pass^1, Agent Eval
+  x5 was not run, and the profile remains supervised-only. See
+  `../huihui-qwen36-agent-eval-2026-07-21.md`.
 - 2026-07-23 GitHub/frontend dependency closure: clean-checkout CI builds the ignored embedded
   frontend before Go compilation and uses the current Node 24/action toolchain. Vite 8.1.5,
   Monaco 0.56.0, patched DOMPurify 3.4.12, Babel 7.29.7, and brace-expansion 5.0.8 produce a zero-

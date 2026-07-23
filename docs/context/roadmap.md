@@ -18,8 +18,11 @@ Tracked by `../context-packet-reduction-implementation-plan-2026-07.md`.
   per-task system packets, focused tests, and the full production gate.
 - M5 phase A complete: seven task classes x three paraphrases x pass^5, hostile-content checks,
   deterministic packet/tool identities, Benchmark UI, and reusable production Agent Eval pass^k
-  telemetry. Remaining closure gate: run and record the full live Agent Eval x5 against the chosen
-  local profile; do not conflate the 105-attempt zero-model preflight with live model reliability.
+  telemetry. The repaired 2026-07-23 Huihui Gate 1 reached 11/12 and is not pass^1, so x5 remains
+  locked. Remaining closure gate: after a deliberate model/profile/control change, pass a fresh
+  12/12 UI Gate 1 and then run and record the full live Agent Eval x5. Do not conflate the
+  105-attempt zero-model preflight with live model reliability or rerun an unchanged profile until
+  it happens to pass.
 
 ## 2. Bug Bounty Hunter and Chat workspace isolation
 

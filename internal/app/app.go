@@ -5026,6 +5026,12 @@ var skipRecoveryRules = []skipRecoveryRule{
 	{
 		status:   "skipped",
 		state:    "recovering",
+		event:    "Accidental write overwrite skipped",
+		evaluate: accidentalAppendedFileOverwriteSkip,
+	},
+	{
+		status:   "skipped",
+		state:    "recovering",
 		event:    "Duplicate fetch_url skipped",
 		evaluate: duplicateFetchURLSkip,
 	},
@@ -5055,6 +5061,67 @@ func evaluateSkipRecoveryPolicy(run TaskRun, tc llm.ToolCallDef) recoveryPolicyD
 		}
 	}
 	return recoveryPolicyDecision{}
+}
+
+type writeRecoveryArgs struct {
+	Path      string `json:"path"`
+	Append    bool   `json:"append"`
+	Overwrite bool   `json:"overwrite"`
+}
+
+func accidentalAppendedFileOverwriteSkip(run TaskRun, tc llm.ToolCallDef) string {
+	if !strings.EqualFold(strings.TrimSpace(tc.Function.Name), "write") {
+		return ""
+	}
+	current, ok := parseWriteRecoveryArgs(tc.Function.Arguments)
+	if !ok || current.Path == "" || current.Append || current.Overwrite {
+		return ""
+	}
+	currentKey := writeRecoveryPathKey(current.Path)
+	if currentKey == "" {
+		return ""
+	}
+	for i := len(run.Tools) - 1; i >= 0; i-- {
+		tool := run.Tools[i]
+		if !strings.EqualFold(strings.TrimSpace(tool.Name), "write") ||
+			!strings.EqualFold(strings.TrimSpace(tool.Status), "done") {
+			continue
+		}
+		previous, parsed := parseWriteRecoveryArgs(json.RawMessage(tool.Input))
+		if !parsed || !previous.Append || writeRecoveryPathKey(previous.Path) != currentKey {
+			continue
+		}
+		return fmt.Sprintf(
+			"write skipped: likely accidental overwrite of %s. This path was already appended to successfully in this run. Continue the accumulated file with append=true. If a complete replacement is genuinely intended, retry once with append=false and overwrite=true.",
+			strings.TrimSpace(current.Path),
+		)
+	}
+	return ""
+}
+
+func parseWriteRecoveryArgs(raw json.RawMessage) (writeRecoveryArgs, bool) {
+	var args writeRecoveryArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return writeRecoveryArgs{}, false
+	}
+	args.Path = cleanToolPathArg(args.Path)
+	return args, true
+}
+
+func writeRecoveryPathKey(path string) string {
+	path = strings.TrimSpace(strings.ReplaceAll(cleanToolPathArg(path), "\\", "/"))
+	if path == "" {
+		return ""
+	}
+	// Linux-absolute paths can be WSL-internal and therefore case-sensitive.
+	if strings.HasPrefix(path, "/") && !strings.HasPrefix(strings.ToLower(path), "/mnt/") {
+		return filepath.ToSlash(filepath.Clean(path))
+	}
+	key := filepath.ToSlash(tools.NormalizeHostPath(path))
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	return key
 }
 
 func evaluateDisabledToolRecoveryPolicy(run TaskRun, cfg settings.ToolsConfig, tc llm.ToolCallDef) recoveryPolicyDecision {
@@ -6000,7 +6067,7 @@ func invalidDoneReason(run TaskRun, summary string) string {
 	if isJunkFinalSummary(summary) {
 		return fmt.Sprintf("Final assistant message was not meaningful: %q", strings.TrimSpace(summary))
 	}
-	if finalSummaryStillNeedsAction(summary) {
+	if !promptRequestsPlanningOnly(run.Prompt) && !explicitlyForbidsToolUse(run.Prompt) && finalSummaryStillNeedsAction(summary) {
 		return "Final assistant message describes a next action instead of completing it; continue autonomously with the required tool call."
 	}
 	metrics := buildLoopMetrics(run)
@@ -6011,6 +6078,15 @@ func invalidDoneReason(run TaskRun, summary string) string {
 		return "Run only updated the plan/todos for an execution task; it did not run an execution tool."
 	}
 	return ""
+}
+
+func promptRequestsPlanningOnly(prompt string) bool {
+	lower := strings.ToLower(strings.TrimSpace(prompt))
+	return hasAny(lower,
+		"planning-only", "planning only",
+		"plan-only", "plan only",
+		"advice-only", "advice only",
+	)
 }
 
 func finalSummaryStillNeedsAction(summary string) bool {

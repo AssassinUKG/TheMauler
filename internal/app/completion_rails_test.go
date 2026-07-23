@@ -11,10 +11,25 @@ import (
 func TestExtractGoalFeaturesDropsStopwords(t *testing.T) {
 	got := extractGoalFeatures("Please add a min and max helper to the package.")
 	joined := strings.Join(got, " ")
-	if strings.Contains(joined, "please") || strings.Contains(joined, "the") {
+	if strings.Contains(joined, "please") || strings.Contains(joined, "the") ||
+		strings.Contains(joined, "package") || strings.Contains(joined, "helper") {
 		t.Fatalf("features kept stopwords: %#v", got)
 	}
-	for _, want := range []string{"min", "max", "helper", "package"} {
+	for _, want := range []string{"min", "max"} {
+		if !containsFeature(got, want) {
+			t.Fatalf("features missing %q: %#v", want, got)
+		}
+	}
+}
+
+func TestExtractGoalFeaturesIgnoresExecutionInstructions(t *testing.T) {
+	got := extractGoalFeatures("Add a min and a max helper to mathutil.go using the edit tool, not shell redirection. Then finish only after both helpers are present and the Go project builds.")
+	for _, unwanted := range []string{"using", "edit", "tool", "shell", "redirection", "finish", "both", "present", "project", "helper"} {
+		if containsFeature(got, unwanted) {
+			t.Fatalf("instruction word %q was treated as a requested feature: %#v", unwanted, got)
+		}
+	}
+	for _, want := range []string{"min", "max"} {
 		if !containsFeature(got, want) {
 			t.Fatalf("features missing %q: %#v", want, got)
 		}

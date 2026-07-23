@@ -23,6 +23,34 @@ func TestCachedToolResultForReadCall(t *testing.T) {
 	}
 }
 
+func TestCachedToolResultInvalidatedBySuccessfulFileMutation(t *testing.T) {
+	input := `{"path":"src/task.txt"}`
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "read", Status: "done", Input: input, Result: "status = TODO"},
+		{Name: "edit", Status: "done", Input: `{"path":"src/task.txt","old":"TODO","new":"DONE"}`, Result: "edited"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "read", Arguments: json.RawMessage(input)}}
+
+	if got := cachedToolResultForCall(run, tc); got != "" {
+		t.Fatalf("read cache must be invalidated after a successful file mutation, got %q", got)
+	}
+}
+
+func TestCachedToolResultUsesFreshReadAfterFileMutation(t *testing.T) {
+	input := `{"path":"src/task.txt"}`
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "read", Status: "done", Input: input, Result: "status = TODO"},
+		{Name: "edit", Status: "done", Input: `{"path":"src/task.txt","old":"TODO","new":"DONE"}`, Result: "edited"},
+		{Name: "read", Status: "done", Input: input, Result: "status = DONE"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "read", Arguments: json.RawMessage(input)}}
+
+	got := cachedToolResultForCall(run, tc)
+	if !strings.Contains(got, "status = DONE") || strings.Contains(got, "status = TODO") {
+		t.Fatalf("cache should use the newest post-mutation read: %q", got)
+	}
+}
+
 func TestCachedToolResultForOffloadedResultPointsToReadToolResult(t *testing.T) {
 	input := `{"path":"large-output.txt"}`
 	run := TaskRun{Tools: []TaskToolEvent{
@@ -110,6 +138,19 @@ func TestCachedEmptyGlobResultForCallIgnoresChangedPattern(t *testing.T) {
 
 	if got := cachedEmptyGlobResultForCall(run, tc); got != "" {
 		t.Fatalf("changed glob pattern should not hit empty cache:\n%s", got)
+	}
+}
+
+func TestCachedEmptyGlobResultInvalidatedByFileMutation(t *testing.T) {
+	input := `{"pattern":"*.txt","dir":"loot"}`
+	run := TaskRun{Tools: []TaskToolEvent{
+		{Name: "glob", Status: "done", Input: input, Result: "[glob_result]\nstate: empty\nmatches: 0"},
+		{Name: "write", Status: "done", Input: `{"path":"loot/new.txt","content":"new"}`, Result: "wrote"},
+	}}
+	tc := llm.ToolCallDef{Function: llm.FunctionCall{Name: "glob", Arguments: json.RawMessage(input)}}
+
+	if got := cachedEmptyGlobResultForCall(run, tc); got != "" {
+		t.Fatalf("empty glob cache must be invalidated after file creation, got %q", got)
 	}
 }
 

@@ -18,11 +18,13 @@ var completionStopwords = map[string]bool{
 	"of": true, "on": true, "or": true, "please": true, "the": true, "this": true,
 	"to": true, "with": true, "you": true, "your": true, "only": true, "after": true,
 	"before": true, "then": true, "now": true, "current": true, "existing": true,
+	"both": true, "finish": true, "present": true, "project": true, "package": true,
+	"using": true, "tool": true, "shell": true, "redirection": true,
 }
 
 var completionActionWords = map[string]bool{
 	"add": true, "build": true, "create": true, "fix": true, "generate": true,
-	"implement": true, "make": true, "patch": true, "refactor": true, "update": true,
+	"edit": true, "finish": true, "implement": true, "make": true, "patch": true, "refactor": true, "update": true,
 	"write": true, "wire": true,
 }
 
@@ -124,7 +126,31 @@ func extractGoalFeatures(goal string) []string {
 	if len(features) > 12 {
 		features = features[:12]
 	}
+	if containsAnyFeature(features, "min", "max") {
+		features = removeGoalFeature(features, "helper")
+	}
 	return features
+}
+
+func containsAnyFeature(features []string, candidates ...string) bool {
+	for _, feature := range features {
+		for _, candidate := range candidates {
+			if feature == candidate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func removeGoalFeature(features []string, remove string) []string {
+	filtered := features[:0]
+	for _, feature := range features {
+		if feature != remove {
+			filtered = append(filtered, feature)
+		}
+	}
+	return filtered
 }
 
 func uncoveredGoalFeatures(coverage map[string]string, features []string) []string {
