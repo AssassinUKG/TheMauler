@@ -54,6 +54,11 @@ type subagentArgs struct {
 	Context        string `json:"context"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	MaxToolCalls   int    `json:"max_tool_calls"`
+	EngagementID   string `json:"engagement_id"`
+	WorkKind       string `json:"work_kind"`
+	PhaseID        string `json:"phase_id"`
+	EndpointID     string `json:"endpoint_id"`
+	WorkID         string `json:"work_id"`
 }
 
 func (a *App) registerAppTools() {
@@ -72,6 +77,9 @@ func (a *App) registerAppTools() {
 	a.registry.Register(&terminalSendTool{app: a})
 	a.registry.Register(&terminalReadTool{app: a})
 	a.registry.Register(&startListenerTool{app: a})
+	if a.engagements != nil {
+		a.registry.Register(&engagementTool{app: a})
+	}
 }
 
 func subagentSpecs() []subagentSpec {
@@ -155,6 +163,11 @@ func (t *subagentTool) Schema() json.RawMessage {
 			"context":{"type":"string","description":"Optional concise context the subagent should consider."},
 			"timeout_seconds":{"type":"integer","minimum":10,"maximum":600,"description":"Optional timeout override within the tool's hard cap."},
 			"max_tool_calls":{"type":"integer","minimum":0,"maximum":30,"description":"Optional tool-call budget override within the tool's hard cap."}
+			,"engagement_id":{"type":"string","description":"Optional active engagement id for a focused assigned work item."}
+			,"work_kind":{"type":"string","enum":["step","global_check","endpoint_check"]}
+			,"phase_id":{"type":"string"}
+			,"endpoint_id":{"type":"string"}
+			,"work_id":{"type":"string","description":"Exact delegated engagement work id."}
 		},
 		"required":["task"]
 	}`)
@@ -190,6 +203,11 @@ func (t *taskTool) Schema() json.RawMessage {
 			"context":{"type":"string","description":"Optional concise context the subagent should consider."},
 			"timeout_seconds":{"type":"integer","minimum":10,"maximum":600,"description":"Optional timeout override within the type's hard cap."},
 			"max_tool_calls":{"type":"integer","minimum":0,"maximum":30,"description":"Optional tool-call budget override within the type's hard cap."}
+			,"engagement_id":{"type":"string","description":"Optional active engagement id for a focused assigned work item."}
+			,"work_kind":{"type":"string","enum":["step","global_check","endpoint_check"]}
+			,"phase_id":{"type":"string"}
+			,"endpoint_id":{"type":"string"}
+			,"work_id":{"type":"string","description":"Exact delegated engagement work id."}
 		},
 		"required":["type","task"]
 	}`)
@@ -228,6 +246,16 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	timeout := boundedValue(args.TimeoutSeconds, spec.TimeoutSecs, 10, spec.TimeoutSecs)
 	maxToolCalls := boundedValue(args.MaxToolCalls, spec.MaxToolCalls, 0, spec.MaxToolCalls)
 	subagentID := fmt.Sprintf("subagent-%d", time.Now().UnixNano())
+	assignmentPacket, assigned, err := a.subagentEngagementAssignment(parent, args)
+	if err != nil {
+		return "", err
+	}
+	parentClaimant, _ := engagementClaimantFromContext(parent)
+	claimantID := subagentID
+	if parentClaimant.ID != "" {
+		claimantID = parentClaimant.ID + "/" + subagentID
+	}
+	claimantAlias := string(spec.Kind)
 	a.recordLedger(ledger.Event{
 		ID:      subagentID,
 		Kind:    "subagent_start",
@@ -238,16 +266,21 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 		Input:   args.Task,
 		Detail:  args.Context,
 		Metadata: map[string]string{
-			"toolset":        spec.Toolset,
-			"timeout_secs":   fmt.Sprintf("%d", timeout),
-			"max_tool_calls": fmt.Sprintf("%d", maxToolCalls),
-			"profile":        profile.Name,
-			"model":          profile.ModelID,
+			"toolset":             spec.Toolset,
+			"timeout_secs":        fmt.Sprintf("%d", timeout),
+			"max_tool_calls":      fmt.Sprintf("%d", maxToolCalls),
+			"profile":             profile.Name,
+			"model":               profile.ModelID,
+			"claimant_id":         claimantID,
+			"parent_claimant":     parentClaimant.ID,
+			"engagement_assigned": fmt.Sprintf("%t", assigned),
 		},
 	})
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
 	defer cancel()
+	stopEngagementHeartbeat := a.startEngagementClaimHeartbeat(ctx, claimantID, claimantAlias, "subagent")
+	defer stopEngagementHeartbeat()
 
 	client, err := buildClient(profile)
 	if err != nil {
@@ -274,17 +307,29 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	}
 
 	registry := tools.New()
+	if assigned {
+		registry.Register(&engagementTool{app: a})
+		registry.Register(&httpProbeTool{app: a})
+		registry.Register(&evidenceBundleTool{app: a})
+	}
 	toolCfg := cfg.Tools
 	toolCfg.ActiveToolset = spec.Toolset
-	toolDefs := registry.ToEnabledToolDefs(settings.EffectiveEnabledTools(toolCfg))
+	enabledTools := settings.EffectiveEnabledTools(toolCfg)
+	if assigned {
+		enabledTools["engagement"] = true
+	}
+	toolDefs := registry.ToEnabledToolDefs(enabledTools)
 	if !cfg.Tools.Enabled {
 		toolDefs = nil
 	}
 
 	msgs := []llm.Message{
 		llm.NewTextMessage(llm.RoleSystem, buildSubagentSystemPrompt(spec, profile, timeout, maxToolCalls)),
-		llm.NewTextMessage(llm.RoleUser, buildSubagentUserPrompt(args)),
 	}
+	if assignmentPacket != "" {
+		msgs = append(msgs, llm.NewTextMessage(llm.RoleSystem, assignmentPacket))
+	}
+	msgs = append(msgs, llm.NewTextMessage(llm.RoleUser, buildSubagentUserPrompt(args)))
 
 	var final strings.Builder
 	var evidence []string
@@ -383,7 +428,7 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 					_ = a.rollback.Push(agent.OpWrite, tools.NormalizeHostPath(snapPath))
 				}
 			}
-			result, runErr := registry.Run(ctx, call)
+			result, runErr := registry.Run(withEngagementClaimant(ctx, claimantID, claimantAlias), call)
 			if runErr != nil {
 				result = toolErrorResult(result, runErr)
 			} else if spec.Destructive && isWriteTool(call.Function.Name) {
@@ -422,6 +467,68 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 		Output:  report,
 	})
 	return report, nil
+}
+
+func (a *App) subagentEngagementAssignment(ctx context.Context, args subagentArgs) (string, bool, error) {
+	values := []string{args.EngagementID, args.WorkKind, args.PhaseID, args.EndpointID, args.WorkID}
+	hasAny := false
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			hasAny = true
+			break
+		}
+	}
+	if !hasAny {
+		return "", false, nil
+	}
+	if strings.TrimSpace(args.EngagementID) == "" || strings.TrimSpace(args.WorkKind) == "" || strings.TrimSpace(args.WorkID) == "" {
+		return "", false, fmt.Errorf("task engagement assignment requires engagement_id, work_kind, and work_id")
+	}
+	ref, err := engagementWorkRef(engagementToolArgs{
+		Kind: args.WorkKind, PhaseID: args.PhaseID, EndpointID: args.EndpointID, WorkID: args.WorkID,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	record, err := (&engagementTool{app: a}).resolveRecord(ctx, args.EngagementID)
+	if err != nil {
+		return "", false, err
+	}
+	work := engagementWorkState(record.State, ref)
+	if work == nil {
+		return "", false, fmt.Errorf("task engagement assignment references unknown work %s/%s", ref.Kind, ref.ID)
+	}
+	if work.Finished {
+		return "", false, fmt.Errorf("task engagement assignment %s/%s is already finished", ref.Kind, ref.ID)
+	}
+	available, err := a.engagements.Available(ctx, record.State.ID, "", 12, time.Now())
+	if err != nil {
+		return "", false, fmt.Errorf("task engagement assignment is not currently available: %w", err)
+	}
+	assignable := false
+	for _, candidate := range available.Items {
+		if candidate.Ref == ref {
+			assignable = true
+			break
+		}
+	}
+	if !assignable {
+		detail := strings.TrimSpace(available.Blocker)
+		if detail == "" {
+			detail = "the item is outside the current deterministic queue"
+		}
+		return "", false, fmt.Errorf("task engagement assignment %s/%s is not currently available: %s", ref.Kind, ref.ID, detail)
+	}
+	scope := append([]string(nil), record.State.Scope...)
+	if len(scope) > 4 {
+		scope = append(scope[:4], fmt.Sprintf("+%d more", len(record.State.Scope)-4))
+	}
+	packet := fmt.Sprintf(
+		"Focused Engagement Assignment (authoritative and exclusive):\n- engagement_id=%s\n- work_kind=%s phase_id=%s endpoint_id=%s work_id=%s\n- title=%s status=%s revision=%d\n- locked_scope=%v entries=%s\n- discipline: operate only this assigned work item. Call engagement claim before testing; attach real RunLedger/file evidence where applicable; then observe and finish with returned revisions. Do not select another grid item or expand scope.",
+		record.State.ID, ref.Kind, ref.PhaseID, ref.EndpointID, ref.ID, engagementPromptValue(work.Title, 140), work.Status, work.Revision,
+		record.State.ScopeLocked, engagementPromptValue(strings.Join(scope, ", "), 240),
+	)
+	return packet, true, nil
 }
 
 func buildSubagentSystemPrompt(spec subagentSpec, profile settings.Profile, timeout, maxToolCalls int) string {

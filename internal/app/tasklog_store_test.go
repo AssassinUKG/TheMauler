@@ -3,7 +3,9 @@ package app
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
+	"mauler/internal/controlplane"
 	"mauler/internal/store"
 )
 
@@ -15,19 +17,34 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 	defer db.Close()
 
 	run := TaskRun{
-		ID:        "task-1",
-		Prompt:    "do thing",
-		Mode:      "Builder",
-		Profile:   "qwen",
-		Model:     "model",
-		Status:    "done",
-		State:     "done",
-		StartedAt: "2026-06-15T10:00:00+01:00",
-		EndedAt:   "2026-06-15T10:01:00+01:00",
-		Summary:   "first",
-		Tools:     []TaskToolEvent{{Name: "shell", Status: "done", Input: "{}", Result: "ok", Timestamp: "2026-06-15T10:00:30+01:00"}},
-		Events:    []TaskRunEvent{{Kind: "state", Message: "testing", Timestamp: "2026-06-15T10:00:20+01:00"}},
+		ID:            "task-1",
+		Prompt:        "do thing",
+		Mode:          "Builder",
+		Profile:       "qwen",
+		Model:         "model",
+		ClaimantID:    "channel:telegram:chat-1:msg-9",
+		ClaimantAlias: "operator",
+		Origin:        "telegram",
+		Status:        "done",
+		State:         "done",
+		StartedAt:     "2026-06-15T10:00:00+01:00",
+		EndedAt:       "2026-06-15T10:01:00+01:00",
+		Summary:       "first",
+		Tools:         []TaskToolEvent{{Name: "shell", Status: "done", Input: "{}", Result: "ok", Timestamp: "2026-06-15T10:00:30+01:00"}},
+		Events:        []TaskRunEvent{{Kind: "state", Message: "testing", Timestamp: "2026-06-15T10:00:20+01:00"}},
 	}
+	contract, err := controlplane.NewTaskContract(controlplane.ContractInput{
+		RunID: run.ID, Objective: run.Prompt, WorkspaceRoot: t.TempDir(),
+		CreatedAt: time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := controlplane.NewMachineState(contract, time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Contract, run.Control = &contract, &control
 	if err := saveTaskRunDB(db, run, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +63,20 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 	}
 	if runs[0].Summary != "replaced" || len(runs[0].Tools) != 2 || len(runs[0].Events) != 1 {
 		t.Fatalf("unexpected loaded run: %#v", runs[0])
+	}
+	if runs[0].ClaimantID != run.ClaimantID || runs[0].ClaimantAlias != run.ClaimantAlias || runs[0].Origin != run.Origin {
+		t.Fatalf("claimant provenance did not round-trip: %#v", runs[0])
+	}
+	if runs[0].Contract == nil || runs[0].Control == nil || runs[0].Contract.Digest != contract.Digest || runs[0].Control.Phase != controlplane.PhaseIntake {
+		t.Fatalf("control plane did not round-trip: %#v", runs[0])
+	}
+}
+
+func TestStartTaskRunIDsAreUniqueWithinOneSecond(t *testing.T) {
+	first := startTaskRun("one", "Auto", "profile", "model")
+	second := startTaskRun("two", "Auto", "profile", "model")
+	if first.ID == second.ID {
+		t.Fatalf("sequential task runs reused id %q", first.ID)
 	}
 }
 

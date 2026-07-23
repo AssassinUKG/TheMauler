@@ -2,27 +2,35 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   AddWorkspaceFolder,
   CreateDir,
+  GetEngagementNext,
   GetSettings,
   GetWorkingDir,
+  ListEngagements,
   ListVPNInterfaces,
   ScaffoldWorkspaceFolders,
   SelectWorkspaceFolder,
   UpdateSettings,
+  type EngagementNextAction,
+  type EngagementRecord,
+  type EngagementSummary,
   type LabProfile,
   type Settings,
   type VPNInterfaceInfo,
   type WorkspaceFolder,
 } from '../wailsjs/go'
+import { EngagementSetupWizard } from './EngagementSetupWizard'
 import './ProjectsPage.css'
 
 interface Props {
   version: number
   onProjectChanged: (project: LabProfile, previousName: string) => void
+  onOpenEngagement: () => void
+  onPrepareEngagementRun: (prompt: string) => void
 }
 
 const defaultFolders = ['notes', 'scans', 'loot', 'scripts', 'screenshots']
 
-export function ProjectsPage({ version, onProjectChanged }: Props) {
+export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPrepareEngagementRun }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [cwd, setCwd] = useState('')
   const [selectedId, setSelectedId] = useState('')
@@ -30,12 +38,17 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
   const [vpnItems, setVPNItems] = useState<VPNInterfaceInfo[]>([])
   const [folderDraft, setFolderDraft] = useState(defaultFolders.join(' '))
   const [status, setStatus] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [engagement, setEngagement] = useState<EngagementSummary | null>(null)
+  const [engagementNext, setEngagementNext] = useState<EngagementNextAction | null>(null)
+  const [setupOpen, setSetupOpen] = useState(false)
 
   const load = async () => {
-    const [nextSettings, nextCwd, interfaces] = await Promise.all([
+    const [nextSettings, nextCwd, interfaces, engagementItems] = await Promise.all([
       GetSettings(),
       GetWorkingDir().catch(() => ''),
       ListVPNInterfaces().catch(() => [] as VPNInterfaceInfo[]),
+      ListEngagements().catch(() => [] as EngagementSummary[]),
     ])
     const profiles = normaliseProfiles(nextSettings)
     const active = nextSettings.context.active_lab_profile || nextSettings.context.lab.id || profiles[0]?.id || ''
@@ -44,6 +57,9 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
     setVPNItems(interfaces)
     setSelectedId(active)
     setDraft(profileToDraft(profiles.find(item => item.id === active) ?? profiles[0] ?? blankProject(), nextSettings.context.workspace_dir || nextCwd))
+    const currentEngagement = engagementItems[0] ?? null
+    setEngagement(currentEngagement)
+    setEngagementNext(currentEngagement ? await GetEngagementNext(currentEngagement.id).catch(() => null) : null)
   }
 
   useEffect(() => {
@@ -71,6 +87,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
     if (!project) return
     setSelectedId(id)
     setDraft(profileToDraft(project, settings?.context.workspace_dir || cwd))
+    setEditing(false)
   }
 
   const newProject = () => {
@@ -87,6 +104,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
       evidence_policy: 'discovery_first',
       access_preference: 'auto',
     })
+    setEditing(true)
   }
 
   const pickRoot = async () => {
@@ -117,6 +135,7 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
     setSettings(next)
     setSelectedId(profile.id)
     setDraft(profile)
+    setEditing(false)
     showStatus(activate ? `Switched to ${profile.name}` : `Saved ${profile.name}`)
     if (activate) onProjectChanged(profile, previousName)
     return profile
@@ -151,6 +170,33 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
 
   const selectedVPN = vpnItems.find(item => vpnValue(item) === draft.vpn_interface || item.name === draft.vpn_interface)
 
+  const startEngagement = async () => {
+    if (selectedId !== activeId) {
+      showStatus('Open this box before creating its engagement grid')
+      return
+    }
+    setSetupOpen(true)
+  }
+
+  const acceptCreatedEngagement = async (created: EngagementRecord) => {
+    const summary: EngagementSummary = {
+      id: created.state.id,
+      name: created.state.name,
+      workspace: created.workspace,
+      workflow_id: created.workflow.id,
+      workflow_version: created.workflow.version,
+      checklist_id: created.checklist.id,
+      checklist_version: created.checklist.version,
+      current_phase: created.state.current_phase,
+      revision: created.state.revision,
+      created_at: created.state.created_at,
+      updated_at: created.state.updated_at,
+    }
+    setEngagement(summary)
+    setEngagementNext(await GetEngagementNext(summary.id).catch(() => null))
+    showStatus('Engagement grid created')
+  }
+
   return (
     <div className="projects-page">
       <header className="projects-header">
@@ -183,19 +229,90 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
           ))}
         </aside>
 
-        <section className="project-editor">
-          <div className="project-editor-head">
+        <section className={`project-editor${editing ? ' is-editing' : ''}`}>
+          <div className="project-editor-head project-resume-head">
             <div>
-              <div className="project-kicker">Current project control</div>
+              <div className="project-kicker">{editing ? 'Edit project details' : selectedId === activeId ? 'Active project' : 'Selected project'}</div>
               <h2>{draft.name || 'Untitled project'}</h2>
+              {!editing && <p>{selectedId === activeId ? 'Ready to continue with the current workspace and project context.' : 'Open this box to switch workspace and start a clean project chat.'}</p>}
             </div>
             <div className="project-editor-actions">
-              <button onClick={() => void saveProject(false)}>Save</button>
-              <button className="primary" onClick={() => void saveProject(true)}>{selectedId === activeId ? 'Resume box' : 'Open box'}</button>
-              {selectedId && <button className="danger" onClick={() => void deleteProject(selectedId)}>Delete</button>}
+              {editing ? (
+                <>
+                  {selectedId && <button onClick={() => { setDraft(profileToDraft(selected ?? blankProject(), settings?.context.workspace_dir || cwd)); setEditing(false) }}>Cancel</button>}
+                  <button onClick={() => void saveProject(false)}>Save details</button>
+                  <button className="primary" onClick={() => void saveProject(true)}>{selectedId === activeId ? 'Save & resume' : 'Save & open'}</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={() => setEditing(true)}>Edit details</button>
+                  <button className="primary project-resume-button" onClick={() => void saveProject(true)}>{selectedId === activeId ? 'Resume box' : 'Open box'}</button>
+                </>
+              )}
             </div>
           </div>
 
+          {!editing ? (
+            <div className="project-resume-dashboard">
+              <div className="project-resume-cards">
+                <div>
+                  <span>Target</span>
+                  <strong>{draft.target || 'Not set'}</strong>
+                  <code>{draft.hostname || 'No hostname'}</code>
+                </div>
+                <div>
+                  <span>Environment</span>
+                  <strong>{selectedVPN?.name || draft.vpn_interface || 'Automatic route'}</strong>
+                  <small>{selectedVPN?.ip ? `${selectedVPN.ip}/${selectedVPN.cidr}` : 'VPN/interface not pinned'}</small>
+                </div>
+                <div>
+                  <span>Latest evidence</span>
+                  <strong>{draft.latest_artifact || 'No artifact yet'}</strong>
+                  <small>{draft.evidence_policy ? draft.evidence_policy.replaceAll('_', ' ') : 'Default evidence policy'}</small>
+                </div>
+              </div>
+
+              <div className="project-continue-panel">
+                <div className="project-continue-head">
+                  <div>
+                    <span className="project-kicker">Continue where you left off</span>
+                    <h3>{draft.latest_artifact ? 'Evidence is ready for the next step' : 'Start with project discovery'}</h3>
+                  </div>
+                  <button onClick={() => setEditing(true)}>Review project context</button>
+                </div>
+                <div className="project-continue-row">
+                  <span className="project-state-dot active" />
+                  <div><strong>Workspace</strong><small>{draft.workspace_dir || cwd || 'Not set'}</small></div>
+                </div>
+                <div className="project-continue-row">
+                  <span className="project-state-dot" />
+                  <div><strong>Working profile</strong><small>{draft.ops_profile || 'Pentesting'} · {draft.access_preference || 'automatic access'}</small></div>
+                </div>
+                {selectedId === activeId && (engagement ? (
+                  <div className="project-engagement-card">
+                    <span className="project-state-dot active" />
+                    <div>
+                      <span className="project-kicker">Engagement grid</span>
+                      <strong>{engagement.name}</strong>
+                      <small>{engagement.current_phase.replaceAll('_', ' ')} · {engagementNext?.work?.title || (engagementNext?.phase_complete ? 'phase ready to advance' : 'ready to resume')}</small>
+                    </div>
+                    <button onClick={onOpenEngagement}>Open Grid</button>
+                  </div>
+                ) : (
+                  <div className="project-engagement-card empty">
+                    <span className="project-state-dot" />
+                    <div>
+                      <span className="project-kicker">Engagement grid</span>
+                      <strong>Start governed testing</strong>
+                      <small>{draft.target || draft.hostname ? 'Pins the reviewed workflow, checklist, and locked project scope.' : 'Set a target or hostname before creating a grid.'}</small>
+                    </div>
+                    <button onClick={() => void startEngagement()} disabled={!draft.target && !draft.hostname}>Create Grid</button>
+                  </div>
+                ))}
+                {draft.notes && <div className="project-notes-preview"><span>Project note</span><p>{draft.notes}</p></div>}
+              </div>
+            </div>
+          ) : <>
           <div className="project-form-grid">
             <label>
               <span>Name</span>
@@ -272,8 +389,17 @@ export function ProjectsPage({ version, onProjectChanged }: Props) {
             <div><span>Selected VPN</span><strong>{selectedVPN ? `${selectedVPN.ip}/${selectedVPN.cidr} (${selectedVPN.name})` : draft.vpn_interface || 'not set'}</strong></div>
             <div><span>Open / resume</span><strong>switches root, starts a clean project chat, and preserves previous files and sessions</strong></div>
           </div>
+          {selectedId && <div className="project-danger-zone"><div><strong>Remove project from Mauler</strong><span>Files on disk are never deleted.</span></div><button className="danger" onClick={() => void deleteProject(selectedId)}>Delete project</button></div>}
+          </>}
         </section>
       </div>
+      {setupOpen && <EngagementSetupWizard
+        defaultName={draft.name}
+        onClose={() => setSetupOpen(false)}
+        onCreated={acceptCreatedEngagement}
+        onOpenGrid={onOpenEngagement}
+        onPrepareRun={onPrepareEngagementRun}
+      />}
     </div>
   )
 }

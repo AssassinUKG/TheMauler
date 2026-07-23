@@ -1,0 +1,20 @@
+{
+  "id": "public-cve-lookup",
+  "category": "Simple public CVE lookup",
+  "prompts": [
+    "Look up current public sources for CVE-2026-50522 and report whether a public PoC is available.",
+    "Find the latest vendor advisory and public proof-of-concept status for CVE-2026-50522.",
+    "Research CVE-2026-50522 online, compare authoritative sources, and clearly state when no PoC is confirmed."
+  ],
+  "expected_policy": "minimal_external_research",
+  "expected_class": "minimal",
+  "expected_routes": ["external-public-research"],
+  "expected_modes": ["Researcher"],
+  "required_sources": [],
+  "forbidden_sources": ["AGENTS.md", "MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["web_search", "fetch_url"],
+  "forbidden_tools": ["write", "edit", "shell", "skill"],
+  "required_prompt_text": ["current date"],
+  "forbidden_prompt_text": ["Go 1.26 backend", "collapsed rails"],
+  "max_project_tokens": 500
+}

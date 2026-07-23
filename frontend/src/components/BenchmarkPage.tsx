@@ -3,24 +3,31 @@ import {
   BenchmarkProfileWithCases,
   ClearBenchmarkRuns,
   GetProfiles,
+  GetSettings,
   ListBenchmarkRuns,
   ListModelsForProvider,
   LoadBenchmarkModel,
   RunAgentEval,
+  RunAgentEvalRepeated,
+  RunContextQualityEval,
+  RunEngagementAgentEval,
   RunJHUTAgentEval,
   RunGrammarToolArgsProbe,
   RunMiniAgentLoopBenchmark,
+  SwitchProfile,
   UpdateProfiles,
   type AgentEvalReport,
   type AgentEvalResult,
   type BenchmarkSpecInput,
+  type ContextQualityReport,
   type GrammarToolArgsProbeResult,
   type ProfileBenchmarkResult,
   type ProfilesFile,
 } from '../wailsjs/go'
 import './BenchmarkPage.css'
+import { PackLibraryPage } from './PackLibraryPage'
 
-type BenchView = 'matrix' | 'advanced' | 'history'
+type BenchView = 'matrix' | 'advanced' | 'history' | 'packs'
 type LogTone = 'info' | 'ok' | 'warn' | 'run'
 
 interface MatrixRow {
@@ -38,6 +45,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   const [view, setView] = useState<BenchView>('matrix')
   const [profilesFile, setProfilesFile] = useState<ProfilesFile | null>(null)
   const [selectedProfile, setSelectedProfile] = useState('')
+  const [agentEvalProfile, setAgentEvalProfile] = useState('')
   const [selectedProviderName, setSelectedProviderName] = useState('')
   const [draftProfile, setDraftProfile] = useState<ProfilesFile['profiles'][string] | null>(null)
   const [runs, setRuns] = useState<ProfileBenchmarkResult[]>([])
@@ -47,6 +55,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   const [expandedRun, setExpandedRun] = useState('')
   const [scenarioDrafts, setScenarioDrafts] = useState<BenchmarkSpecInput[]>(defaultBenchmarkScenarios())
   const [agentEval, setAgentEval] = useState<AgentEvalReport | null>(null)
+  const [contextQuality, setContextQuality] = useState<ContextQualityReport | null>(null)
   const [grammarProbe, setGrammarProbe] = useState<GrammarToolArgsProbeResult | null>(null)
   const [matrixRows, setMatrixRows] = useState<MatrixRow[]>([])
   const [matrixLog, setMatrixLog] = useState<MatrixLogLine[]>([])
@@ -57,16 +66,21 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   const [matrixContext16k, setMatrixContext16k] = useState(true)
 
   const load = async () => {
-    const [pf, history] = await Promise.all([
+    const [pf, history, settings] = await Promise.all([
       GetProfiles(),
       ListBenchmarkRuns().catch(() => [] as ProfileBenchmarkResult[]),
+      GetSettings().catch(() => null),
     ])
     setProfilesFile(pf)
     setRuns(history)
     const names = Object.keys(pf.profiles ?? {}).filter(name => Boolean(pf.profiles[name]?.model_id?.trim()))
-    setSelectedProfile(prev => prev && pf.profiles[prev] ? prev : names[0] ?? '')
+    const configuredActive = settings?.active_profile && pf.profiles[settings.active_profile]
+      ? settings.active_profile
+      : names[0] ?? ''
+    setSelectedProfile(prev => prev && pf.profiles[prev] ? prev : configuredActive)
+    setAgentEvalProfile(prev => prev && pf.profiles[prev] ? prev : configuredActive)
     const providerNames = Object.keys(pf.providers ?? {})
-    setSelectedProviderName(prev => prev && pf.providers[prev] ? prev : pf.profiles[names[0] ?? '']?.provider || providerNames[0] || '')
+    setSelectedProviderName(prev => prev && pf.providers[prev] ? prev : pf.profiles[configuredActive]?.provider || providerNames[0] || '')
   }
 
   useEffect(() => { void load() }, [version])
@@ -77,6 +91,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   )
   const providerNames = useMemo(() => Object.keys(profilesFile?.providers ?? {}), [profilesFile])
   const selected = profilesFile?.profiles[selectedProfile]
+  const selectedAgentEvalProfile = profilesFile?.profiles[agentEvalProfile]
   const activeProfile = draftProfile ?? selected
   const provider = profilesFile?.providers[selectedProviderName] ?? (activeProfile ? profilesFile?.providers[activeProfile.provider] : undefined)
   const contextCandidates = useMemo(() => {
@@ -240,7 +255,11 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
             setMatrixRows(rows => [...rows, { run: result }])
             const actual = result.actual_ctx_tokens ? `actual ${Math.round(result.actual_ctx_tokens / 1024)}k` : 'actual n/a'
             const toolCase = result.scenarios?.find(sc => sc.name === 'Tool call')
-            addMatrixLog('bench', `${label}: ${result.status}, ${result.tokens_per_second?.toFixed(1) ?? '0.0'} tok/s, tool ${toolCase?.structured_tools ?? 0}/${toolCase?.repaired_tools ?? 0}, ${actual}`, result.status === 'ok' ? 'ok' : 'warn')
+            addMatrixLog(
+              'bench',
+              `${label}: ${result.status}, decode ${formatTPS(result.decode_tokens_per_second)}, warm E2E ${formatTPS(result.end_to_end_tokens_per_second)}, ${timingSourceShort(result.timing_source)}, tool ${toolCase?.structured_tools ?? 0}/${toolCase?.repaired_tools ?? 0}, ${actual}`,
+              result.status === 'ok' ? 'ok' : 'warn',
+            )
             setStatus(`Mini agent-loop smoke: ${label}...`)
             addMatrixLog('loop', `Running mini agent loop for ${label}`, 'run')
             const loop = await RunMiniAgentLoopBenchmark(rowProfile, provider)
@@ -313,12 +332,12 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   }
 
   const runAgentEval = async () => {
-    if (!selectedProfile) return
+    if (!agentEvalProfile) return
     setRunning(true)
-    setStatus(`Running agent eval suite against ${selectedProfile}...`)
+    setStatus(`Running agent eval suite against ${agentEvalProfile}...`)
     setAgentEval(null)
     try {
-      const report = await RunAgentEval(selectedProfile)
+      const report = await RunAgentEval(agentEvalProfile)
       setAgentEval(report)
       setStatus(`Agent eval complete: ${report.pass_count}/${report.total} passed`)
     } catch (e) {
@@ -328,23 +347,64 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
     }
   }
 
-  const runJHUTEval = async () => {
-    if (!selectedProfile) return
-    setRunning(true); setAgentEval(null); setStatus(`Running browser-backed JHUT eval against ${selectedProfile}…`)
+  const runAgentEvalRepeated = async () => {
+    if (!agentEvalProfile) return
+    setRunning(true)
+    setStatus(`Running production Agent Eval pass^5 against ${agentEvalProfile}. This performs five complete live suite rounds...`)
+    setAgentEval(null)
     try {
-      const report = await RunJHUTAgentEval(selectedProfile)
+      const report = await RunAgentEvalRepeated(agentEvalProfile, 5)
+      setAgentEval(report)
+      setStatus(`Repeated Agent Eval: ${report.pass_power} · ${report.fixture_pass_count}/${report.fixture_count} fixtures · ${report.pass_count}/${report.total} attempts`)
+    } catch (e) {
+      setStatus(`Repeated Agent Eval failed: ${e}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const runContextQuality = async () => {
+    if (!agentEvalProfile) return
+    setRunning(true)
+    setStatus(`Running deterministic Context Quality pass^5 for ${agentEvalProfile}...`)
+    setContextQuality(null)
+    try {
+      const report = await RunContextQualityEval(agentEvalProfile, 5)
+      setContextQuality(report)
+      setStatus(`Context Quality: ${report.pass_power} · ${report.pass_count}/${report.total} fixtures · ${report.attempt_pass_count}/${report.attempt_total} attempts`)
+    } catch (e) {
+      setStatus(`Context Quality failed: ${e}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const runJHUTEval = async () => {
+    if (!agentEvalProfile) return
+    setRunning(true); setAgentEval(null); setStatus(`Running browser-backed JHUT eval against ${agentEvalProfile}…`)
+    try {
+      const report = await RunJHUTAgentEval(agentEvalProfile)
       setAgentEval(report)
       setStatus(`JHUT browser eval complete: ${report.pass_count}/${report.total} passed`)
     } catch (e) { setStatus(`JHUT eval failed: ${e}`) } finally { setRunning(false) }
   }
 
+  const runEngagementEval = async () => {
+    setRunning(true); setAgentEval(null); setStatus('Running native Engagement lifecycle eval…')
+    try {
+      const report = await RunEngagementAgentEval()
+      setAgentEval(report)
+      setStatus(`Engagement eval complete: ${report.pass_count}/${report.total} passed`)
+    } catch (e) { setStatus(`Engagement eval failed: ${e}`) } finally { setRunning(false) }
+  }
+
   const runGrammarProbe = async () => {
-    if (!selectedProfile) return
+    if (!agentEvalProfile) return
     setRunning(true)
-    setStatus(`Running grammar tool-args probe against ${selectedProfile}...`)
+    setStatus(`Running grammar tool-args probe against ${agentEvalProfile}...`)
     setGrammarProbe(null)
     try {
-      const result = await RunGrammarToolArgsProbe(selectedProfile)
+      const result = await RunGrammarToolArgsProbe(agentEvalProfile)
       setGrammarProbe(result)
       setStatus(result.supported ? 'Grammar probe passed: structured tool calls survived the schema constraint.' : 'Grammar probe did not pass for this profile.')
     } catch (e) {
@@ -407,19 +467,62 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
     setStatus('Benchmark history cleared')
   }
 
+  const selectProfile = (profileName: string) => {
+    setSelectedProfile(profileName)
+    setAgentEvalProfile(profileName)
+    const profileProvider = profilesFile?.profiles[profileName]?.provider
+    if (profileProvider && profilesFile?.providers[profileProvider]) {
+      setSelectedProviderName(profileProvider)
+    }
+  }
+
   const copyMatrixCSV = async () => {
     await navigator.clipboard.writeText(matrixRowsToCSV(matrixRows))
     setStatus('Matrix CSV copied to clipboard')
+  }
+
+  const useMatrixRunInChat = async (run: ProfileBenchmarkResult) => {
+    if (!profilesFile || !run.recommended_profile || !run.model_id) return
+    setRunning(true)
+    try {
+      const profileName = matrixChatProfileName(run)
+      const nextProfile = {
+        ...run.recommended_profile,
+        name: profileName,
+        provider: run.provider_name || run.recommended_profile.provider,
+        model_id: run.model_id,
+        ctx_tokens: run.ctx_tokens || run.recommended_profile.ctx_tokens,
+      }
+      const next = {
+        ...profilesFile,
+        profiles: {
+          ...profilesFile.profiles,
+          [profileName]: nextProfile,
+        },
+      }
+      await UpdateProfiles(next)
+      await SwitchProfile(profileName)
+      setProfilesFile(next)
+      setSelectedProfile(profileName)
+      setAgentEvalProfile(profileName)
+      setSelectedProviderName(nextProfile.provider)
+      setStatus(`Chat now uses ${shortModelName(run.model_id)} at ${Math.round((nextProfile.ctx_tokens || 0) / 1024)}k via profile ${profileName}.`)
+      onProfilesChanged?.()
+    } catch (error) {
+      setStatus(`Could not use this matrix model in Chat: ${String(error)}`)
+    } finally {
+      setRunning(false)
+    }
   }
 
   return (
     <div className="benchmark-page">
       <header className="benchmark-header">
         <div>
-          <h1>Model Lab</h1>
-          <p>Load, verify context, benchmark text/tool behavior, and run a tiny agent loop across local models.</p>
+          <h1>{view === 'packs' ? 'Pack Library' : 'Model Lab'}</h1>
+          <p>{view === 'packs' ? 'Manage the versioned workflows and vulnerability checks offered to new Engagement Grids.' : 'Load, verify context, benchmark text/tool behavior, and run a tiny agent loop across local models.'}</p>
         </div>
-        <div className="benchmark-actions">
+        {view !== 'packs' && <div className="benchmark-actions">
           <label className="benchmark-inline-control">
             <span>Provider</span>
             <select value={selectedProviderName} onChange={e => setSelectedProviderName(e.target.value)}>
@@ -427,8 +530,8 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
             </select>
           </label>
           <label className="benchmark-inline-control">
-            <span>Defaults</span>
-            <select value={selectedProfile} onChange={e => setSelectedProfile(e.target.value)}>
+            <span>Profile defaults</span>
+            <select value={selectedProfile} onChange={e => selectProfile(e.target.value)}>
               {profileNames.map(name => <option key={name} value={name}>{name}</option>)}
             </select>
           </label>
@@ -436,16 +539,17 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
             {running ? 'Running...' : 'Run Matrix'}
           </button>
           <button onClick={() => void load()} disabled={running}>Refresh</button>
-        </div>
+        </div>}
       </header>
 
       <nav className="benchmark-view-tabs">
         <button className={view === 'matrix' ? 'active' : ''} onClick={() => setView('matrix')}>Model Matrix</button>
         <button className={view === 'advanced' ? 'active' : ''} onClick={() => setView('advanced')}>Advanced Suite</button>
         <button className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>History</button>
+        <button className={view === 'packs' ? 'active' : ''} onClick={() => setView('packs')}>Pack Library</button>
       </nav>
 
-      {activeProfile && (
+      {view !== 'packs' && activeProfile && (
         <div className="benchmark-current">
           <Metric label="Model" value={activeProfile.model_id} />
           <Metric label="Provider" value={selectedProviderName || activeProfile.provider} />
@@ -455,14 +559,16 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
         </div>
       )}
 
-      {status && <div className="benchmark-status">{status}</div>}
+      {view !== 'packs' && status && <div className="benchmark-status">{status}</div>}
+
+      {view === 'packs' && <PackLibraryPage />}
 
       {view === 'matrix' && (
         <>
           <section className="matrix-hero">
             <div>
               <h2>Model Matrix</h2>
-              <p>Select provider models directly. The chosen profile only supplies sampling/tool defaults; no per-model profiles are created.</p>
+              <p>Select provider models directly. Tests use one excluded warm-up plus three measured text runs; choosing Use in Chat creates a named local profile.</p>
             </div>
             <div className="matrix-hero-actions">
               <button onClick={() => void refreshProviderModels()} disabled={running || modelListLoading || !provider}>{modelListLoading ? 'Listing...' : 'List Models'}</button>
@@ -474,7 +580,7 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
 
           <section className="matrix-selector">
             <div className="matrix-selector-head">
-              <div><strong>Model Picker</strong><span>Choose models returned by the selected provider. No per-model profiles are created.</span></div>
+              <div><strong>Model Picker</strong><span>Choose models returned by the selected provider. Profiles are created only when you explicitly click Use in Chat.</span></div>
               <div className="matrix-context-toggles">
                 <label><input type="checkbox" checked={matrixContext8k} onChange={e => setMatrixContext8k(e.target.checked)} />8k</label>
                 <label><input type="checkbox" checked={matrixContext16k} onChange={e => setMatrixContext16k(e.target.checked)} />16k</label>
@@ -527,14 +633,15 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
               <div className="matrix-flow">
                 <div><span>1</span><strong>Load</strong><em>request ctx 8k or 16k</em></div>
                 <div><span>2</span><strong>Verify</strong><em>record actual context</em></div>
-                <div><span>3</span><strong>Text</strong><em>256-token speed prompt</em></div>
-                <div><span>4</span><strong>Tool</strong><em>required read call</em></div>
-                <div><span>5</span><strong>Loop</strong><em>read/write/verify mini task</em></div>
+                <div><span>3</span><strong>Warm</strong><em>excluded startup pass</em></div>
+                <div><span>4</span><strong>Text ×3</strong><em>decode and warm end-to-end timing</em></div>
+                <div><span>5</span><strong>Tool</strong><em>required read call, scored separately</em></div>
+                <div><span>6</span><strong>Loop</strong><em>read/write/verify mini task</em></div>
               </div>
             </section>
           </div>
 
-          <MatrixTable rows={matrixRows} />
+          <MatrixTable rows={matrixRows} running={running} onUseInChat={run => void useMatrixRunInChat(run)} />
         </>
       )}
 
@@ -544,16 +651,25 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
           draftProfile={draftProfile}
           scenarioDrafts={scenarioDrafts}
           agentEval={agentEval}
+          contextQuality={contextQuality}
           grammarProbe={grammarProbe}
           selectedProfile={selectedProfile}
+          agentEvalProfile={agentEvalProfile}
+          agentEvalProfileData={selectedAgentEvalProfile ?? null}
+          profileNames={profileNames}
+          profiles={profilesFile?.profiles ?? {}}
           onDraftChange={setDraftProfile}
           onScenarioChange={updateScenario}
           onScenarioAdd={addScenario}
           onScenarioRemove={removeScenario}
           onSaveDraft={() => void saveDraftProfile()}
+          onAgentEvalProfileChange={selectProfile}
           onRunBenchmark={() => void runBenchmark()}
           onRunContextSweep={() => void runContextSweep()}
           onRunAgentEval={() => void runAgentEval()}
+          onRunAgentEvalRepeated={() => void runAgentEvalRepeated()}
+          onRunContextQuality={() => void runContextQuality()}
+          onRunEngagementEval={() => void runEngagementEval()}
           onRunJHUTEval={() => void runJHUTEval()}
           onRunGrammarProbe={() => void runGrammarProbe()}
         />
@@ -574,13 +690,13 @@ export function BenchmarkPage({ version = 0, onProfilesChanged }: { version?: nu
   )
 }
 
-function MatrixTable({ rows }: { rows: MatrixRow[] }) {
+function MatrixTable({ rows, running, onUseInChat }: { rows: MatrixRow[]; running: boolean; onUseInChat: (run: ProfileBenchmarkResult) => void }) {
   return (
     <section className="matrix-panel">
-      <div className="matrix-head"><div><strong>Results</strong><span>Text speed, required tool protocol, and mini-loop health.</span></div></div>
+      <div className="matrix-head"><div><strong>Results</strong><span>Decode speed is backend-reported; warm E2E includes prompt processing. Tool and loop latency are separate.</span></div></div>
       <div className="matrix-table">
         <div className="matrix-row matrix-row-head">
-          <span>Model</span><span>Requested</span><span>Actual</span><span>Status</span><span>Text tok/s</span><span>Tool</span><span>Loop</span><span>TTFT</span><span>Total</span><span>Notes</span>
+          <span>Model</span><span>Requested</span><span>Actual</span><span>Status</span><span>Decode</span><span>Warm E2E</span><span>Source</span><span>Tool</span><span>Loop</span><span>TTFT</span><span>Load</span><span>Total</span><span>Chat</span><span>Notes</span>
         </div>
         {rows.length === 0 ? (
           <div className="benchmark-empty">No matrix results yet.</div>
@@ -593,11 +709,15 @@ function MatrixTable({ rows }: { rows: MatrixRow[] }) {
               <span>{run.ctx_tokens ? `${Math.round(run.ctx_tokens / 1024)}k` : 'n/a'}</span>
               <span>{run.actual_ctx_tokens ? `${Math.round(run.actual_ctx_tokens / 1024)}k` : 'n/a'}</span>
               <span>{run.status}</span>
-              <span>{run.tokens_per_second ? run.tokens_per_second.toFixed(1) : '0.0'}</span>
+              <span title="Backend-reported decode throughput">{formatTPS(run.decode_tokens_per_second)}</span>
+              <span title="Completion tokens divided by complete warm request wall time">{formatTPS(run.end_to_end_tokens_per_second)}</span>
+              <span title={timingSourceDescription(run.timing_source)}>{timingSourceShort(run.timing_source)}</span>
               <span title="structured/repaired">{toolCase ? `${toolCase.structured_tools ?? 0}/${toolCase.repaired_tools ?? 0}` : 'n/a'}</span>
               <span title={loopReliabilityTitle(row.loop)}>{row.loop ? loopReliabilityLabel(row.loop) : 'pending'}</span>
-              <span>{run.ttf_ms ? `${run.ttf_ms} ms` : 'n/a'}</span>
+              <span>{run.text_ttf_ms ? `${run.text_ttf_ms} ms` : 'n/a'}</span>
+              <span>{run.load_ms != null ? `${run.load_ms} ms` : 'n/a'}</span>
               <span>{run.total_ms ? `${(run.total_ms / 1000).toFixed(1)}s` : 'n/a'}</span>
+              <span><button className="matrix-use-chat" onClick={() => onUseInChat(run)} disabled={running || !run.recommended_profile || !run.model_id}>Use in Chat</button></span>
               <span title={[run.summary, ...(run.notes ?? [])].join('\n')}>{run.summary || run.notes?.[0] || '-'}</span>
             </div>
           )
@@ -612,16 +732,25 @@ function AdvancedSuite({
   draftProfile,
   scenarioDrafts,
   agentEval,
+  contextQuality,
   grammarProbe,
   selectedProfile,
+  agentEvalProfile,
+  agentEvalProfileData,
+  profileNames,
+  profiles,
   onDraftChange,
   onScenarioChange,
   onScenarioAdd,
   onScenarioRemove,
   onSaveDraft,
+  onAgentEvalProfileChange,
   onRunBenchmark,
   onRunContextSweep,
   onRunAgentEval,
+  onRunAgentEvalRepeated,
+  onRunContextQuality,
+  onRunEngagementEval,
   onRunJHUTEval,
   onRunGrammarProbe,
 }: {
@@ -629,16 +758,25 @@ function AdvancedSuite({
   draftProfile: ProfilesFile['profiles'][string] | null
   scenarioDrafts: BenchmarkSpecInput[]
   agentEval: AgentEvalReport | null
+  contextQuality: ContextQualityReport | null
   grammarProbe: GrammarToolArgsProbeResult | null
   selectedProfile: string
+  agentEvalProfile: string
+  agentEvalProfileData: ProfilesFile['profiles'][string] | null
+  profileNames: string[]
+  profiles: ProfilesFile['profiles']
   onDraftChange: (profile: ProfilesFile['profiles'][string] | null) => void
   onScenarioChange: (index: number, patch: Partial<BenchmarkSpecInput>) => void
   onScenarioAdd: () => void
   onScenarioRemove: (index: number) => void
   onSaveDraft: () => void
+  onAgentEvalProfileChange: (profile: string) => void
   onRunBenchmark: () => void
   onRunContextSweep: () => void
   onRunAgentEval: () => void
+  onRunAgentEvalRepeated: () => void
+  onRunContextQuality: () => void
+  onRunEngagementEval: () => void
   onRunJHUTEval: () => void
   onRunGrammarProbe: () => void
 }) {
@@ -646,7 +784,15 @@ function AdvancedSuite({
     <>
       {draftProfile && (
         <section className="benchmark-editor">
-          <label><span>Model ID</span><input value={draftProfile.model_id} onChange={e => onDraftChange({ ...draftProfile, model_id: e.target.value })} /></label>
+          <label className="benchmark-model-profile">
+            <span>Model / profile</span>
+            <select value={agentEvalProfile} onChange={e => onAgentEvalProfileChange(e.target.value)} disabled={running} title={agentEvalProfileData?.model_id || ''}>
+              {profileNames.map(name => (
+                <option key={name} value={name}>{shortModelName(profiles[name]?.model_id || '')} ({name})</option>
+              ))}
+            </select>
+            <small title={agentEvalProfileData?.model_id || ''}>{agentEvalProfileData?.model_id || 'No configured model'}</small>
+          </label>
           <label><span>Context</span><input type="number" value={draftProfile.ctx_tokens} onChange={e => onDraftChange({ ...draftProfile, ctx_tokens: Number(e.target.value) || 0 })} /></label>
           <label className="benchmark-check"><input type="checkbox" checked={draftProfile.thinking} onChange={e => onDraftChange({ ...draftProfile, thinking: e.target.checked })} /><span>Thinking</span></label>
           <label className="benchmark-check"><input type="checkbox" checked={draftProfile.preserve_thinking} onChange={e => onDraftChange({ ...draftProfile, preserve_thinking: e.target.checked })} /><span>Preserve thinking</span></label>
@@ -688,12 +834,16 @@ function AdvancedSuite({
         <div className="benchmark-editor-head">
           <div><strong>Reliability Probes</strong><span>Live checks for production agent path and grammar-constrained tool arguments.</span></div>
           <div className="advanced-actions">
-            <button onClick={onRunAgentEval} disabled={running || !selectedProfile}>Run Agent Eval</button>
-            <button onClick={onRunJHUTEval} disabled={running || !selectedProfile}>Run JHUT Browser Eval</button>
-            <button onClick={onRunGrammarProbe} disabled={running || !selectedProfile}>Grammar Probe</button>
+            <button onClick={onRunAgentEval} disabled={running || !agentEvalProfile}>Run Agent Eval</button>
+            <button onClick={onRunAgentEvalRepeated} disabled={running || !agentEvalProfile} title="Runs the complete live model suite five times">Agent Eval x5</button>
+            <button className="primary" onClick={onRunContextQuality} disabled={running || !agentEvalProfile} title="Deterministic routing, tool, source, budget, and hostile-content checks with no model calls">Context Quality pass^5</button>
+            <button onClick={onRunEngagementEval} disabled={running}>Run Engagement Eval</button>
+            <button onClick={onRunJHUTEval} disabled={running || !agentEvalProfile}>Run JHUT Browser Eval</button>
+            <button onClick={onRunGrammarProbe} disabled={running || !agentEvalProfile}>Grammar Probe</button>
           </div>
         </div>
         <AgentEvalPanel report={agentEval} />
+        <ContextQualityPanel report={contextQuality} />
         <GrammarProbePanel result={grammarProbe} />
       </section>
     </>
@@ -703,26 +853,83 @@ function AdvancedSuite({
 function AgentEvalPanel({ report }: { report: AgentEvalReport | null }) {
   if (!report) return <div className="benchmark-empty">No agent eval run yet.</div>
   const ok = report.pass_count === report.total
+  const repeats = report.repeats || 1
+  const fixtures = report.fixture_count || report.total
+  const fixturePasses = report.fixture_count ? report.fixture_pass_count : report.pass_count
   return (
     <section className="agent-eval-panel">
       <div className="agent-eval-head">
-        <div><strong>Agent Eval: {report.profile}</strong><span>Production-style loop checks for tool use, recovery, and completion.</span></div>
-        <div className={`agent-eval-score ${ok ? 'ok' : 'warn'}`}>{report.pass_count}/{report.total}</div>
+        <div><strong>Agent Eval: {report.profile}</strong><span>Production-style loop checks for tool use, recovery, and evidence-owned completion.</span></div>
+        <div className={`agent-eval-score ${ok ? 'ok' : 'warn'}`}>{report.pass_power || `pass^${repeats}`} / {report.pass_count}/{report.total}</div>
+      </div>
+      <div className="agent-eval-aggregate">
+        <Metric label="Fixtures" value={`${fixturePasses}/${fixtures}`} />
+        <Metric label="Unsupported" value={`${(report.unsupported_completion_rate || 0).toFixed(1)}%`} />
+        <Metric label="Duplicates" value={`${(report.duplicate_action_rate || 0).toFixed(1)}%`} />
+        <Metric label="Tool errors" value={`${(report.tool_error_rate || 0).toFixed(1)}%`} />
+        <Metric label="Recovery" value={`${(report.recovery_success_rate || 0).toFixed(1)}%`} />
+        <Metric label="Avg tools" value={(report.average_tool_calls || 0).toFixed(1)} />
+        <Metric label="Policy blocks" value={String(report.policy_violations || 0)} />
+        <Metric label="Human actions" value={String(report.human_interventions || 0)} />
       </div>
       <div className="agent-eval-grid">
-        {report.results.map(result => (
-          <div className={`agent-eval-card ${result.pass ? 'ok' : 'warn'}`} key={result.name}>
-            <div className="agent-eval-title"><strong>{result.name}</strong><span>{result.status}</span></div>
+        {report.results.map((result, index) => (
+          <div className={`agent-eval-card ${result.pass ? 'ok' : 'warn'}`} key={`${result.name}-${result.attempt || 1}-${index}`}>
+            <div className="agent-eval-title"><strong>{result.name}{repeats > 1 ? ` / attempt ${result.attempt || 1} of ${repeats}` : ''}</strong><span>{result.status}</span></div>
             <div className="agent-eval-metrics">{result.tool_calls} tools / score {result.stability_score ?? 0} / success {result.tool_success_rate ?? 0}% / repeats {result.repeat_tool_rate ?? 0}% / {Math.round((result.duration_ms || 0) / 1000)}s</div>
             <div className="agent-eval-dimensions">
               <span className={result.status_pass ? 'ok' : 'warn'}>status</span>
               <span className={result.artifact_pass ? 'ok' : 'warn'}>artifact</span>
               <span className={result.hygiene_pass ? 'ok' : 'warn'}>hygiene</span>
-              {result.verifier_version && <span className={result.runtime_pass ? 'ok' : 'warn'}>browser</span>}
+              {result.verifier_version && <span className={result.runtime_pass ? 'ok' : 'warn'}>runtime</span>}
               <span className={result.false_done ? 'warn' : 'ok'}>false-done</span>
             </div>
             {result.fail_reason && <div className="agent-eval-fail">{result.fail_reason}</div>}
             {result.verifier_version && <div className="agent-eval-fail">{result.verifier_version} · {result.model_id} · {result.context_tokens} ctx · artifact {result.artifact_hash?.slice(0, 12) || 'missing'}<br />Desktop: {result.desktop_screenshot}<br />Mobile: {result.mobile_screenshot}</div>}
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function ContextQualityPanel({ report }: { report: ContextQualityReport | null }) {
+  if (!report) return <div className="benchmark-empty">No deterministic context-quality run yet.</div>
+  return (
+    <section className="agent-eval-panel context-quality-panel">
+      <div className="agent-eval-head">
+        <div><strong>Context Quality: {report.profile}</strong><span>{report.evaluation_envelope || 'Canonical defaults + selected profile/workspace context'}. Deterministic routing, compact tools, hostile-content guards, and repeat stability. Zero model calls.</span></div>
+        <div className={`agent-eval-score ${report.pass ? 'ok' : 'warn'}`}>{report.pass_power} / {report.pass_count}/{report.total}</div>
+      </div>
+      <div className="agent-eval-aggregate context-quality-summary">
+        <Metric label="Fixtures" value={`${report.pass_count}/${report.total}`} />
+        <Metric label="Attempts" value={`${report.attempt_pass_count}/${report.attempt_total}`} />
+        <Metric label="Hostile guard" value={report.hostile_pass ? 'pass' : 'fail'} />
+        <Metric label="Model calls" value="0" />
+      </div>
+      <div className="agent-eval-grid">
+        {report.results.map(result => (
+          <div className={`agent-eval-card ${result.pass ? 'ok' : 'warn'}`} key={result.id}>
+            <div className="agent-eval-title"><strong>{result.category}</strong><span>{result.pass_power}</span></div>
+            <div className="agent-eval-metrics">{result.variant_count} paraphrases / {result.passed_repeats}/{result.repeats} repeat rounds</div>
+            <div className="agent-eval-dimensions">
+              <span className={result.policy_pass ? 'ok' : 'warn'}>policy</span>
+              <span className={result.tool_pass ? 'ok' : 'warn'}>tools</span>
+              <span className={result.source_pass ? 'ok' : 'warn'}>sources</span>
+              <span className={result.budget_pass ? 'ok' : 'warn'}>budget</span>
+              <span className={result.hostile_pass ? 'ok' : 'warn'}>hostile</span>
+              <span className={result.determinism_pass ? 'ok' : 'warn'}>stable</span>
+            </div>
+            <div className="context-quality-variants">
+              {result.variants.map(variant => (
+                <div key={`${result.id}-${variant.prompt_index}`} className={variant.pass ? 'ok' : 'warn'}>
+                  <span>Prompt {variant.prompt_index}</span>
+                  <strong>{variant.policy} / {variant.agent_mode}</strong>
+                  <em>{variant.project_tokens} project tokens / {variant.tool_names.length} tools</em>
+                </div>
+              ))}
+            </div>
+            {result.failures?.slice(0, 4).map((failure, index) => <div className="agent-eval-fail" key={`${result.id}-failure-${index}`}>{failure}</div>)}
           </div>
         ))}
       </div>
@@ -775,7 +982,7 @@ function HistoryTable({
         <div className="history-actions"><button onClick={onClear} disabled={running || runs.length === 0}>Clear History</button></div>
       </div>
       <div className="benchmark-row benchmark-row-head">
-        <span>Run</span><span>Model</span><span>Context</span><span>Tier</span><span>Average</span><span>Score</span><span>Scenarios</span><span>Summary</span><span>Action</span>
+        <span>Run</span><span>Model</span><span>Context</span><span>Tier</span><span>Text speed</span><span>Score</span><span>Scenarios</span><span>Summary</span><span>Action</span>
       </div>
       {runs.length === 0 ? <div className="benchmark-empty">No benchmark history yet.</div> : runs.map(run => {
         const id = run.id || `${run.profile_name}-${run.created_at}`
@@ -787,9 +994,9 @@ function HistoryTable({
               <span title={run.model_id}>{run.model_id}</span>
               <span>{run.ctx_tokens?.toLocaleString() ?? 'n/a'}</span>
               <span>{run.context_tier || 'n/a'}</span>
-              <span>{run.tokens_per_second ? `${run.tokens_per_second.toFixed(1)} tok/s` : 'n/a'}</span>
+              <span title={timingSourceDescription(run.timing_source)}>{headlineSpeed(run)}</span>
               <span>{run.score ?? 0}</span>
-              <span className="scenario-list">{run.scenarios?.map(sc => <span className={`scenario-pill ${sc.status !== 'ok' ? 'scenario-warn' : ''}`} key={sc.name}>{sc.name}</span>)}</span>
+              <span className="scenario-list">{run.scenarios?.map((sc, index) => <span className={`scenario-pill ${sc.status !== 'ok' ? 'scenario-warn' : ''}`} key={`${sc.name}-${sc.iteration || index}`}>{sc.name}{sc.iteration && sc.iteration > 1 ? ` #${sc.iteration}` : ''}</span>)}</span>
               <span title={run.summary}>{run.summary}</span>
               <span className="benchmark-row-actions">
                 <button onClick={() => onExpand(expanded ? '' : id)}>{expanded ? 'Hide' : 'Details'}</button>
@@ -799,14 +1006,20 @@ function HistoryTable({
             {expanded && (
               <div className="benchmark-details">
                 <div className="benchmark-detail-grid">
-                  {run.scenarios?.map(sc => (
-                    <div className="benchmark-detail-card" key={sc.name}>
-                      <div className="benchmark-detail-title">{sc.name}</div>
+                  {run.warmup && (
+                    <div className={`benchmark-detail-card ${run.warmup.status !== 'ok' ? 'scenario-warn' : ''}`}>
+                      <div className="benchmark-detail-title">Warm-up · excluded</div>
+                      <div className="benchmark-detail-purpose">Loads templates, kernels, and prompt cache before measured text runs.</div>
+                      <div className="benchmark-detail-summary">{run.warmup.summary}</div>
+                      <div className="benchmark-detail-metrics">{scenarioTimingSummary(run.warmup)}</div>
+                    </div>
+                  )}
+                  {run.scenarios?.map((sc, index) => (
+                    <div className="benchmark-detail-card" key={`${sc.name}-${sc.iteration || index}`}>
+                      <div className="benchmark-detail-title">{sc.name}{sc.iteration ? ` · run ${sc.iteration}` : ''}</div>
                       <div className="benchmark-detail-purpose">{scenarioPurpose(sc.name)}</div>
                       <div className="benchmark-detail-summary">{sc.summary}</div>
-                      <div className="benchmark-detail-metrics">
-                        {sc.tokens_per_second ? `${sc.tokens_per_second.toFixed(1)} tok/s` : 'n/a'} / {sc.structured_tools ?? 0} structured / {sc.repaired_tools ?? 0} repaired
-                      </div>
+                      <div className="benchmark-detail-metrics">{scenarioTimingSummary(sc)} / {sc.structured_tools ?? 0} structured / {sc.repaired_tools ?? 0} repaired</div>
                       {sc.error && <pre>{sc.error}</pre>}
                     </div>
                   ))}
@@ -830,7 +1043,7 @@ function pickBest(runs: ProfileBenchmarkResult[]) {
 
 function describeRun(run?: ProfileBenchmarkResult) {
   if (!run) return 'n/a'
-  return `${Math.round((run.ctx_tokens ?? 0) / 1024)}k (${run.score ?? 0}/100, ${(run.tokens_per_second ?? 0).toFixed(1)} tok/s)`
+  return `${Math.round((run.ctx_tokens ?? 0) / 1024)}k (${run.score ?? 0}/100, ${headlineSpeed(run)})`
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -910,6 +1123,61 @@ function shortModelName(model: string) {
   return model.split(/[\\/]/).pop()?.replace(/\.(gguf|bin|safetensors)$/i, '') || model
 }
 
+function matrixChatProfileName(run: ProfileBenchmarkResult) {
+  const model = shortModelName(run.model_id || 'local-model')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 56)
+  const context = Math.max(1, Math.round((run.ctx_tokens || run.recommended_profile?.ctx_tokens || 0) / 1024))
+  return `lab-${model || 'local-model'}-${context}k`
+}
+
+function benchmarkTextSpeed(run: ProfileBenchmarkResult) {
+  return run.text_tokens_per_second || run.tokens_per_second || 0
+}
+
+function formatTPS(value?: number) {
+  return value && value > 0 ? `${value.toFixed(1)} tok/s` : 'n/a'
+}
+
+function headlineSpeed(run: ProfileBenchmarkResult) {
+  const value = benchmarkTextSpeed(run)
+  if (!value) return 'n/a'
+  return `${value.toFixed(1)} tok/s · ${timingSourceShort(run.timing_source)}`
+}
+
+function timingSourceShort(source?: string) {
+  switch ((source || '').toLowerCase()) {
+    case 'backend_decode': return 'decode'
+    case 'wall_clock_e2e': return 'E2E'
+    case 'estimated_wall_clock': return 'est. E2E'
+    case 'mixed': return 'mixed'
+    default: return 'unknown'
+  }
+}
+
+function timingSourceDescription(source?: string) {
+  switch ((source || '').toLowerCase()) {
+    case 'backend_decode':
+      return 'InferenceBridge/llama.cpp supplied authoritative decode timing. Prompt processing and model load are excluded.'
+    case 'wall_clock_e2e':
+      return 'The backend omitted decode timing. This is completion tokens divided by complete warm request wall time, including prompt processing.'
+    case 'estimated_wall_clock':
+      return 'The backend omitted token usage and decode timing. Tokens and warm end-to-end throughput are locally estimated.'
+    case 'mixed':
+      return 'Measured text runs used more than one timing source.'
+    default:
+      return 'Timing source was not recorded by this older benchmark run.'
+  }
+}
+
+function scenarioTimingSummary(sc: ProfileBenchmarkResult['scenarios'][number]) {
+  const decode = formatTPS(sc.decode_tokens_per_second)
+  const e2e = formatTPS(sc.end_to_end_tokens_per_second)
+  return `decode ${decode} / E2E ${e2e} / ${timingSourceShort(sc.timing_source)} / TTFT ${sc.ttf_ms ?? 0} ms`
+}
+
 function uniqueModels(models: string[]) {
   return models.map(model => model.trim()).filter(Boolean).filter((model, index, arr) => arr.indexOf(model) === index)
 }
@@ -933,8 +1201,8 @@ function profileChanges(current?: ProfilesFile['profiles'][string], recommended?
 }
 
 function buildMatrixSummary(rows: MatrixRow[]) {
-  const bestTextRow = [...rows].filter(row => row.run.tokens_per_second).sort((a, b) => (b.run.tokens_per_second ?? 0) - (a.run.tokens_per_second ?? 0))[0]
-  const bestLoopRow = [...rows].filter(row => row.loop?.pass).sort((a, b) => (b.run.tokens_per_second ?? 0) - (a.run.tokens_per_second ?? 0))[0]
+  const bestTextRow = [...rows].filter(row => benchmarkTextSpeed(row.run) > 0).sort((a, b) => benchmarkTextSpeed(b.run) - benchmarkTextSpeed(a.run))[0]
+  const bestLoopRow = [...rows].filter(row => row.loop?.pass).sort((a, b) => benchmarkTextSpeed(b.run) - benchmarkTextSpeed(a.run))[0]
   const toolOK = rows.filter(row => {
     const sc = row.run.scenarios?.find(item => item.name === 'Tool call')
     return (sc?.structured_tools ?? 0) > 0
@@ -942,7 +1210,7 @@ function buildMatrixSummary(rows: MatrixRow[]) {
   const failures = rows.filter(row => row.run.status !== 'ok' || Boolean(row.loop && !row.loop.pass)).length
   return {
     rows: rows.length,
-    bestText: bestTextRow ? `${shortModelName(bestTextRow.run.model_id || '')} ${bestTextRow.run.tokens_per_second?.toFixed(1)} tok/s` : 'n/a',
+    bestText: bestTextRow ? `${shortModelName(bestTextRow.run.model_id || '')} ${headlineSpeed(bestTextRow.run)}` : 'n/a',
     bestLoop: bestLoopRow ? `${shortModelName(bestLoopRow.run.model_id || '')} score ${bestLoopRow.loop?.stability_score ?? 0}` : 'n/a',
     toolOK: rows.length ? `${toolOK}/${rows.length}` : '0/0',
     failures,
@@ -972,7 +1240,7 @@ function loopReliabilityTitle(loop?: AgentEvalResult) {
 }
 
 function matrixRowsToCSV(rows: MatrixRow[]) {
-  const header = ['model', 'requested_ctx', 'actual_ctx', 'status', 'text_tps', 'tool_structured', 'tool_repaired', 'loop_pass', 'loop_tools', 'loop_success_rate', 'loop_repeat_rate', 'loop_stability_score', 'loop_max_routed_tools', 'loop_prompt_warnings', 'loop_false_done', 'loop_duration_ms', 'ttft_ms', 'total_ms', 'summary']
+  const header = ['model', 'requested_ctx', 'actual_ctx', 'status', 'text_tps', 'decode_tps', 'warm_e2e_tps', 'timing_source', 'measured_text_runs', 'load_ms', 'warmup_ttft_ms', 'text_ttft_ms', 'prompt_ms', 'decode_ms', 'tool_structured', 'tool_repaired', 'loop_pass', 'loop_tools', 'loop_success_rate', 'loop_repeat_rate', 'loop_stability_score', 'loop_max_routed_tools', 'loop_prompt_warnings', 'loop_false_done', 'loop_duration_ms', 'total_ms', 'summary']
   const lines = rows.map(row => {
     const toolCase = row.run.scenarios?.find(sc => sc.name === 'Tool call')
     return [
@@ -980,7 +1248,16 @@ function matrixRowsToCSV(rows: MatrixRow[]) {
       row.run.ctx_tokens ?? '',
       row.run.actual_ctx_tokens ?? '',
       row.run.status,
-      row.run.tokens_per_second ?? '',
+      benchmarkTextSpeed(row.run) || '',
+      row.run.decode_tokens_per_second ?? '',
+      row.run.end_to_end_tokens_per_second ?? '',
+      row.run.timing_source ?? '',
+      row.run.measured_text_runs ?? '',
+      row.run.load_ms ?? '',
+      row.run.warmup?.ttf_ms ?? '',
+      row.run.text_ttf_ms ?? row.run.ttf_ms ?? '',
+      row.run.prompt_ms ?? '',
+      row.run.decode_ms ?? '',
       toolCase?.structured_tools ?? '',
       toolCase?.repaired_tools ?? '',
       row.loop ? String(row.loop.pass) : '',
@@ -992,7 +1269,6 @@ function matrixRowsToCSV(rows: MatrixRow[]) {
       row.loop?.prompt_warnings ?? '',
       row.loop ? String(Boolean(row.loop.false_done)) : '',
       row.loop?.duration_ms ?? '',
-      row.run.ttf_ms ?? '',
       row.run.total_ms ?? '',
       row.run.summary || row.loop?.fail_reason || '',
     ].map(csvCell).join(',')

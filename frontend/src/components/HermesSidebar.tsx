@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import './HermesSidebar.css'
 
-type CenterTab = 'chat' | 'ops' | 'projects' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks' | 'doctor'
+type CenterTab = 'chat' | 'ops' | 'projects' | 'engagement' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'context' | 'telegram' | 'benchmarks' | 'doctor'
 
 interface Props {
   sessions: string[]
@@ -21,6 +21,7 @@ const navItems: Array<{ id: CenterTab; label: string; icon: string }> = [
   { id: 'projects', label: 'Home', icon: 'Home' },
   { id: 'chat', label: 'Chat', icon: 'Chat' },
   { id: 'ops', label: 'Run', icon: 'Run' },
+  { id: 'engagement', label: 'Grid', icon: 'Grid' },
   { id: 'benchmarks', label: 'Benchmarks', icon: 'Bench' },
 ]
 
@@ -29,6 +30,7 @@ const secondaryNavItems: Array<{ id: CenterTab; label: string }> = [
   { id: 'logs', label: 'Logs' },
   { id: 'memory', label: 'Memory' },
   { id: 'brain', label: 'Brain' },
+  { id: 'context', label: 'Context' },
   { id: 'telegram', label: 'Telegram' },
   { id: 'doctor', label: 'Doctor' },
 ]

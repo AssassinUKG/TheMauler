@@ -32,3 +32,10 @@ func TestWhisperWorkerScriptLoadsOnceAndRejectsSilence(t *testing.T) {
 		t.Fatal("Whisper model should be loaded exactly once outside the request loop")
 	}
 }
+
+func TestLastNonEmptyLineReturnsUsefulDependencyError(t *testing.T) {
+	got := lastNonEmptyLine("Traceback\r\n  internal frame\r\nImportError: Numba needs NumPy 2.3 or less\r\n")
+	if got != "ImportError: Numba needs NumPy 2.3 or less" {
+		t.Fatalf("lastNonEmptyLine = %q", got)
+	}
+}

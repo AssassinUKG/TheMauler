@@ -60,6 +60,9 @@ func (t *httpProbeTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 	if base == "" {
 		return "", fmt.Errorf("http_probe: url is required")
 	}
+	if err := t.app.enforceEngagementScope(ctx, t.Name(), base); err != nil {
+		return "", err
+	}
 	if _, err := url.ParseRequestURI(base); err != nil {
 		return "", fmt.Errorf("http_probe: invalid url: %w", err)
 	}

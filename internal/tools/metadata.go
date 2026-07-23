@@ -50,6 +50,7 @@ var defaultToolMetadata = map[string]ToolMetadata{
 	"sqlite":             {AccessClass: "read", LatencyClass: "short", OutputClass: "large", PreferredNext: []string{"read_tool_result"}, UnrestrictedReady: true},
 	"skill":              {AccessClass: "memory", LatencyClass: "instant", OutputClass: "large", PreferredNext: []string{"read_tool_result"}, UnrestrictedReady: true},
 	"todo_write":         {AccessClass: "memory", LatencyClass: "instant", OutputClass: "normal", UnrestrictedReady: true},
+	"engagement":         {AccessClass: "memory", LatencyClass: "instant", OutputClass: "normal", SideEffects: []string{"engagement_state"}, PreferredNext: []string{"shell", "http_probe", "evidence_bundle"}, UnrestrictedReady: true},
 	"task":               {AccessClass: "write", LatencyClass: "long", OutputClass: "normal", RequiresNetwork: true, Resumable: true, PreferredNext: []string{"read", "file_changes"}, UnrestrictedReady: true},
 	"read_file":          {AccessClass: "read", LatencyClass: "instant", OutputClass: "normal", PreferredNext: []string{"grep", "file_outline", "read_chunks"}, UnrestrictedReady: true},
 	"read_many":          {AccessClass: "read", LatencyClass: "short", OutputClass: "large", PreferredNext: []string{"grep", "file_outline"}, UnrestrictedReady: true},

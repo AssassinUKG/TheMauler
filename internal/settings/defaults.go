@@ -39,6 +39,7 @@ func DefaultSettings() Settings {
 				"session_search":       true,
 				"sqlite":               true,
 				"todo_write":           true,
+				"engagement":           true,
 				"web_search":           true,
 				"fetch_url":            true,
 				"browser":              true,
@@ -193,25 +194,27 @@ func DefaultSettings() Settings {
 
 func DefaultToolsets() map[string][]string {
 	coreRead := []string{"read", "glob", "grep", "sqlite", "session_search", "skill", "memory", "progress", "read_tool_result", "todo_write"}
-	localCode := append(append([]string{}, coreRead...), "write", "edit", "shell", "run_script", "terminal_send", "terminal_read", "start_listener", "http_probe", "evidence_bundle", "file_changes", "set_reasoning_effort", "task")
-	runLean := []string{"read", "write", "edit", "glob", "grep", "shell", "terminal_send", "terminal_read", "run_script", "http_probe", "start_listener", "evidence_bundle", "memory", "progress", "read_tool_result", "todo_write", "skill", "set_reasoning_effort", "task"}
+	localCode := append(append([]string{}, coreRead...), "write", "edit", "shell", "run_script", "terminal_send", "terminal_read", "start_listener", "http_probe", "evidence_bundle", "file_changes", "set_reasoning_effort", "task", "engagement")
+	runLean := []string{"read", "write", "edit", "glob", "grep", "shell", "terminal_send", "terminal_read", "run_script", "http_probe", "start_listener", "evidence_bundle", "memory", "progress", "read_tool_result", "todo_write", "skill", "set_reasoning_effort", "task", "engagement"}
 	opsLean := append(append([]string{}, runLean...), "session_search")
 	explore := []string{"read", "glob", "grep"}
 	webResearch := []string{"read", "glob", "grep", "web_search", "fetch_url", "browser", "memory", "progress", "read_tool_result", "todo_write", "task"}
+	bugBountyReview := []string{"read", "glob", "grep", "session_search", "memory", "progress", "read_tool_result", "todo_write", "engagement", "evidence_bundle", "http_probe", "web_search", "fetch_url", "browser", "task"}
 	browser := append(append([]string{}, coreRead...), "browser", "web_search", "fetch_url")
 	unrestricted := append(append([]string{}, localCode...), "web_search", "fetch_url", "browser")
 	return map[string][]string{
-		"safe":         append([]string{}, coreRead...),
-		"run-lean":     runLean,
-		"ops-lean":     opsLean,
-		"local-code":   localCode,
-		"explore":      explore,
-		"web-research": webResearch,
-		"browser":      browser,
-		"memory":       {"memory", "file_changes", "progress", "session_search", "read_tool_result", "sqlite", "todo_write", "skill"},
-		"offline":      localCode,
-		"balanced":     runLean,
-		"unrestricted": unrestricted,
+		"safe":              append([]string{}, coreRead...),
+		"run-lean":          runLean,
+		"ops-lean":          opsLean,
+		"local-code":        localCode,
+		"explore":           explore,
+		"web-research":      webResearch,
+		"bug-bounty-review": bugBountyReview,
+		"browser":           browser,
+		"memory":            {"memory", "file_changes", "progress", "session_search", "read_tool_result", "sqlite", "todo_write", "skill"},
+		"offline":           localCode,
+		"balanced":          runLean,
+		"unrestricted":      unrestricted,
 	}
 }
 
@@ -225,7 +228,7 @@ func defaultAgentPresets() map[string]AgentModePreset {
 			Instructions:  "Operate against authorised lab/client targets from WSL/Kali first. Use WSL shell for target interaction, target DNS, VPN-routed traffic, scans, curl/ffuf/gobuster, exploit checks, and evidence capture. Public web research is allowed for CVEs, docs, tool syntax, and exploit background, but verify everything against live target evidence before acting. Keep notes and report evidence current. Do not perform remediation or fix client systems unless the user explicitly changes the task.",
 			ToolPermissions: map[string]bool{
 				"read": true, "write": true, "edit": true, "shell": true, "run_script": true, "terminal_send": true, "terminal_read": true, "glob": true, "grep": true, "http_probe": true, "evidence_bundle": true,
-				"skill": true, "file_changes": true, "progress": true, "todo_write": true, "web_search": true, "fetch_url": true, "browser": true, "task": true,
+				"skill": true, "file_changes": true, "progress": true, "todo_write": true, "engagement": true, "web_search": true, "fetch_url": true, "browser": true, "task": true,
 			},
 		},
 		"Builder": {
@@ -283,6 +286,21 @@ func defaultAgentPresets() map[string]AgentModePreset {
 				"write": false, "edit": false, "shell": false,
 			},
 		},
+		"Bug Bounty Hunter": {
+			Enabled:       true,
+			Autonomy:      "ask",
+			Toolset:       "bug-bounty-review",
+			ContextBudget: 32768,
+			Instructions:  "Treat Critical, High, Medium, and Low strictly as manual testing priority, not vulnerability severity. Prefer a concise, deduplicated, evidence-linked assessment over a scanner-style list.",
+			ToolPermissions: map[string]bool{
+				"read": true, "glob": true, "grep": true, "session_search": true, "memory": true,
+				"progress": true, "read_tool_result": true, "todo_write": true, "engagement": true,
+				"evidence_bundle": true, "http_probe": true, "web_search": true, "fetch_url": true,
+				"browser": true, "task": true,
+				"write": false, "edit": false, "shell": false, "run_script": false,
+				"terminal_send": false, "terminal_read": false, "start_listener": false,
+			},
+		},
 		"Auto": {
 			Enabled:       true,
 			Autonomy:      "balanced",
@@ -302,6 +320,7 @@ func DefaultProfiles() ProfilesFile {
 		TopK:            20,
 		MinP:            0.0,
 		PresencePenalty: 0.0,
+		RepeatPenalty:   1.05,
 		MaxTokens:       16384,
 		Seed:            -1,
 	}
@@ -311,6 +330,7 @@ func DefaultProfiles() ProfilesFile {
 		TopK:            20,
 		MinP:            0.0,
 		PresencePenalty: 0.0,
+		RepeatPenalty:   1.05,
 		MaxTokens:       8192,
 		Seed:            -1,
 	}
@@ -320,6 +340,7 @@ func DefaultProfiles() ProfilesFile {
 		TopK:            20,
 		MinP:            0.0,
 		PresencePenalty: 0.0,
+		RepeatPenalty:   1.05,
 		MaxTokens:       8192,
 		Seed:            -1,
 	}
@@ -329,15 +350,17 @@ func DefaultProfiles() ProfilesFile {
 		TopK:            64,
 		MinP:            0.05,
 		PresencePenalty: 0.0,
+		RepeatPenalty:   1.0,
 		MaxTokens:       8192,
 		Seed:            -1,
 	}
 
-	// Base Qwen3.6-27B config — UD-Q4_K_XL on 3090 at 32K ctx
+	// Base Qwen3.6-27B config — tournament-winning UD-Q4_K_XL on the
+	// user's RTX 3090 at the verified 35K working context.
 	qwenBase := Profile{
-		Provider:      "llamacpp-local",
-		ModelID:       "qwen/qwen3.6-27b",
-		CtxTokens:     32000,
+		Provider:      "inference-bridge",
+		ModelID:       "Qwen3.6-27B-UD-Q4_K_XL.gguf",
+		CtxTokens:     35000,
 		Thinking:      true,
 		PreserveThink: true,
 		ThinkGeneral:  thinkGeneral,
@@ -360,6 +383,17 @@ func DefaultProfiles() ProfilesFile {
 
 	return ProfilesFile{
 		Providers: map[string]Provider{
+			"inference-bridge": {
+				Name:    "inference-bridge",
+				Backend: "llamacpp",
+				BaseURL: "http://127.0.0.1:8800/v1",
+			},
+			"openrouter": {
+				Name:      "openrouter",
+				Backend:   "openai-compatible",
+				BaseURL:   "https://openrouter.ai/api/v1",
+				APIKeyEnv: "OPENROUTER_API_KEY",
+			},
 			"llamacpp-local": {
 				Name:    "llamacpp-local",
 				Backend: "llamacpp",

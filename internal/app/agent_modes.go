@@ -63,6 +63,12 @@ func baseMode(name string) AgentMode {
 		return AgentMode{Name: "Researcher", Description: "Search, fetch, compare sources, and synthesize."}
 	case "planner":
 		return AgentMode{Name: "Planner", Description: "Plan architecture and next steps."}
+	case "bug bounty hunter", "bug-bounty-hunter", "bounty hunter", "bug bounty":
+		return AgentMode{
+			Name:         "Bug Bounty Hunter",
+			Description:  "Post-recon manual testing planner.",
+			Instructions: bugBountyHunterPrompt,
+		}
 	default:
 		return AgentMode{Name: "Auto", Description: "General coding agent."}
 	}
@@ -74,7 +80,11 @@ func applyPresetToMode(mode AgentMode, presets map[string]settings.AgentModePres
 		return mode
 	}
 	if strings.TrimSpace(preset.Instructions) != "" {
-		mode.Instructions = strings.TrimSpace(preset.Instructions)
+		if mode.Name == "Bug Bounty Hunter" && strings.TrimSpace(mode.Instructions) != "" {
+			mode.Instructions = strings.TrimSpace(mode.Instructions) + "\n\nWorkspace/operator addendum:\n" + strings.TrimSpace(preset.Instructions)
+		} else {
+			mode.Instructions = strings.TrimSpace(preset.Instructions)
+		}
 	}
 	if preset.ContextBudget > 0 {
 		mode.ContextBudget = preset.ContextBudget

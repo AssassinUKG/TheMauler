@@ -16,13 +16,155 @@ type projectInstructionDoc struct {
 	Partial bool
 }
 
+type projectInstructionPacket struct {
+	Policy            string                         `json:"policy"`
+	RequestedClass    string                         `json:"requested_class"`
+	EffectiveClass    string                         `json:"effective_class"`
+	Prompt            string                         `json:"-"`
+	Sources           []string                       `json:"sources,omitempty"`
+	SourceBytes       int                            `json:"source_bytes"`
+	PromptBytes       int                            `json:"prompt_bytes"`
+	EstimatedTokens   int                            `json:"estimated_tokens"`
+	PacketLimitBytes  int                            `json:"packet_limit_bytes"`
+	PacketLimitTokens int                            `json:"packet_limit_tokens"`
+	ManifestStatus    string                         `json:"manifest_status,omitempty"`
+	ManifestPath      string                         `json:"manifest_path,omitempty"`
+	ManifestSHA256    string                         `json:"manifest_sha256,omitempty"`
+	RouteID           string                         `json:"route_id,omitempty"`
+	FallbackReason    string                         `json:"fallback_reason,omitempty"`
+	Provenance        []projectInstructionProvenance `json:"provenance,omitempty"`
+}
+
+// Project files may be arbitrarily large and remain fully available through
+// read. Only a bounded compiled packet belongs in every model request.
+const projectInstructionPromptMaxBytes = 16 * 1024
+
 func buildProjectInstructionsPrompt(cfg settings.ContextConfig) string {
-	docs := discoverProjectInstructionDocs(cfg)
+	return buildProjectInstructionPacket(cfg, "").Prompt
+}
+
+func buildProjectInstructionsPromptForTask(cfg settings.ContextConfig, taskText string) string {
+	return buildProjectInstructionPacket(cfg, taskText).Prompt
+}
+
+func buildProjectInstructionPacket(cfg settings.ContextConfig, taskText string) projectInstructionPacket {
+	return buildProjectInstructionPacketForClass(cfg, taskText, "auto")
+}
+
+func buildProjectInstructionPacketForClass(cfg settings.ContextConfig, taskText, requestedClass string) projectInstructionPacket {
+	requestedClass = normalizeContextPacketClass(requestedClass)
+	policy := projectInstructionPolicyForTask(taskText)
+	if requestedClass == "relevant" || requestedClass == "expanded" || requestedClass == "core" {
+		policy = "relevant_workspace"
+	}
+	var packet projectInstructionPacket
+	if strings.TrimSpace(cfg.MAULERMDPath) == "" {
+		if wd, err := os.Getwd(); err == nil {
+			root := findProjectInstructionRoot(wd)
+			selection := selectProjectContextManifest(root, policy, taskText)
+			switch requestedClass {
+			case "core":
+				selection = selectProjectContextManifestPacket(root, "relevant_workspace", policy, taskText, false)
+				selection = contextManifestCoreSelection(selection, "explicit-core")
+			case "expanded":
+				selection = selectProjectContextManifestPacket(root, "expanded_workspace", policy, taskText, false)
+			case "relevant":
+				selection = selectProjectContextManifestPacket(root, "relevant_workspace", policy, taskText, true)
+			}
+			switch selection.Status {
+			case contextManifestStatusActive:
+				builtPacket, buildErr := buildManifestProjectInstructionPacket(cfg, taskText, selection)
+				if buildErr == nil {
+					return finalizeProjectInstructionPacketClass(builtPacket, requestedClass)
+				}
+				selection.Status = contextManifestStatusInvalid
+				selection.FallbackReason = "selected manifest document became unreadable: " + buildErr.Error()
+				if fallback, ok := buildManifestFallbackCorePacket(cfg, taskText, selection); ok {
+					return finalizeProjectInstructionPacketClass(fallback, requestedClass)
+				}
+			case contextManifestStatusInvalid:
+				if fallback, ok := buildManifestFallbackCorePacket(cfg, taskText, selection); ok {
+					return finalizeProjectInstructionPacketClass(fallback, requestedClass)
+				}
+			case contextManifestStatusMissing:
+				if requestedClass == "core" {
+					selection = contextManifestCoreSelection(selection, "explicit-core")
+					if core, buildErr := buildManifestProjectInstructionPacket(cfg, taskText, selection); buildErr == nil {
+						return finalizeProjectInstructionPacketClass(core, requestedClass)
+					}
+				}
+			}
+		}
+	}
+	packet = buildLegacyProjectInstructionPacket(cfg, taskText, policy)
+	return finalizeProjectInstructionPacketClass(packet, requestedClass)
+}
+
+func normalizeContextPacketClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "core", "relevant", "expanded":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "auto"
+	}
+}
+
+func finalizeProjectInstructionPacketClass(packet projectInstructionPacket, requestedClass string) projectInstructionPacket {
+	packet.RequestedClass = normalizeContextPacketClass(requestedClass)
+	switch {
+	case packet.RouteID == "fallback-compact-core" || packet.RouteID == "explicit-core":
+		packet.EffectiveClass = "core"
+	case packet.RequestedClass == "expanded" && packet.ManifestStatus == contextManifestStatusActive:
+		packet.EffectiveClass = "expanded"
+	case packet.Policy == "minimal_external_research":
+		packet.EffectiveClass = "minimal"
+	default:
+		packet.EffectiveClass = "relevant"
+	}
+	return packet
+}
+
+func buildLegacyProjectInstructionPacket(cfg settings.ContextConfig, taskText, policy string) projectInstructionPacket {
+	sourceDocs := discoverProjectInstructionDocs(cfg)
+	packet := projectInstructionPacket{Policy: policy, ManifestStatus: contextManifestStatusMissing}
+	packet.PacketLimitBytes = projectInstructionPromptMaxBytes
+	packet.PacketLimitTokens = projectInstructionPromptMaxBytes / 4
+	if strings.TrimSpace(cfg.MAULERMDPath) != "" {
+		packet.ManifestStatus = contextManifestStatusBypassed
+		packet.FallbackReason = "explicit project instruction source configured"
+	} else {
+		packet.FallbackReason = "no active context manifest; used bounded project instruction discovery"
+	}
+	for _, doc := range sourceDocs {
+		packet.SourceBytes += len(doc.Content)
+		packet.Sources = append(packet.Sources, filepath.ToSlash(doc.Path))
+	}
+	if len(sourceDocs) == 0 {
+		return packet
+	}
+	if packet.Policy == "minimal_external_research" {
+		packet.PacketLimitBytes = 500 * 4
+		packet.PacketLimitTokens = 500
+		var sb strings.Builder
+		sb.WriteString("\n\nProject context policy: minimal external research.\n")
+		sb.WriteString("This task requests current public information without project inspection or mutation, so repository handoff contents were not copied into the prompt. Code-owned safety, scope, tool, and evidence rules still apply.\n")
+		sb.WriteString("Project instruction sources remain available for targeted reading if the user connects the research to workspace work:\n")
+		for _, source := range packet.Sources {
+			sb.WriteString("- " + source + "\n")
+		}
+		packet.Prompt = sb.String()
+		packet.PromptBytes = len(packet.Prompt)
+		packet.EstimatedTokens = estimateContextTokens(packet.PromptBytes)
+		return packet
+	}
+
+	docs := compileProjectInstructionDocs(sourceDocs, projectInstructionPromptMaxBytes)
 	if len(docs) == 0 {
-		return ""
+		return packet
 	}
 	var sb strings.Builder
 	sb.WriteString("\n\nProject instructions (layered, later files override earlier files):\n")
+	sb.WriteString("Large instruction files are represented by bounded excerpts and a heading index. Use read with a targeted line range only when omitted detail is relevant; do not reread an entire large instruction file.\n")
 	if strings.TrimSpace(cfg.MAULERMDPath) != "" {
 		sb.WriteString("The configured project instruction source is already loaded below. Do not search the active workspace for master_skill.md, master_skills.md, MAULER.md, or AGENTS.md unless the user explicitly asks for another instruction file.\n")
 		sb.WriteString("If this is a Navigator/framework source, read at most 1-3 targeted follow-up files or line ranges needed for routing, then move to the user's operational task. Do not reread the same framework file or crawl methodology docs after the next action is clear.\n")
@@ -36,7 +178,127 @@ func buildProjectInstructionsPrompt(cfg settings.ContextConfig) string {
 		sb.WriteString(strings.TrimSpace(doc.Content))
 		sb.WriteString("\n")
 	}
-	return sb.String()
+	packet.Prompt = sb.String()
+	packet.PromptBytes = len(packet.Prompt)
+	packet.EstimatedTokens = estimateContextTokens(packet.PromptBytes)
+	return packet
+}
+
+func projectInstructionPolicyForTask(taskText string) string {
+	lower := strings.ToLower(strings.TrimSpace(taskText))
+	if lower == "" {
+		return "relevant_workspace"
+	}
+	externalResearch := looksPublicExploitLookup(lower) || explicitWebResearchIntent(lower) || looksResearchTask(lower)
+	if externalResearch && !taskNeedsWorkspaceInstructions(lower) {
+		return "minimal_external_research"
+	}
+	return "relevant_workspace"
+}
+
+func taskNeedsWorkspaceInstructions(lower string) bool {
+	return hasAny(lower,
+		"this repo", "the repo", "repository", "codebase", "code base", "workspace",
+		"this project", "project files", "local file", "local files", "folder", "directory",
+		"readme", "documentation file", "writeup", "notes file", "report file",
+		"implement", "fix", "patch", "refactor", "edit", "update", "write", "create",
+		"save", "download", "clone", "run this", "test this", "build", "compile",
+		"frontend", "backend", "component", "mauler", "helixclaw",
+		"bug bounty", "bug-bounty", "post-recon", "post recon", "manual assessment",
+		"burp request", "burp response", "web application pentest", "web app pentest",
+	)
+}
+
+func compileProjectInstructionDocs(docs []projectInstructionDoc, maxBytes int) []projectInstructionDoc {
+	if len(docs) == 0 || maxBytes <= 0 {
+		return nil
+	}
+	remaining := maxBytes
+	out := make([]projectInstructionDoc, 0, len(docs))
+	for i, doc := range docs {
+		if remaining <= 0 {
+			break
+		}
+		share := remaining / (len(docs) - i)
+		if share <= 0 {
+			break
+		}
+		compiled := doc
+		if len(compiled.Content) > share {
+			compiled.Content = compileInstructionExcerpt(compiled.Content, share)
+			compiled.Partial = true
+		}
+		if len(compiled.Content) > remaining {
+			compiled.Content = compileInstructionExcerpt(compiled.Content, remaining)
+			compiled.Partial = true
+		}
+		if strings.TrimSpace(compiled.Content) == "" {
+			continue
+		}
+		out = append(out, compiled)
+		remaining -= len(compiled.Content)
+	}
+	return out
+}
+
+func compileInstructionExcerpt(content string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(content) <= maxBytes {
+		return content
+	}
+	if maxBytes < 512 {
+		return content[:maxBytes]
+	}
+
+	marker := "\n\n[... middle omitted from the always-on prompt; use targeted read if needed ...]\n\n"
+	outlineBudget := maxBytes / 4
+	outline := instructionHeadingOutline(content, outlineBudget)
+	if outline != "" {
+		outline = "Heading index:\n" + outline + "\n\n"
+	}
+	tailBudget := maxBytes / 5
+	headBudget := maxBytes - len(marker) - len(outline) - tailBudget
+	if headBudget < maxBytes/3 {
+		headBudget = maxBytes / 2
+		tailBudget = maxBytes - len(marker) - headBudget
+		outline = ""
+	}
+	if tailBudget < 0 {
+		tailBudget = 0
+	}
+	if headBudget < 0 {
+		headBudget = 0
+	}
+
+	excerpt := content[:headBudget] + marker + outline
+	if tailBudget > 0 {
+		excerpt += content[len(content)-tailBudget:]
+	}
+	if len(excerpt) > maxBytes {
+		excerpt = excerpt[:maxBytes]
+	}
+	return excerpt
+}
+
+func instructionHeadingOutline(content string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	var sb strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "#") {
+			continue
+		}
+		candidate := line + "\n"
+		if sb.Len()+len(candidate) > maxBytes {
+			break
+		}
+		sb.WriteString(candidate)
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func discoverProjectInstructionDocs(cfg settings.ContextConfig) []projectInstructionDoc {

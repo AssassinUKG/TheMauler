@@ -579,6 +579,32 @@
   margin-bottom: 14px;
 }
 
+.provider-secret-editor {
+  display: grid;
+  gap: 8px;
+  width: min(100%, 620px);
+}
+
+.provider-secret-input,
+.provider-secret-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.provider-secret-input input {
+  flex: 1 1 320px;
+}
+
+.provider-secret-editor small {
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.provider-secret-ready { color: var(--green); font-size: 12px; }
+.provider-secret-missing { color: var(--text-dim); font-size: 12px; }
+
 .tool-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

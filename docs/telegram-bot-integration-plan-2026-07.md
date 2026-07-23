@@ -300,24 +300,25 @@ Do not narrate raw tool spam. Voice replies should be concise final/progress sum
 
 ## Progress UX
 
-Telegram should not dump every tool result. It should send:
+Telegram does not dump every tool result. The native runtime now sends:
 
-- Immediate acknowledgement: "Started: <mode/project/profile>".
+- Immediate acknowledgement with task, local model profile, and access preset.
 - Edited progress message every `progress_interval_s`:
-  - state
-  - current phase
-  - active tool/session
-  - latest blocker
-  - tool count
-  - current plan item
+  - clear working/finished/failed/blocked/stopped heading
+  - original task
+  - human-readable stage
+  - current tool/action without raw model counters
+  - elapsed time
 - Final message:
-  - done/stopped/failed
-  - verified evidence
-  - files/artifacts changed
-  - next action
+  - the exact final assistant answer shown in the Mauler UI
+  - a guarded/redacted result from the latest result-bearing tool when the model only says a generic
+    "completed successfully"
+  - failure/block/stop reason and total duration
 
 Use `editMessageText` for progress updates to avoid chat spam, with a fallback to new messages if
-edit fails.
+edit fails. Final-answer delivery is independent of the periodic-progress toggle: disabling progress
+still sends the result. Immediate and queued `/cmd` runs register their Telegram destination before
+the agent starts, preventing fast completions from being lost between queue dispatch and tracking.
 
 ---
 
@@ -371,6 +372,9 @@ Session memory:
 - **Done:** project switching applies the saved lab context and workspace, then resets chat/plan.
 - **Done:** RunLedger events exist for Telegram/channel messages and progress updates edit one
   persistent Telegram message, with a normal-send fallback when editing fails.
+- **Done:** `/cmd` completion forwards the real Mauler UI answer to Telegram. Generic completion
+  prose falls back to the latest guarded result-bearing tool output, queued runs are tracked before
+  start, and the final answer is still delivered when periodic progress updates are disabled.
 - Tests for session keys and command parser.
 
 ### T3 - Terminal Control [implemented; live smoke pending]

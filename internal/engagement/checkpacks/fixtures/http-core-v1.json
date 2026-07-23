@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "http-core-v1",
+  "version": "1.0.0",
+  "fixtures": [
+    {
+      "id": "security-headers-missing",
+      "check_id": "quick_security_headers",
+      "case": "positive",
+      "adapter": "http_security_headers_v1",
+      "expected_status": "vulnerable",
+      "expected_signals": ["missing:strict-transport-security", "missing:content-security-policy", "weak:x-content-type-options"],
+      "request_url": "https://fixture.invalid/login",
+      "response": {"status_code": 200, "headers": {"Content-Type": ["text/html; charset=utf-8"]}}
+    },
+    {
+      "id": "security-headers-present",
+      "check_id": "quick_security_headers",
+      "case": "negative",
+      "adapter": "http_security_headers_v1",
+      "expected_status": "passed",
+      "expected_signals": ["required-security-headers-present"],
+      "request_url": "https://fixture.invalid/login",
+      "response": {"status_code": 200, "headers": {
+        "Strict-Transport-Security": ["max-age=31536000; includeSubDomains"],
+        "Content-Security-Policy": ["default-src 'self'; frame-ancestors 'none'"],
+        "X-Content-Type-Options": ["nosniff"],
+        "Referrer-Policy": ["strict-origin-when-cross-origin"]
+      }}
+    },
+    {
+      "id": "cookie-flags-missing",
+      "check_id": "quick_cookie_flags",
+      "case": "positive",
+      "adapter": "http_cookie_flags_v1",
+      "expected_status": "vulnerable",
+      "expected_signals": ["cookie:sessionid:missing-secure", "cookie:sessionid:missing-httponly", "cookie:sessionid:missing-samesite"],
+      "request_url": "https://fixture.invalid/login",
+      "response": {"status_code": 200, "headers": {"Set-Cookie": ["sessionid=abc123; Path=/"]}}
+    },
+    {
+      "id": "cookie-flags-present",
+      "check_id": "quick_cookie_flags",
+      "case": "negative",
+      "adapter": "http_cookie_flags_v1",
+      "expected_status": "passed",
+      "expected_signals": ["observed-cookie-flags-present"],
+      "request_url": "https://fixture.invalid/login",
+      "response": {"status_code": 200, "headers": {"Set-Cookie": ["sessionid=abc123; Path=/; Secure; HttpOnly; SameSite=Lax"]}}
+    }
+  ]
+}

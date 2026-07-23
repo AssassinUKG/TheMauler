@@ -75,11 +75,21 @@ func WhisperStatus() STTStatus {
 }
 
 func ResolveWhisperPython() string {
+	python, _ := ProbeWhisperPython()
+	return python
+}
+
+// ProbeWhisperPython verifies the full Whisper import rather than merely finding
+// a Python executable. Keeping the import error is important: dependency
+// conflicts otherwise look like a missing worker in the UI.
+func ProbeWhisperPython() (string, error) {
 	if override := strings.TrimSpace(os.Getenv("MAULER_STT_PYTHON")); override != "" {
 		if path, err := exec.LookPath(override); err == nil {
-			return path
+			return probeWhisperCandidate(path)
 		}
 	}
+	seen := make(map[string]struct{})
+	failures := make([]string, 0, 3)
 	for _, candidate := range []string{os.Getenv("MAULER_KOKORO_PYTHON"), "python", "py", "python3"} {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
@@ -89,13 +99,50 @@ func ResolveWhisperPython() string {
 		if err != nil {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmd := exec.CommandContext(ctx, path, "-c", "import whisper")
-		hideChildProcessWindow(cmd)
-		err = cmd.Run()
-		cancel()
-		if err == nil {
-			return path
+		key := strings.ToLower(path)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, probeErr := probeWhisperCandidate(path); probeErr == nil {
+			return path, nil
+		} else {
+			failures = append(failures, probeErr.Error())
+		}
+	}
+	if len(failures) == 0 {
+		return "", fmt.Errorf("Whisper dependency check failed: no Python executable was found")
+	}
+	return "", fmt.Errorf("Whisper dependency check failed: %s", strings.Join(failures, "; "))
+}
+
+func probeWhisperCandidate(path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "-c", "import whisper")
+	hideChildProcessWindow(cmd)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return path, nil
+	}
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("%s: import timed out", filepath.Base(path))
+	}
+	detail := lastNonEmptyLine(string(output))
+	if detail == "" {
+		detail = err.Error()
+	}
+	if len(detail) > 360 {
+		detail = detail[:357] + "..."
+	}
+	return "", fmt.Errorf("%s: %s", filepath.Base(path), detail)
+}
+
+func lastNonEmptyLine(value string) string {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
 		}
 	}
 	return ""
@@ -178,7 +225,11 @@ func (w *whisperWorker) transcribe(ctx context.Context, python, path string) (st
 		if !res.resp.OK {
 			err := fmt.Errorf("whisper worker failed: %s", res.resp.Error)
 			setSTTState("ready", func(s *STTStatus) {
-				s.LastError = err.Error()
+				if res.resp.Code == "too_short" || res.resp.Code == "silence" {
+					s.LastError = ""
+				} else {
+					s.LastError = err.Error()
+				}
 				s.LastDurationMS = elapsed
 				s.LastAudioMS = res.resp.AudioMS
 			})
@@ -197,10 +248,11 @@ func (w *whisperWorker) transcribe(ctx context.Context, python, path string) (st
 func (w *whisperWorker) ensureStarted(python string) error {
 	python = strings.TrimSpace(python)
 	if python == "" {
-		python = ResolveWhisperPython()
-	}
-	if python == "" {
-		return fmt.Errorf("Python with openai-whisper is not available")
+		var err error
+		python, err = ProbeWhisperPython()
+		if err != nil {
+			return err
+		}
 	}
 	if w.cmd != nil && w.cmd.Process != nil && w.python == python {
 		return nil

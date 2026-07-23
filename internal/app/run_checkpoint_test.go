@@ -3,8 +3,10 @@ package app
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"mauler/internal/agent"
+	"mauler/internal/controlplane"
 	"mauler/internal/llm"
 	"mauler/internal/settings"
 	"mauler/internal/store"
@@ -26,6 +28,18 @@ func TestRunCheckpointRoundTrip(t *testing.T) {
 	app.history.Append(llm.NewTextMessage(llm.RoleUser, "hello checkpoint"))
 	run := startTaskRun("hello checkpoint", "Builder", "mock", "mock-model")
 	run.Tools = []TaskToolEvent{{Name: "read", Status: "done"}}
+	contract, err := controlplane.NewTaskContract(controlplane.ContractInput{
+		RunID: run.ID, Objective: run.Prompt, WorkspaceRoot: t.TempDir(),
+		CreatedAt: time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := controlplane.NewMachineState(contract, time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Contract, run.Control = &contract, &control
 
 	app.saveRunCheckpoint(run, cfg)
 
@@ -42,6 +56,9 @@ func TestRunCheckpointRoundTrip(t *testing.T) {
 	}
 	if cp.Messages[0].Content != "hello checkpoint" {
 		t.Fatalf("checkpoint messages = %#v", cp.Messages)
+	}
+	if cp.Run.Contract == nil || cp.Run.Control == nil || cp.Run.Contract.Digest != contract.Digest || cp.Run.Control.Phase != controlplane.PhaseIntake {
+		t.Fatalf("checkpoint control plane = %#v", cp.Run)
 	}
 }
 

@@ -44,13 +44,31 @@ func promptLooksReadOnly(prompt string) bool {
 	lower := strings.ToLower(prompt)
 	if hasAny(lower,
 		"do not edit", "don't edit", "no edits", "read-only", "readonly",
-		"just inspect", "just read", "just review", "only inspect", "only read",
+		"do not change", "don't change", "without editing", "without changing",
+	) {
+		return true
+	}
+	if promptExplicitlyRequestsMutation(lower) {
+		return false
+	}
+	if hasAny(lower,
+		"just inspect", "just read", "just review", "only inspect", "only read", "inspect ", "read ",
 		"map this repo", "map the repo", "explain", "summarize", "summarise",
 		"research", "recon", "enumerate", "find out", "look up",
 	) {
 		return true
 	}
 	return false
+}
+
+func promptExplicitlyRequestsMutation(lower string) bool {
+	return hasAny(lower,
+		"add ", "create ", "implement ", "fix ", "patch ", "update ",
+		"edit ", "replace ", "refactor ", "wire ", "land ", "ship ",
+		"convert ", "migrate ", "append ", "delete ", "remove ",
+		"write a file", "write the file", "write to ", "generate a file",
+		"generate the file", "build the app", "build the project",
+	)
 }
 
 func promptImpliesConcreteDeliverable(prompt string) bool {

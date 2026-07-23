@@ -167,6 +167,19 @@
   padding: 8px;
 }
 
+.agent-eval-aggregate {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--c-pane);
+}
+
+.context-quality-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .agent-eval-card {
   min-width: 0;
   border: 1px solid var(--border);
@@ -238,6 +251,44 @@
 
 .agent-eval-fail {
   color: var(--yellow);
+}
+
+.context-quality-variants {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.context-quality-variants > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 7px;
+  border-left: 2px solid var(--border);
+  padding-left: 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.context-quality-variants > div.ok {
+  border-color: var(--green);
+}
+
+.context-quality-variants > div.warn {
+  border-color: var(--yellow);
+}
+
+.context-quality-variants strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.context-quality-variants em {
+  grid-column: 1 / -1;
+  font-style: normal;
 }
 
 .grammar-probe-panel {
@@ -348,6 +399,16 @@
 .benchmark-editor input,
 .benchmark-editor select {
   min-width: 0;
+}
+
+.benchmark-model-profile small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .benchmark-editor .benchmark-check {
@@ -911,7 +972,7 @@
 
 .matrix-row {
   display: grid;
-  grid-template-columns: minmax(230px, 1.7fr) 78px 70px 66px 78px 62px 72px 76px 68px minmax(190px, 1.2fr);
+  grid-template-columns: minmax(230px, 1.7fr) 72px 70px 62px 82px 82px 72px 58px 72px 76px 72px 68px 92px minmax(210px, 1.2fr);
   gap: 10px;
   align-items: center;
   padding: 7px 8px;
@@ -944,6 +1005,12 @@
 
 .matrix-ok {
   box-shadow: inset 3px 0 0 var(--green);
+}
+
+.matrix-use-chat {
+  width: 100%;
+  min-width: 82px;
+  padding: 4px 6px;
 }
 
 .benchmark-diagnostics {
@@ -979,6 +1046,7 @@
   .benchmark-editor,
   .benchmark-scenario-form,
   .benchmark-detail-grid,
+  .agent-eval-aggregate,
   .agent-eval-grid,
   .grammar-probe-grid {
     grid-template-columns: 1fr;

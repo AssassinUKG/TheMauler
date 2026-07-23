@@ -24,22 +24,26 @@ var agentEvalMu sync.Mutex
 var processStateMu sync.Mutex
 
 type AgentEvalScenario struct {
-	Name               string            `json:"name"`
-	Prompt             string            `json:"prompt"`
-	Workspace          map[string]string `json:"workspace"`
-	Mode               string            `json:"mode"`
-	MaxToolCalls       int               `json:"max_tool_calls"`
-	ExpectFiles        map[string]string `json:"expect_files"`
-	ExpectStatus       string            `json:"expect_status"`
-	ForbidSubstr       []string          `json:"forbid_substr"`
-	MaxAutoContinues   int               `json:"max_auto_continues"`
-	CompletionBlocking *bool             `json:"completion_blocking,omitempty"`
-	ReviewerPass       *bool             `json:"reviewer_pass,omitempty"`
-	RuntimeVerifier    string            `json:"runtime_verifier,omitempty"`
+	Name                       string            `json:"name"`
+	Prompt                     string            `json:"prompt"`
+	Workspace                  map[string]string `json:"workspace"`
+	Mode                       string            `json:"mode"`
+	MaxToolCalls               int               `json:"max_tool_calls"`
+	ExpectFiles                map[string]string `json:"expect_files"`
+	ExpectFilesCaseInsensitive bool              `json:"expect_files_case_insensitive,omitempty"`
+	ExpectStatus               string            `json:"expect_status"`
+	ForbidSubstr               []string          `json:"forbid_substr"`
+	ForbidTools                []string          `json:"forbid_tools,omitempty"`
+	ForbidToolInputSubstr      []string          `json:"forbid_tool_input_substr,omitempty"`
+	MaxAutoContinues           int               `json:"max_auto_continues"`
+	CompletionBlocking         *bool             `json:"completion_blocking,omitempty"`
+	ReviewerPass               *bool             `json:"reviewer_pass,omitempty"`
+	RuntimeVerifier            string            `json:"runtime_verifier,omitempty"`
 }
 
 type AgentEvalResult struct {
 	Name               string          `json:"name"`
+	Attempt            int             `json:"attempt,omitempty"`
 	Pass               bool            `json:"pass"`
 	ArtifactPass       bool            `json:"artifact_pass"`
 	HygienePass        bool            `json:"hygiene_pass"`
@@ -58,6 +62,10 @@ type AgentEvalResult struct {
 	PromptWarnings     int             `json:"prompt_warnings"`
 	StabilityScore     int             `json:"stability_score"`
 	FalseDone          bool            `json:"false_done"`
+	PolicyViolations   int             `json:"policy_violations"`
+	HumanInterventions int             `json:"human_interventions"`
+	RecoveryEvents     int             `json:"recovery_events"`
+	Recovered          bool            `json:"recovered"`
 	DurationMs         int64           `json:"duration_ms"`
 	FailReason         string          `json:"fail_reason,omitempty"`
 	RuntimePass        bool            `json:"runtime_pass,omitempty"`
@@ -72,15 +80,30 @@ type AgentEvalResult struct {
 	VerifierVersion    string          `json:"verifier_version,omitempty"`
 	StopReason         string          `json:"stop_reason,omitempty"`
 	ToolTrace          []TaskToolEvent `json:"tool_trace,omitempty"`
+	ResponseExcerpt    string          `json:"response_excerpt,omitempty"`
+	EventTrace         []TaskRunEvent  `json:"event_trace,omitempty"`
 }
 
 type AgentEvalReport struct {
-	Results   []AgentEvalResult `json:"results"`
-	PassCount int               `json:"pass_count"`
-	Total     int               `json:"total"`
-	Profile   string            `json:"profile"`
-	ID        string            `json:"id,omitempty"`
-	CreatedAt string            `json:"created_at,omitempty"`
+	Results                   []AgentEvalResult `json:"results"`
+	PassCount                 int               `json:"pass_count"`
+	Total                     int               `json:"total"`
+	Profile                   string            `json:"profile"`
+	ID                        string            `json:"id,omitempty"`
+	CreatedAt                 string            `json:"created_at,omitempty"`
+	Repeats                   int               `json:"repeats"`
+	FixtureCount              int               `json:"fixture_count"`
+	FixturePassCount          int               `json:"fixture_pass_count"`
+	PassPower                 string            `json:"pass_power"`
+	FullPass                  bool              `json:"full_pass"`
+	UnsupportedCompletionRate float64           `json:"unsupported_completion_rate"`
+	DuplicateActionRate       float64           `json:"duplicate_action_rate"`
+	ToolErrorRate             float64           `json:"tool_error_rate"`
+	RecoverySuccessRate       float64           `json:"recovery_success_rate"`
+	AverageToolCalls          float64           `json:"average_tool_calls"`
+	AverageDurationMs         int64             `json:"average_duration_ms"`
+	PolicyViolations          int               `json:"policy_violations"`
+	HumanInterventions        int               `json:"human_interventions"`
 }
 
 func (a *App) RunAgentEval(profileName string) AgentEvalReport {
@@ -98,6 +121,28 @@ func (a *App) RunAgentEval(profileName string) AgentEvalReport {
 		}
 	}
 	report := a.runAgentEvalScenarios(profileName, scenarios)
+	_ = saveAgentEvalReport(report)
+	return report
+}
+
+// RunAgentEvalRepeated runs the production agent-loop suite repeatedly so
+// single-run luck is reported separately from pass^k reliability.
+func (a *App) RunAgentEvalRepeated(profileName string, repeats int) AgentEvalReport {
+	scenarios, err := loadAgentEvalScenarios()
+	if err != nil {
+		return AgentEvalReport{
+			Profile: strings.TrimSpace(profileName),
+			Results: []AgentEvalResult{{
+				Name:       "load-scenarios",
+				Pass:       false,
+				Status:     "error",
+				FailReason: err.Error(),
+			}},
+			Total:   1,
+			Repeats: normalizeAgentEvalRepeats(repeats),
+		}
+	}
+	report := a.runAgentEvalScenariosRepeated(profileName, scenarios, repeats)
 	_ = saveAgentEvalReport(report)
 	return report
 }
@@ -120,6 +165,11 @@ func (a *App) RunJHUTAgentEval(profileName string) AgentEvalReport {
 }
 
 func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalScenario) AgentEvalReport {
+	return a.runAgentEvalScenariosRepeated(profileName, scenarios, 1)
+}
+
+func (a *App) runAgentEvalScenariosRepeated(profileName string, scenarios []AgentEvalScenario, repeats int) AgentEvalReport {
+	repeats = normalizeAgentEvalRepeats(repeats)
 	agentEvalMu.Lock()
 	defer agentEvalMu.Unlock()
 	processStateMu.Lock()
@@ -145,6 +195,7 @@ func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalSce
 	if strings.TrimSpace(profileName) != "" {
 		cfg.ActiveProfile = strings.TrimSpace(profileName)
 	}
+	cfg = canonicalAgentEvalSettings(cfg)
 	profile := activeProfile(&cfg, &profiles)
 	cfg.Logging.Enabled = false
 	cfg.Memory.Enabled = false
@@ -155,19 +206,119 @@ func (a *App) runAgentEvalScenarios(profileName string, scenarios []AgentEvalSce
 	}
 
 	report := AgentEvalReport{
-		ID:        fmt.Sprintf("agent-eval-%s", time.Now().Format("20060102-150405")),
-		CreatedAt: time.Now().Format(time.RFC3339),
-		Profile:   cfg.ActiveProfile,
-		Total:     len(scenarios),
+		ID:           fmt.Sprintf("agent-eval-%s", time.Now().Format("20060102-150405")),
+		CreatedAt:    time.Now().Format(time.RFC3339),
+		Profile:      cfg.ActiveProfile,
+		Repeats:      repeats,
+		FixtureCount: len(scenarios),
+		Total:        len(scenarios) * repeats,
+	}
+	fixturePasses := make(map[string]int, len(scenarios))
+	for attempt := 1; attempt <= repeats; attempt++ {
+		for _, scenario := range scenarios {
+			result := runOneAgentEvalScenario(cfg, profiles, profile, scenario)
+			result.Attempt = attempt
+			if result.Pass {
+				report.PassCount++
+				fixturePasses[scenario.Name]++
+			}
+			report.Results = append(report.Results, result)
+		}
 	}
 	for _, scenario := range scenarios {
-		result := runOneAgentEvalScenario(cfg, profiles, profile, scenario)
-		if result.Pass {
-			report.PassCount++
+		if fixturePasses[scenario.Name] == repeats {
+			report.FixturePassCount++
 		}
-		report.Results = append(report.Results, result)
 	}
+	populateAgentEvalReportMetrics(&report)
 	return report
+}
+
+func canonicalAgentEvalSettings(cfg settings.Settings) settings.Settings {
+	defaults := settings.DefaultSettings()
+	// Agent Eval is a model/runtime comparison, not a test of whichever
+	// confirmations, custom presets, explicit verify command, or tool toggle the
+	// operator happened to use in the previous chat. Keep endpoint/shell
+	// environment settings, but normalize the operational envelope.
+	cfg.Agents = defaults.Agents
+	cfg.Agents.MaxRunSeconds = 0
+	cfg.Agents.ReviewLoop.ReviewerPass = false
+	cfg.Agents.ReviewLoop.VerifyCommands = nil
+	cfg.Tools.Enabled = true
+	cfg.Tools.ActiveToolset = "unrestricted"
+	cfg.Tools.ConfirmReads = false
+	cfg.Tools.ConfirmWrites = false
+	cfg.Tools.ConfirmExec = false
+	cfg.Tools.EnabledTools = defaults.Tools.EnabledTools
+	cfg.Tools.Toolsets = defaults.Tools.Toolsets
+	cloneToolsConfigRefs(&cfg.Tools)
+	return cfg
+}
+
+func normalizeAgentEvalRepeats(repeats int) int {
+	if repeats <= 0 {
+		return 1
+	}
+	if repeats > 10 {
+		return 10
+	}
+	return repeats
+}
+
+func populateAgentEvalReportMetrics(report *AgentEvalReport) {
+	if report == nil {
+		return
+	}
+	if report.Repeats <= 0 {
+		report.Repeats = 1
+	}
+	if report.FixtureCount <= 0 && report.Repeats > 0 {
+		report.FixtureCount = report.Total / report.Repeats
+	}
+	falseDone := 0
+	totalTools := 0
+	totalDuplicates := 0
+	totalToolErrors := 0
+	totalDuration := int64(0)
+	recoveryAttempts := 0
+	recoverySuccesses := 0
+	for _, result := range report.Results {
+		if result.FalseDone {
+			falseDone++
+		}
+		totalTools += result.ToolCalls
+		totalDuplicates += result.RepeatedToolInputs + result.RepeatedSkips
+		totalToolErrors += result.ToolErrors
+		totalDuration += result.DurationMs
+		report.PolicyViolations += result.PolicyViolations
+		report.HumanInterventions += result.HumanInterventions
+		if result.RecoveryEvents > 0 {
+			recoveryAttempts++
+			if result.Recovered {
+				recoverySuccesses++
+			}
+		}
+	}
+	if report.Total > 0 {
+		report.UnsupportedCompletionRate = float64(falseDone) * 100 / float64(report.Total)
+		report.AverageToolCalls = float64(totalTools) / float64(report.Total)
+		report.AverageDurationMs = totalDuration / int64(report.Total)
+	}
+	if totalTools > 0 {
+		report.DuplicateActionRate = float64(totalDuplicates) * 100 / float64(totalTools)
+		report.ToolErrorRate = float64(totalToolErrors) * 100 / float64(totalTools)
+	}
+	if recoveryAttempts > 0 {
+		report.RecoverySuccessRate = float64(recoverySuccesses) * 100 / float64(recoveryAttempts)
+	} else {
+		report.RecoverySuccessRate = 100
+	}
+	report.FullPass = report.PassCount == report.Total && report.FixturePassCount == report.FixtureCount && report.PolicyViolations == 0 && report.HumanInterventions == 0 && falseDone == 0
+	if report.FullPass {
+		report.PassPower = fmt.Sprintf("pass^%d", report.Repeats)
+	} else {
+		report.PassPower = fmt.Sprintf("not pass^%d", report.Repeats)
+	}
 }
 
 func (a *App) beginAgentEval() error {
@@ -370,6 +521,14 @@ func runOneAgentEvalScenario(cfg settings.Settings, profiles settings.ProfilesFi
 	result.StopReason = finished.StopReason
 	result.ToolTrace = append([]TaskToolEvent(nil), finished.Tools...)
 	scoreAgentEvalResult(&result, finished, workspace, scenario)
+	if !result.Pass {
+		result.ResponseExcerpt = truncateRunes(strings.TrimSpace(finished.Response), 4000)
+		startEvent := len(finished.Events) - 24
+		if startEvent < 0 {
+			startEvent = 0
+		}
+		result.EventTrace = append([]TaskRunEvent(nil), finished.Events[startEvent:]...)
+	}
 	if scenario.RuntimeVerifier == "jhut" {
 		configDir, _ := settings.ConfigDir()
 		evidenceDir := filepath.Join(configDir, "agent-eval-artifacts", fmt.Sprintf("%s-%d", scenario.Name, time.Now().Unix()))
@@ -463,7 +622,12 @@ func scoreAgentEvalResult(result *AgentEvalResult, run TaskRun, workspace string
 			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing: %v", rel, err))
 			continue
 		}
-		if !strings.Contains(string(data), wantSubstr) {
+		content := string(data)
+		matched := strings.Contains(content, wantSubstr)
+		if scenario.ExpectFilesCaseInsensitive {
+			matched = strings.Contains(strings.ToLower(content), strings.ToLower(wantSubstr))
+		}
+		if !matched {
 			artifactFailures = append(artifactFailures, fmt.Sprintf("%s missing expected substring %q", rel, wantSubstr))
 		}
 	}
@@ -478,6 +642,21 @@ func scoreAgentEvalResult(result *AgentEvalResult, run TaskRun, workspace string
 			}
 		}
 	}
+	forbiddenTools := make(map[string]bool, len(scenario.ForbidTools))
+	for _, name := range scenario.ForbidTools {
+		forbiddenTools[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	for _, tool := range run.Tools {
+		if forbiddenTools[strings.ToLower(strings.TrimSpace(tool.Name))] {
+			hygieneFailures = append(hygieneFailures, fmt.Sprintf("forbidden tool used: %s", tool.Name))
+		}
+		for _, forbidden := range scenario.ForbidToolInputSubstr {
+			if forbidden != "" && strings.Contains(tool.Input, forbidden) {
+				hygieneFailures = append(hygieneFailures, fmt.Sprintf("tool input used forbidden substring %q", forbidden))
+				break
+			}
+		}
+	}
 	if scenario.MaxAutoContinues >= 0 && result.AutoContinues > scenario.MaxAutoContinues {
 		hygieneFailures = append(hygieneFailures, fmt.Sprintf("auto_continues=%d > %d", result.AutoContinues, scenario.MaxAutoContinues))
 	}
@@ -486,8 +665,18 @@ func scoreAgentEvalResult(result *AgentEvalResult, run TaskRun, workspace string
 	}
 	result.StatusPass = len(statusFailures) == 0
 	result.ArtifactPass = len(artifactFailures) == 0
-	result.HygienePass = len(hygieneFailures) == 0
 	result.FalseDone = strings.EqualFold(run.Status, "done") && !result.ArtifactPass
+	result.PolicyViolations = countRunEvents(run.Events, "policy_block") + countRunEvents(run.Events, "control_transition_denied")
+	result.HumanInterventions = countRunEvents(run.Events, "denied") + countRunEvents(run.Events, "confirmation_required")
+	result.RecoveryEvents = countRunEvents(run.Events, "recovery") + countRunEvents(run.Events, "tool_error")
+	result.Recovered = result.RecoveryEvents > 0 && strings.EqualFold(run.Status, "done")
+	if result.PolicyViolations > 0 {
+		hygieneFailures = append(hygieneFailures, fmt.Sprintf("policy_violations=%d", result.PolicyViolations))
+	}
+	if result.HumanInterventions > 0 {
+		hygieneFailures = append(hygieneFailures, fmt.Sprintf("human_interventions=%d", result.HumanInterventions))
+	}
+	result.HygienePass = len(hygieneFailures) == 0
 	failures := append([]string{}, statusFailures...)
 	failures = append(failures, artifactFailures...)
 	failures = append(failures, hygieneFailures...)

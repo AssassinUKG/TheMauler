@@ -1,0 +1,820 @@
+# Archived TheMauler agent handoff snapshot (2026-07-21)
+
+Original title: `TheMauler - Agent Handoff Document`.
+
+This is the content-preserving pre-M2 snapshot. It is historical reference, not the live instruction
+source. Use `../../AGENTS.md` and `../context/README.md` for current rules and routed project context.
+
+Read this file at the start of every session. It is the single source of truth for the project state, architecture, and what to build next.
+
+---
+
+## What is TheMauler?
+
+A native Windows desktop AI agent workbench, roughly VS Code meets Claude Code. Built with:
+
+- Go 1.26 backend for AI logic, tools, and file operations
+- Wails v2.12 desktop shell with Chromium WebView2
+- React + TypeScript + Vite frontend
+- Monaco editor for the file viewer/editor
+
+The user has an RTX 3090 with 24 GB VRAM and currently runs Qwen3.6 locally through InferenceBridge, exposed to TheMauler as an OpenAI-compatible local provider. Keep new integration work Mauler-side unless explicitly asked otherwise; do not add new LM Studio/vLLM/SGLang provider paths as part of current work. Never recommend Q6_K quant; it OOMs at useful context on 24 GB. Recommend Q5/Q4-class profiles that fit the requested context.
+
+---
+
+## Run Commands
+
+All commands should be run from project root: `C:\Users\richa\Desktop\TheMauler`.
+
+```powershell
+# Fresh Windows dependency check/setup
+.\setup.ps1 -Check
+.\setup.ps1 -Auto
+
+# Development: hot reload and desktop window
+wails dev
+
+# Production build: build/bin/TheMauler.exe
+.\build.ps1
+
+# Production build and launch
+.\build.ps1 -Run
+
+# Frontend only
+cd frontend
+npm run build
+
+# Go checks
+go test ./...
+go vet ./...
+```
+
+Linux/WSL:
+
+```bash
+# Development: hot reload and desktop window
+wails dev
+
+# Production build: build/bin/TheMauler
+./build.sh
+
+# Production build and launch
+./build.sh --run
+
+# Skip Go tests/vet when iterating
+./build.sh --skip-tests
+
+# Skip dependency bootstrap
+./build.sh --skip-deps
+```
+
+Audio/TTS fresh-install note: outgoing voice uses `internal/audio` with `MAULER_TTS_ENGINE=auto`
+(Kokoro first, Piper fallback). Kokoro requires Python plus `kokoro` and `soundfile`; Windows setup
+checks this via `.\setup.ps1`, and Linux `build.sh` installs/checks `python3`, `pip`, `ffmpeg`, and
+`espeak-ng` unless `--skip-deps` is used. `ffmpeg` is required for Telegram voice-note OGG/Opus
+conversion.
+
+---
+
+## Project Structure
+
+```text
+TheMauler/
+|-- main.go                          # Wails entry point, embeds frontend/dist
+|-- wails.json                       # Wails project config
+|-- go.mod                           # module mauler, go 1.26
+|-- PLAN.md                          # Original full build plan
+|-- AGENTS.md                        # This file
+|-- frontend/
+|   |-- index.html
+|   |-- vite.config.ts
+|   |-- src/
+|       |-- main.tsx
+|       |-- App.tsx                  # Root component, mauler:* event wiring
+|       |-- App.css
+|       |-- index.css                # Global VSCode-dark theme variables
+|       |-- wailsjs/
+|       |   |-- go.ts                # Type-safe wrappers for Go bindings
+|       |   |-- runtime.ts           # Wails EventsOn shim
+|       |-- components/
+|           |-- ChatPane.tsx/css     # Streaming markdown chat, image paste
+|           |-- FileTree.tsx/css     # Recursive file tree, workspace navigation
+|           |-- FileViewer.tsx/css   # Center-pane Monaco file viewer/editor
+|           |-- AgentPanel.tsx/css   # Right-pane agent controls and tool access
+|           |-- StatusBar.tsx/css    # Token bar + profile switcher
+|           |-- ConfirmDialog.tsx/css
+|           |-- SettingsModal.tsx/css
+|-- internal/
+    |-- app/
+    |   |-- app.go                   # All Wails bindings - main backend
+    |-- agent/
+    |   |-- history.go               # Conversation history + compaction
+    |   |-- rollback.go              # File rollback stack
+    |-- llm/
+    |   |-- client.go                # Client interface and request types
+    |   |-- stream.go                # SSE parser + tool call accumulator
+    |   |-- backends/
+    |       |-- openaicompat.go
+    |       |-- llamacpp.go
+    |       |-- lmstudio.go
+|       |-- anthropic.go         # Legacy stub; app is local-provider focused
+    |-- settings/
+    |   |-- model.go                 # TOML + JSON tags for Wails/settings UI
+    |   |-- defaults.go
+    |   |-- load.go
+    |   |-- save.go
+    |-- tools/
+        |-- registry.go
+        |-- read_file.go             # Legacy backend for compact read tool
+        |-- write_file.go            # Legacy backend for compact write tool
+        |-- edit_file.go             # Legacy backend for compact edit tool
+        |-- shell.go                 # Platform-aware shell tool; no alternate model-facing shell alias
+        |-- paths.go                 # Windows/WSL/Linux path normalization
+        |-- glob.go
+        |-- grep.go
+```
+
+---
+
+## Critical API Facts
+
+### Settings / Profiles
+
+```go
+cfg, _ := settings.Load()              // returns *Settings
+profiles, _ := settings.LoadProfiles() // returns *ProfilesFile
+settings.Save(cfg)                     // takes *Settings
+settings.SaveProfiles(profiles)        // takes *ProfilesFile
+
+profile := profiles.Profiles["qwen3.6-think"] // map, not slice
+cfg.Context.CompactionAt
+cfg.Context.MAULERMDPath
+```
+
+The settings structs have both TOML and JSON tags. TOML stays snake_case on disk, and Wails now returns snake_case JSON fields to React, for example `active_profile`, `provider`, `base_url`, `thinking_general`, and `nothinking`.
+
+Providers and profiles are intentionally separate:
+
+- Provider = endpoint/backend transport. The local default is the user's InferenceBridge
+  OpenAI-compatible endpoint, for example `http://127.0.0.1:8800/v1`; `openrouter` is the
+  optional cloud provider at `https://openrouter.ai/api/v1`.
+- Profile = model behaviour, for example model id, context tokens, thinking mode, and sampling params.
+
+`profiles.toml` now has both `[providers]` and `[profiles]`. Old profile-level `backend` and `base_url` fields are migrated on load into provider entries.
+Provider-only legacy profiles such as `lmstudio-default` are intentionally removed from
+`[profiles]`. InferenceBridge remains the default live path. OpenRouter may be enabled from
+the Providers UI without changing that default.
+
+### Tool Calls
+
+```go
+tc.Function.Name
+tc.Function.Arguments
+tc.ID
+```
+
+### LLM Request
+
+```go
+req := llm.Request{
+    Messages:         msgs,
+    Tools:            toolDefs,
+    MaxTokens:        params.MaxTokens,
+    Temperature:      params.Temperature,
+    TopP:             params.TopP,
+    TopK:             params.TopK,
+    MinP:             params.MinP,
+    PresencePenalty:  params.PresencePenalty,
+    EnableThinking:   profile.Thinking,
+    PreserveThinking: profile.PreserveThink,
+}
+```
+
+Model is baked into the client at construction. There is no `Params` sub-struct and no `Model` field in `llm.Request`.
+
+### Tool Result Messages
+
+```go
+llm.Message{
+    Role:       llm.RoleTool,
+    Content:    result,
+    ToolCallID: tc.ID,
+    Name:       tc.Function.Name,
+}
+```
+
+### Wails Events
+
+Go emits:
+
+```go
+mauler:stream_start
+mauler:delta
+mauler:stream_done
+mauler:stream_error
+mauler:tool_call
+mauler:tool_result
+mauler:confirm
+mauler:compact
+mauler:artifact_output
+mauler:artifact_done
+```
+
+TypeScript listens via `EventsOn('mauler:event_name', (...args: unknown[]) => {})`.
+
+---
+
+## What is Already Working
+
+- Full Wails v2 desktop app shell
+- Workbench layout: Explorer | center tabs | Agent controls
+- Center tabs: Chat and File viewer/editor
+- File viewer is a real Monaco editor surface with syntax language selector, minimap, formatting, Ctrl+S save, and status bar
+- Streaming agent loop from SSE to Wails events to React state
+- Current llama.cpp streaming order is supported through `[DONE]`: Mauler does not stop at the earlier `finish_reason`, so the trailing usage/timings event is retained. RunLedger model-call evidence records cached prompt tokens plus authoritative prompt/decode throughput, benchmarks prefer the backend decode rate, and Doctor reads the exact InferenceBridge-managed llama.cpp build when available.
+- Model-facing tool calls use the compact registry: `read`, `write`, `edit`, `shell`, `terminal_send`, `terminal_read`, `http_probe`, `start_listener`, `glob`, `grep`, `session_search`, `todo_write`, `skill`, `task`, `web_search`, `fetch_url`, `browser`, `memory`, `progress`, `read_tool_result`, `evidence_bundle`, `sqlite`, and support tools such as `set_reasoning_effort`. Do not prompt legacy backend/alias names as model-facing tools.
+- PDF text extraction is available through the read-only `read_pdf` tool with optional page ranges and output limits. It is for text-based PDFs; scanned/image-only PDFs still need OCR later.
+- Shell backend is configurable as `auto`, `powershell`, `cmd`, `bash`, or `wsl`. Auto uses PowerShell on Windows and bash on Linux/WSL.
+- Shell mode is configurable as `shared_terminal` or `isolated`. In `shared_terminal` mode, `shell` tool calls use the visible Terminal pane when the backend is WSL/bash, emit AI command start/done markers, and fall back to isolated execution for unsupported backends.
+- Tool routing contract: `terminal_send`/`terminal_read` are for commands inside a live or interactive terminal session. Independent HTTP/webshell/curl/wget checks should use `http_probe` when possible, or `shell` when exact flags/pipelines are required. Do not type independent web probes into a connected terminal or listener.
+- File tools normalize common path forms between Windows and WSL, such as `/mnt/c/...`, `/c/...`, and `C:\...`.
+- Workspace selection is authoritative for tools and prompts. `SetWorkingDir` and Settings `workspace_dir` both apply the process cwd, persist the normalized path, and clear the active chat/tool context plus rollback stack when the project changes. New runs include the current workspace root and top-level entries in the system prompt; missing-file tool results include the current workspace and a glob/read hint so stale paths from another project do not keep looping.
+- Model loading/context checks are hard-fail for the active provider when the backend reports an actual context smaller than the selected profile's `ctx_tokens`. The app must not silently continue at 8K when the profile requests 32K/40K/54K.
+- OpenAI-compatible non-streaming model-list calls have a 10 second timeout even though streaming chat uses an unbounded HTTP client timeout.
+- Chat requests copy active profile generation params: max tokens, temperature, top-p, top-k, min-p, presence penalty, seed, and thinking flags
+- Confirm gate for destructive tools
+- Tool confirmations can be allowed once or added to an exact-input safe list. Safe-listed tool approvals skip future prompts and can be removed in Settings > Tools.
+- Tools show informational risk labels in Agent > Tools and Settings > Tools. Low: read/search-local tools; medium: web/browser read tools; high: shell/write/edit/browser interaction. Labels do not restrict autonomous mode; enabled tools remain available.
+- File rollback stack through `Undo`
+- Mutating agent tools are snapshotted before execution and verified after success. Compact `write` verification checks that the target file exists and content/append suffix matches the tool input; compact `edit` verification checks that the replacement landed. Language-specific lint still runs afterward for Go, Python, and shell files.
+- Tool results pass through promptware and secret-exfiltration guardrails before being appended back into model history. Suspicious prompt-injection/exfiltration language is labelled as untrusted data, and obvious credential assignments/private-key blocks are redacted.
+- Context compaction at 85 percent
+- Settings modal with **eleven tabs** (general, providers, profiles, agents, environment, tools,
+  telegram, context, storage, ui, image), live editing, and TOML persistence
+- Profile switcher in status bar
+- Token usage bar in status bar
+- Status bar backend ping skips polling during streams without restarting the interval when streaming flips on/off.
+- Image paste in chat
+- Sent user image attachments remain visible as clickable thumbnails in the chat transcript and are preserved when sessions are loaded
+- Chat drafts remain editable while the agent is running. Enter inserts a newline; Ctrl+Enter or the Send button sends.
+- Sending while the agent is running interrupts the current run and sends exactly one pending draft after the stop completes. There is no FIFO queue replay.
+- Remote channel messages use the channel bus instead of the desktop Chat draft path. Telegram
+  side-chat, quick actions, and `/run` work requests can queue while a project run is busy and drain
+  when the run becomes idle.
+- Auto-continue waits 500 ms between continuation retries to avoid hammering a local backend when the model repeatedly stops mid-task.
+- Qwen/local OpenAI-compatible truncation handling: OpenAI-compatible SSE `finish_reason:"length"` sets `Delta.Truncated`; the agent auto-continues even when the text ends cleanly. If the tail says it is about to act (for example "right - let me write..."), it uses a directive prompt that requires an immediate tool call.
+- No-tool narration handling: when the model says it is about to write/create/update/run but emits no tool calls, the next auto-continue uses a direct tool-call prompt immediately instead of waiting for another soft continuation.
+- No-tool inspection handling: when the model says it will find/explore/check/read/search/fetch but emits no tool calls, the next auto-continue forces an immediate inspection/research tool call.
+- Shell failures on Windows PowerShell that look like bash syntax return a hint telling the model to use PowerShell syntax or switch the shell backend to WSL/bash.
+- Shell failures preserve captured stdout/stderr in the tool result before appending the exit error. PowerShell `curl` alias mistakes now return a specific hint to use `curl.exe` or `Invoke-WebRequest -Uri ... -UseBasicParsing`.
+- Shell and terminal output decoding handles UTF-16-ish Windows output as UTF-8 text before returning results to chat/logs.
+- Code block Open button opens code as a scratch snippet in the File tab
+- Agent control panel for autonomous mode, tool toggles, stop, clear, and settings
+- Agent panel has tabs for Agent, Plan, Activity, Tools, Browser, Memory, Skills, and Logs. Activity is scrollable and shows recent tool calls/results, including shell output; Windows shell child windows are hidden.
+- The bottom status bar shows live run state driven by `mauler:run_state` events, and the title bar has a Doctor action that opens the Agent panel and runs diagnostics.
+- Doctor now checks the active InferenceBridge provider for agent-backend endpoint parity: structured agent-action validation plus route availability for Anthropic `/v1/messages` and OpenAI `/v1/embeddings`, without spending a model generation.
+- Explorer and Agent side panes leave narrow collapsed rails when hidden, so double-click collapse remains discoverable and reversible.
+- Auto-agent router classifies each task as Builder, Fixer, Reviewer, Researcher, Planner, or Auto, injects mode instructions into the system prompt, and displays the active mode in the Agent panel.
+- Auto Agents can be toggled on/off in the Agent panel. Off means Manual mode with no mode-specific routing instructions.
+- Agent mode override is available in the Agent tab: Auto, Manual, Builder, Fixer, Reviewer, Researcher, Planner.
+- Ops is no longer a default/auto-selected agent mode. Treat the app as one unrestricted agentic AI with optional Run/evidence surfaces. `/ops` is legacy shorthand for `/run`, and HTB/pentest-looking prompts should stay normal Auto agent runs unless the user explicitly asks for a specialised mode.
+- Agent presets are persisted under `settings.agents.presets` and support preferred profile, context budget, autonomy level, instructions, and per-tool permissions. Settings now has an **Agents** tab for editing these presets directly.
+- Agent access presets are available from the Agent tab: Unrestricted, Balanced, and Offline. Unrestricted enables full enabled-tool access with no prompts; Balanced keeps web/browser enabled but prompts for writes/shell; Offline disables web/fetch/browser tools for local-only work.
+- Toolsets are available as first-class capability groups: `safe`, `local-code`, `web-research`, `browser`, `memory`, `offline`, `balanced`, and `unrestricted`. The active toolset is a coarse gate over per-tool toggles, and each agent preset can select its own toolset from Settings > Agents.
+- Telegram remote control has a first-pass Go runtime: Settings > Telegram configures enable/token,
+  bot username, mention/allow-list, default project/profile/mode/toolset, progress cadence, and
+  voice preferences. When enabled, the bot long-polls Telegram through `internal/app/telegram_runtime.go`
+  and routes messages through `internal/channelbus` into side-chat, control, quick-action, or queued
+  work lanes. Normal Telegram text is a separate model-backed side chat and does not pollute the
+  desktop Chat transcript; explicit `/run` starts or queues unrestricted project work using the
+  configured defaults. Busy-time side-chat/quick/run requests are stored in the persistent
+  `channel_work_queue` and drained after the active project run is idle.
+- Telegram has a full-page UI (`TelegramPage`) for bot status, queue, chat-style conversation,
+  raw ledger events, manual sends, and delete-message actions. Telegram/channel events are recorded
+  in RunLedger with sources `telegram` and `channelbus`; tokens and token-bearing URLs must stay
+  redacted from logs.
+- Telegram `/cmd` completion forwards the actual final assistant answer shown in the Mauler UI.
+  If a local model returns only generic success prose, the runtime falls back to the latest
+  guarded/redacted result-bearing tool output, so commands such as `whoami` and `ls` do not finish
+  without their result. Progress messages show task, human-readable stage/current action, elapsed
+  time, and a distinct terminal result/error/reason. Final answers are sent even when periodic
+  progress is disabled, and queued Telegram runs are registered before agent start so fast
+  completions cannot outrun destination tracking.
+- Durable project memory is stored in `~/.config/mauler/memory.json`, scoped to the workspace, and relevant entries are injected into new conversation system prompts. Memory entries support kind, importance, pinning, tags, updated/last-used timestamps, edit-in-place, filtering, and weighted retrieval so it can grow toward embeddings/RAG later.
+- Saved/autosaved sessions are also indexed into `~/.config/mauler/state.db` using SQLite FTS, and the `session_search` tool lets the agent recall prior chat decisions, errors, fixes, and tool trails without stuffing old sessions into the prompt. The Memory tab has session recall search, reindex, clear-index, and reset controls.
+- Task runs are stored in `~/.config/mauler/task-runs.json` with prompt, mode, profile, status, summary, tool trail, and a lifecycle timeline. The Logs tab can search, filter, refresh, export, or clear them.
+- RunLedger core slices are implemented in `internal/ledger`: task-run events, state transitions, tool results, stops, finishes, confirmations, artifact lifecycle/output, terminal shell lifecycle/input-size, memory writes/deletes, skill writes/deletes, learning suggestions, provider/model diagnostics, web/browser/planner/subagent category events, and bounded subagent lifecycle are mirrored to UTF-8 JSONL at `~/.config/mauler/run-ledger.jsonl`, with Wails bindings `ListLedgerEvents` and `ClearLedgerEvents`. The center-pane Brain tab reads this ledger with filters, signals, selected-event detail, export, and clear controls. Use this as the event spine for new Brain/Ops/logging work rather than adding another partial log path.
+- Reviewable learning candidates are exposed by `ListLearningCandidates`: it derives skill/reflection/evidence suggestions from recent ledger events, redacts sensitive snippets, and the Brain tab can approve them into Memory entries or Skills. Keep this approval-first pattern for future learning; do not silently promote model guesses into durable memory.
+- Full-page Logs and Memory views are available from the top bar and center tabs. Use them for serious run inspection, project memory editing, and session recall search; the Agent panel tabs remain compact quick views.
+- Default logging is full-detail: tool inputs, tool results, and model responses are captured, with a larger 500-run retention default.
+- Task runs include stop reason/detail fields for user stops, cancelled contexts, auto-continue exhaustion, tool denials, disabled tools, budget exhaustion, model/client errors, and tool errors. Logs surface the reason plus timeline events for model ready, truncation, auto-continue prompts, tool calls, blocks, failures, and completion.
+- Recoverable tool failures, including malformed local-model tool JSON such as `unexpected end of JSON input`, are logged as `tool_error` timeline events and tool rows but do not set the run's terminal stop reason if the agent later recovers and finishes. The tool result tells the model to retry with complete valid JSON.
+- Task runs now carry a structured `state` and state timeline (`planning`, `model_loading`, `thinking`, `researching`, `reading`, `editing`, `testing`, `recovering`, `blocked`, `failed`, `done`) so the Logs tab can show what phase the agent reached before stopping.
+- Planner/todo tools are available: `todo_create`, `todo_update`, `todo_done`, `todo_blocked`, `todo_list`, and `todo_clear`. They store the active checklist in `~/.config/mauler/todos.json`; the Agent panel has a Plan tab with refresh/clear controls and live updates after todo tool calls.
+- Master/project workflow skills are now lazy-loaded: registering a master skill stores the source path and a compact outline, while `skill` with `mode=view`, `name=master`, and an optional focused `query` returns an outline or excerpt. Do not reintroduce full master-skill injection into every chat/system prompt.
+- Web search uses auto selection: configured SearXNG first, then Brave with an API key, then DuckDuckGo HTML as the no-key fallback; `fetch_url` reads source pages.
+- `fetch_url` now favors readable page text over raw CSS/script noise, and GitHub URLs are fetched through repository/raw content paths where possible.
+- Web research is bounded per user task with configurable max searches, max fetches, max failed web attempts, and max browser actions. Repeated failed/no-result searches stop the loop and tell the model to report uncertainty.
+- Direct public CVE/PoC discovery requests route to `web_search`/`fetch_url` even when they also contain words such as exploit or `in the wild`; the broad `master` methodology skill is excluded from this narrow evidence route. Circuit-breaker pauses receive a final plain-language no-tool report, and their deterministic fallback keeps raw stability counters and long tool previews in Logs/Brain rather than Chat. See `docs/cve-web-research-routing-incident-2026-07-21.md`.
+- Search results are ranked and labelled by source quality: official docs, GitHub/repo docs, package docs, general sources, blogs/community, and low-confidence mirrors.
+- Browser automation tools are available for pages where search/fetch is not enough: `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_extract`, `browser_screenshot`, and `browser_close`.
+- Session save/load/delete in the titlebar
+- FileTree expand/collapse, Up/Home/Cd/Refresh, and single-click file open into the File tab
+- FileTree `Cd` uses the native Windows directory picker through Wails, not `window.prompt`
+- App chrome does not repeat the app name or icon; native Windows chrome carries app identity
+- Windows icon assets are `build/appicon.png` and `build/windows/icon.ico`; update both before `wails build`
+- UI direction: dark, rounded, Codex/VS Code-like work surfaces with a soft bottom chat composer. Explorer and Agent side panes can be shown/hidden and resized from the title bar/drag handles.
+- MAULER.md auto-discovery when no explicit path is configured
+- Auto-discovered project instruction files remain fully available to targeted `read` calls, but their always-on prompt representation is bounded to a compiled 16 KiB packet with head, Markdown heading index, and tail excerpts. `project_doc_max_bytes` controls source discovery/read allowance; it must not cause entire large handoff files to consume every model turn.
+- Project instructions are now task-aware before the first model call. Unrelated public research receives `minimal_external_research` source pointers instead of repository handoff contents; repository inspection/implementation receives `relevant_workspace`. Each run records policy, source bytes, compiled prompt bytes, and sources in a `context_packet` event visible through Logs/Brain. Settings > Context explains the source-read allowance versus the 16 KiB always-on cap. The former `MAULER.md` is preserved under `docs/archive` and the live file is a compatibility pointer to this canonical handoff. Track the remaining split/manifest/Context Inspector work in `docs/context-packet-reduction-implementation-plan-2026-07.md`.
+- Keyboard shortcuts: `Ctrl+,`, `Esc`, `Ctrl+K`
+- Settings has separate Providers and Profiles tabs; providers can be pinged and listed for models.
+  The built-in `openrouter` provider has a masked, UI-only key editor. Keys are stored
+  separately in `provider-secrets.json`, never returned to React, and
+  `OPENROUTER_API_KEY` takes precedence. Clicking an OpenRouter catalogue model creates or
+  updates a matching profile. Local inference remains the persistent default: OpenRouter
+  profiles are selected beside the Chat composer as a one-task cloud boost, recorded on that
+  run, and automatically reset for the next task. See `docs/openrouter-provider-guide.md`.
+- Provider model catalogues now retain reported context/output limits. Selecting an OpenRouter
+  model applies a 128K standard cloud working budget (or the lower provider maximum), an 8K
+  output default, and a conservative 32K fallback when metadata is missing. Keep cloud working
+  context separate from local model load/KV context.
+- Profiles include an explicit Thinking behaviour card. Default active profile is `qwen3.6-nothink`; chat, coding, and tool-heavy runs should stay no-thinking unless the user explicitly selects a planner/reviewer/deep-thinking pass. Tool-enabled turns force no-thinking from the first tool turn even if a thinking profile is selected.
+- Anthropic/Claude defaults are removed; the current supported live path for this user is local InferenceBridge via the OpenAI-compatible provider shape.
+- **Artifact runner fully wired end-to-end**: Run/Stop buttons in FileViewer, streaming output panel with auto-scroll and pulsing indicator, `mauler:artifact_output` / `mauler:artifact_done` events consumed in App.tsx
+- **Terminal pane first-class for daily work**: terminal visibility/height persist in UI settings, the terminal opens by default when configured, includes a short Help panel, and can be used interactively while AI shell runs are visible in the same stream.
+- Workbench layout controls are first-class and must not be removed: Explorer, Inspector, the bottom
+  work area, and the Terminal/AI Commands boundary have visible draggable separators plus keyboard
+  resizing. Explorer/Inspector widths and the AI Commands size/visibility persist locally. The AI
+  Commands splitter remains available when its history is empty or collapsed; dragging the collapsed
+  edge reopens it. Wide layouts split left/right and narrow layouts split Terminal/AI Commands
+  vertically.
+- Terminal result hygiene: `terminal_send command` returns only the command plus output appended after that command, not the whole current screen/scrollback; `terminal_read mode=history` without `grep` no longer dumps raw old scrollback into the model; the AI Commands panel does not duplicate terminal tools through generic tool-result events and treats normal terminal states such as `prompt_or_idle` as non-error.
+- WSL terminal startup validates the saved workspace before passing `--cd` to `wsl.exe`. If a
+  workspace was moved or deleted outside Mauler, the terminal falls back to the app's real process
+  directory instead of emitting `CreateProcessCommon: chdir(...) failed 2` and landing at `/`.
+- Bottom work area now has Terminal and Stream tabs. New agent runs auto-open the Stream tab while manual bottom-panel toggles open Terminal, so live model text/tool activity no longer consumes the main Run page.
+- Composer/toolbox popovers now carry plan/tool/channel status so todo and tool-state surfaces do
+  not have to spam the main transcript. Todo tool calls/results are suppressed from the visible chat
+  and represented through plan surfaces instead.
+- Context compaction is operational activity, not assistant speech. `mauler:compact` now records a
+  compact Activity item instead of appending repeated `[Context compacted]` system cards to Chat;
+  loading an older saved session filters those legacy cards. Keep compaction detail available in
+  Activity/Logs without making the transcript look as if assistant messages were replaced.
+- Run page evidence is now profile-driven. Default `Pentesting` profile is attack/log/report focused for authorised work: hosts, services, CVEs, vulnerability hints, PoC verification signals, severity, artifacts, and report/evidence paths, with no remediation/client-fix loop. `HTB / CTF` is the explicit profile for recon/foothold/user/privesc/root/flag/writeup flows. Do not make normal agent runs revolve around HTB user/root flags.
+- **Settings round-trip data integrity fixed**: `go.ts` Settings interface now includes all fields including `think_indicator`, `diff_colours`, and the full `image` block - missing fields no longer silently zero out on save
+- Regression tests cover profile generation settings, one-model-load-per-key behavior, compaction lock boundaries, workspace switching/context reset, missing-path workspace hints, Monaco save rollback snapshots, web/browser budgets, source ranking, settings default migration, toolset filtering, PDF text extraction, safety presets, compact shell/toolset filtering, path normalization, and task-run logging/timeline behavior.
+- `npm run build` passes clean with no TypeScript errors.
+- Runtime-owned Telegram/audio workers start only after Wails `OnStartup`. Headless App values used
+  by tests and binding generation can save settings without launching a worker that inherits and
+  locks a temporary process working directory on Windows.
+- The first native agent control-plane slice is implemented in `internal/controlplane`. Every new
+  run receives a validated SHA-256-sealed task contract plus a separate authoritative phase machine;
+  SQLite schema v12 and checkpoints persist both. Plan-required runs block compact `write`, `edit`,
+  and `shell` until a non-empty `todo_write` replacement plan is accepted, while `read` remains legal
+  during planning. The narrow path records approval/action/observation/repair/verification/terminal
+  transitions and cannot reach `done` without immutable file-hash/command-verdict evidence for each
+  blocking contract check. Logs shows the contract, control phase, checks, and evidence IDs. Keep
+  descriptive `TaskRun.State` separate from this authorization state. See
+  `docs/mauler-agent-control-plane-improvement-plan-2026-07.md`.
+- `Bug Bounty Hunter` is a first-class built-in agent for post-recon manual-assessment planning. Its
+  supplied domain prompt is composed beneath code-owned observation/hypothesis, priority/severity,
+  promptware, secret-redaction, scope, and evidence rules. The default `bug-bounty-review` preset is
+  read-oriented; stateful browser actions and bounded subagent delegation require an explicit
+  Unrestricted toolset override. Auto routing recognises high-confidence bounty assessment prompts
+  without treating ordinary software bug-fix requests as bounty work.
+- Chat has visible Workspace and Agent controls beside Plan/Tools. Agent definitions come from the
+  Go registry and are shared by Chat, AgentPanel, Settings, and Telegram selectors. The Workspace
+  menu opens existing or bounty folders through the native picker, lists recent/saved roots, and
+  links to workspace management. Agent choice is remembered per workspace. Switching roots clears
+  transient chat/todo/rollback state and path-backed tabs while preserving scratch tabs, files,
+  saved sessions, project memory, evidence, and logs. Composer popovers use a window-level overlay
+  so they remain usable above a tall Terminal/AI Commands area.
+
+Last focused verification 2026-07-15: `go test ./... -count=1`, `go vet ./...`,
+`go test -race ./internal/controlplane ./internal/store -count=1`,
+`go test -race ./internal/engagement/... ./internal/packlibrary -count=1`,
+`go test -race ./internal/app ./internal/tools -count=1`,
+`npm run --prefix frontend build`, and production `wails build` pass. MAULER-AR-001 through
+MAULER-AR-005 remain closed in
+`docs/agentic-reliability-issues-2026-07.md`.
+
+Live UI smoke 2026-07-15: Terminal/AI Commands horizontal drag, collapsed-edge reopen, keyboard
+resize, reload persistence, narrow-layout vertical drag, Explorer width persistence, frontend build,
+and production `wails build` pass. Repository-wide frontend lint remains a pre-existing non-gate
+with hundreds of errors across generated bindings and older components; do not report it as green.
+
+OpenRouter verification 2026-07-20: provider-secret/settings/backend tests,
+`go test -race ./internal/settings ./internal/llm/backends ./internal/app ./internal/tools -count=1`,
+`go vet ./...`, frontend type/build checks, and production `wails build` pass. The rebuilt desktop
+app launches and responds normally.
+
+One-task cloud-boost verification 2026-07-20: `go test ./... -count=1`, the required
+`go test -race ./internal/app ./internal/tools -count=1` gate, `go vet ./...`, frontend build,
+production `wails build`, and a live native-window smoke of Chat plus the provider setup route pass.
+
+Cloud-context defaults verification 2026-07-20: OpenRouter catalogue limits now drive new/changed
+cloud profiles; `moonshotai/kimi-k3` uses a 131072-token working budget and 8192-token output in
+the live config. `go test ./... -count=1`, `go vet ./...`, the required app/tools race gate,
+frontend production build, and `wails build` pass.
+
+Bug Bounty Hunter/Chat workspace verification 2026-07-20: focused routing, prompt-contract,
+action-policy, registry, settings-migration, and A -> B -> A workspace-agent tests pass, followed by
+`go test ./... -count=1`, `go vet ./...`, the required
+`go test -race ./internal/app ./internal/tools -count=1` gate, frontend type/build, production
+`wails build`, and a live native production smoke of Chat Workspace/Agent menus over a tall
+Terminal/AI Commands area. The production app is left open on Chat.
+
+Telegram final-answer delivery verification 2026-07-21: regression tests cover exact multiline UI
+answer forwarding, guarded shell-result fallback for generic completion prose, progress-disabled
+final delivery, clearer task/stage/action/duration messages, and immediate/queued destination
+tracking. `go test ./... -count=1`, `go vet ./...`, the required
+`go test -race ./internal/app ./internal/tools -count=1` gate, frontend type/build, and production
+`wails build` pass. The same build moves context-compaction notices from Chat into Activity and
+filters legacy compaction cards on session load. The rebuilt app launches and responds normally.
+
+llama.cpp b10075 compatibility verification 2026-07-21: the installed InferenceBridge runtime is
+the current upstream b10075 build. Regression fixtures cover finish-reason -> usage/timings ->
+`[DONE]` ordering for text and tool-call streams, exact-build Doctor reporting, cached prompt tokens,
+and authoritative prompt/decode throughput. `go test ./... -count=1`, `go vet ./...`,
+`go test -race ./internal/llm ./internal/app ./internal/tools -count=1`, frontend type/build, and
+production `wails build` pass. The rebuilt app launches normally. See
+`docs/llamacpp-upstream-review-2026-07-21.md` for the remaining ownership-ranked work.
+
+CVE/PoC research routing incident verification 2026-07-21: the exact failed CVE-2026-50522 prompt
+now advertises required `web_search`/`fetch_url` and not the master skill; circuit-breaker pause flows
+into a final plain-language recovery report; its deterministic fallback hides internal metrics; and
+large project instructions compile to a bounded prompt excerpt while remaining readable on demand.
+`go test ./... -count=1`, `go vet ./...`, the required
+`go test -race ./internal/app ./internal/tools -count=1` gate, frontend type/build, and production
+`wails build` pass. The rebuilt app launches normally. See
+`docs/cve-web-research-routing-incident-2026-07-21.md`.
+
+Task-aware context packet M1 verification 2026-07-21: unrelated public research now receives
+`minimal_external_research` source pointers while workspace implementation receives the bounded
+`relevant_workspace` packet. Runs record context policy/source/prompt byte accounting in Logs/Brain;
+Settings explains source-read allowance versus the 16 KiB always-on cap; the former `MAULER.md`
+content is archived and the live file is a compatibility pointer. `go test ./... -count=1`,
+`go vet ./...`, `go test -race ./internal/app ./internal/tools -count=1`, frontend type/build, and
+production `wails build` pass. The rebuilt app launches normally. Continue M2-M5 in
+`docs/context-packet-reduction-implementation-plan-2026-07.md`.
+
+Production output: `C:\Users\richa\Desktop\TheMauler\build\bin\TheMauler.exe`.
+
+---
+
+## What to Build Next
+
+### IN PROGRESS: Built-in Bug Bounty Hunter and Chat workspace switcher
+
+The tracked integration is `docs/bug-bounty-agent-chat-workspace-integration-plan-2026-07.md`.
+The first native M0-M3 slice has landed: built-in prompt/definition, read-oriented toolset and
+action policy, high-confidence Auto routing, dynamic selectors, visible Chat Agent/Workspace menus,
+native existing/bounty folder selection, recent roots, workspace-sticky agent choice, and transient
+chat/todo/rollback/path-tab cleanup on switch.
+
+Next, finish the reliability and isolation edges before calling M0-M3 complete: add repeated
+paraphrase and hostile-content fixtures; record the exact agent definition/version in RunLedger;
+add named conversation checkpoint/resume and dirty-tab save/discard handling; and audit terminal,
+target, Engagement, and memory isolation through A -> B -> A. Then continue M4 WSTG/Engagement
+planning actions and fold M5 into the existing Files & Knowledge index. Do not create a second
+scanner, store, agent framework, or CLI-only workflow.
+
+### NEXT: Workbench cockpit UI cleanup
+
+The live-run UI cleanup tracker is `docs/workbench-cockpit-ui-cleanup-2026-07.md`. Direction:
+deduplicate profile/state/context telemetry into one status strip, keep chat for assistant speech,
+keep AI Commands for structured grouped tool history, keep Terminal as raw PTY output, make repeated
+commands collapse with `xN` health badges, make errors visually loud, add focus-run layout, promote
+target/VPN/shell identity, stabilize primary actions, and tone down the persistent green context bar.
+First pass landed: AI Commands groups consecutive similar rows and highlights error rows more
+strongly. Status strip, focus-run bottom expansion, target identity, stable composer actions, grouped
+session controls, and a first-class Doctor center page are now in place. Continue only with visual
+polish found during live testing; reliability/tools work should take priority.
+
+### NEXT: Keep the stability gate green, then continue U16
+
+Immediate Mauler-only order:
+1. Keep `go test -race ./internal/app ./internal/tools -count=1` as a required reliability gate.
+2. Live-smoke the race-clean build and inspect RunLedger for repeated terminal/tool loops.
+3. Continue compact-tool sanitation and U16 without reopening closed MAULER-AR items unless a
+   regression is reproduced.
+4. Prioritize Engagement evidence/finding/scope hardening while its runtime/UI context is fresh.
+
+Canonical issue register: `docs/agentic-reliability-issues-2026-07.md`.
+
+### NEXT: Native Files & Knowledge intelligence and split review
+
+The approved direction is `docs/repository-intelligence-parity-plan-2026-07.md`. Mauler currently
+indexes curated Memory and saved-session FTS, not arbitrary user-selected file/folder corpora. Add a native Go
+`internal/repoindex` service over the existing SQLite/RunLedger/control-plane foundations: streaming
+file hashing/chunking, broad text/code formats, no implicit per-file cap (`0` means unlimited),
+explicit skip/error manifests, FTS5 baseline, and optional InferenceBridge embeddings later.
+
+After the deterministic index is green, add one Chat scan card and deterministic read-only sharding
+through the existing bounded `task` runtime. Child findings must merge into immutable file/chunk
+evidence and cannot authorize mutation or widen scope. Do not add Python, LangGraph, a sidecar vector
+database, a second project store, or a prompt-only repository scanner. Immediate order is M0
+coverage fixtures, M1 manifest/FTS, M2 compact `memory` actions/UI oversight, then M3 split review.
+
+### PLANNED: Native LSP code intelligence
+
+The approved direction is `docs/lsp-code-intelligence-plan-2026-07.md`. Add a native Go LSP
+client/supervisor for local language servers, with one compact read-only `code_intel` tool and
+Monaco diagnostics/symbols/definition/reference/hover support. This complements Files & Knowledge,
+grep, native lint and builds; it does not replace them. No language server installed must remain a
+fully supported zero-regression path. Keep all operator setup in Settings > Code Intelligence,
+and do not call a language user-ready until setup/repair/removal works there. Preserve every
+workbench resize/persistence control, and do not add Python, LangGraph, a Node build system, a
+Node-based LSP sidecar or a second store. Start with fake-server/lifecycle fixtures after the index
+M0/M1 foundation, then land read-only Go/TypeScript support. Rename/code-action application comes
+last and must use existing control-plane scope, approval, snapshot, rollback and verification paths.
+
+### IN PROGRESS: Native agent control plane
+
+The current roadmap is `docs/mauler-agent-control-plane-improvement-plan-2026-07.md`. The first M1/M2
+narrow path landed 2026-07-15: sealed task contracts, SQLite/checkpoint persistence, a typed control
+phase machine separate from UI telemetry, plan-before-mutation enforcement for compact
+`read`/`write`/`edit`/`shell`, controller-owned deterministic verification, evidence-gated
+completion, and compact Logs oversight. The full static/race/production gate passed 2026-07-15.
+Next: live-smoke the local-model path, add M0 repeated-run scorecards, wire live user steering to
+linked contract revisions, then expand executable tool policy
+metadata through M3. Do not replace this with prompt-only state or a second orchestration service.
+
+### IN PROGRESS: Shiftgrid-inspired Engagement Grid
+
+The reviewed integration plan is `docs/shiftgrid-engagement-grid-integration-plan-2026-07.md`.
+Direction: port Shiftgrid's claim -> act -> observe -> evidence -> finish workflow semantics into a
+native Go/SQLite Mauler service, expose it through one compact `engagement` tool and a shared React
+operator page, and use a bundled skill only for procedural guidance. This integration must remain
+Go plus React/TypeScript: do not add Shiftgrid's Python/Docker service, a localhost sidecar/API
+adapter, or a second live project store. Read compatible workflow/checklist JSON directly in Go.
+Start with the domain/state-transition tests and Shiftgrid JSON importer, then wire the agent loop,
+UI, evidence, scope, claims, channels, and end-to-end evaluation in the plan's order.
+
+Native slices landed 2026-07-13: `internal/engagement` contains the attributed Shiftgrid definition
+loader, schema-v2 source/version/license pinning and calculated digests, allowlisted check-pack
+registry/applicability/quality/diff foundations, claim/observe/finish/advance transitions, endpoint
+creation/grouping, and deterministic per-endpoint check routing. SQLite schema v11 persists exact
+pinned workflow/checklist snapshots plus revisioned state and task-run claimant provenance; the
+shared service supports create/list/get/now/claim/observe/finish/advance/delete and emits core
+engagement ledger events. Reopen/resume,
+stale-write, silent-pack-replacement, migration, full Go/vet, engagement/store race, and app/tools
+race gates pass. The compact `engagement` model tool, run-derived claimant identity, bounded fresh
+prompt packet, authoritative locked project scope, Wails bindings, Home create/resume card, and the
+first React Grid operator page also landed on 2026-07-13. The Grid uses container-aware breakpoints
+so it remains usable when Explorer and Inspector constrain the center pane. Evidence/finding/scope
+hardening now stores hashed RunLedger/file provenance without copying raw bodies, distinguishes
+agent-composed summaries from raw proof, blocks unsupported vulnerable completion, gates finding
+confirmation on reproduction/raw evidence and screenshot-or-human-waiver readiness, and exposes
+shared evidence/finding oversight on the Grid page. Locked endpoint creation and `http_probe`
+targets use exact host/IP/CIDR/port/URL-prefix checks and record scope decisions in RunLedger.
+Desktop and Telegram/channel starts now persist stable claimant id/alias/origin, bounded `task`
+calls can receive one validated focused engagement assignment under a distinct child claimant, and
+native schema-versioned JSON export/import verifies pinned digests, keeps evidence paths portable,
+clears stale imported claims, and is exposed on the Grid page.
+Revision-safe heartbeats now keep desktop/channel/bounded-task claims alive without changing the
+work revision, release unfinished work on clean exit, retry snapshot conflicts, and leave crash
+recovery to expiry. Grid shows lane/heartbeat/countdown plus operator release, Telegram edits its
+progress message, and Logs shows persisted run origin/claimant. The shared available-work queue now
+keeps setup/summary gates sequential while exposing stable global/endpoint checks for parallel
+claimants through `engagement available`, bounded-task validation, Wails, and the Grid page.
+The first Go-native HTTP fixture suite verifies security-header and cookie-flag adapters against
+positive and fixed controls, and Benchmarks > Run Engagement Eval exercises create/claim/evidence,
+finding gates, restart/resume, endpoint/global completion, scope denial, and export/import parity.
+The Grid now uses a source-inspired project mini-app layout with persistent Workflow, grouped
+Checklist, expandable grouped Endpoints, Notes, Findings, and Evidence views. Project notes are
+revision-guarded SQLite state, survive native export/import, are shared through compact
+`get_notes`/`set_notes` actions, and contribute only a bounded excerpt to fresh run context.
+A reusable six-step guided setup wizard is now available from Home and Grid. It previews immutable
+scope, discovers bounded candidate artifact paths without reading or trusting their contents, runs
+provider and target readiness checks, creates the Grid, and prepares an editable first-run Chat
+draft without auto-sending it.
+The first Go-native Pack Library slice is available under Bench. Embedded packs remain read-only;
+personal and project packs use versioned JSON files. Clone/import/export/archive/restore update the
+catalog for new Grids only, malformed hand-edited packs are quarantined instead of blocking the
+catalog, and workflow/checklist ownership plus provenance/quality gates are enforced. See
+`docs/engagement-pack-library.md`. The form/advanced-JSON editor, version history/diffs, explicit
+Grid migration preview, curated WordPress pack, and pinned Nuclei adapters are next.
+Endpoint repeat-count controls, browser/shell scope handling, allowlisted remote pack-update
+approval, independent final review, and authorised live fixture/HTB smoke tests also remain.
+
+### NEXT: AI terminal <-> human parity + tooling fixes
+
+Prioritized, self-contained implementation tasks for making the agent drive the shared terminal
+"like a human" (a real VT screen model instead of a flat ANSI-stripped line log, OSC-133
+completion/exit-code detection, in-place screen-change detection, full keystroke vocabulary) plus
+tool-surface cleanup and Claude/Codex-style tooling upgrades live in
+`docs/ai-terminal-parity-and-tooling-fixes-2026-07.md`. P0-1 through P0-4 now have first-pass
+implementations: rendered agent-side screen, OSC-133 prompt/exit/cwd markers, in-place screen-change
+wakeups, and richer keystroke vocabulary. 2026-07-06 added command-delta terminal results,
+no raw history dump without grep, and AI Commands de-dup/error-status fixes. Continue terminal work
+only when live smoke tests show a real remaining gap.
+
+### LIVE-SMOKE: Voice / audio (STT + TTS, natural conversation)
+
+The shipped path is local Whisper push-to-talk plus Kokoro-first TTS with Piper fallback, streaming
+clauses, barge-in, worker health/restart, a hidden Windows worker, and the Kokoro voice dropdown.
+Live smoke on 2026-07-12 passed microphone capture, Whisper transcription, Kokoro playback, and
+health reporting. First Whisper use took about 30 seconds to load. Still live-test barge-in during a
+real generated reply and forced Piper fallback when those runtimes are available. Only then consider
+Silero VAD/open-mic; do not redesign the audio UI first.
+
+### LIVE-SMOKE: Telegram remote-control bot
+
+Full integration plan lives in `docs/telegram-bot-integration-plan-2026-07.md`. Direction: add a
+Go-native Telegram Bot API long-polling adapter inspired by HelixClaw's Rust implementation at
+`C:\Users\richa\Documents\HelixClaw\crates\helixclaw-channels\src\telegram.rs`, but keep TheMauler
+Go-only. The bot is a separate channel chat, not the desktop project chat, while still being able to
+select projects, start/stop runs, inspect facts/logs/files/artifacts, and drive the terminal through
+the existing unrestricted toolset and state machine. Voice notes should download via Telegram
+`getFile`, transcribe through the Mauler audio/STT path, and optionally reply with `sendVoice` /
+`sendAudio` once TTS is wired. First pass channel bus is in `internal/channelbus`: side chat is
+model-backed but project-isolated, explicit `/run` work queues when a project run is active, quick
+terminal chores can route through a `quick_action` lane, and the queue is durable in SQLite via
+`channel_work_queue`. First pass Telegram transport/runtime is implemented in `internal/telegram`
+and `internal/app/telegram_runtime.go`: direct Bot API client, long polling, update-offset
+persistence, allow-list/mention filtering, duplicate-message suppression, safe Telegram HTML
+formatting/chunking, fake-server tests, message send/delete, file lookup/download, voice/audio
+attachment routing, and queued-reply delivery. The frontend Telegram page shows chats, queue,
+status, raw events, manual send, and delete actions. Project selection, file/artifact browsing,
+Brain/plan/log access, trusted shared-terminal sends, edited progress messages, and real shared-
+runtime STT/TTS voice handling are implemented as of 2026-07-12. Remaining work is live Telegram
+smoke testing and HelixClaw settings import.
+
+### NEXT: Target tool registry (Claude-shaped, Hermes-friendly)
+
+The concrete ~22-tool target registry - one orthogonal tool per capability modeled on Claude Code's
+shape with Hermes function-calling conventions (snake_case, strict schema, minimal required) - lives
+in `docs/tool-registry-target-spec-2026-07.md`. It collapses ~40 tools to ~22 by merging eight
+families (read_*->`read`, todo_*->`todo_write`, browser_*->`browser`, subagent_*->`task`,
+sqlite_*->`sqlite`, skills_*->`skill`, legacy shell aliases->`shell`, and legacy terminal command names->`terminal_send`) and dropping
+the old model-facing shell alias; every dropped name becomes a `mode`/`type`/`action` arg so no capability is lost. Defines the
+`ops-lean` toolset the settings audit asks for. `apply_patch` is in the core set. Grade with
+`agent_eval` before/after. Includes a **future update** spec for real Chrome integration (extension +
+native-messaging bridge so the AI drives the user's logged-in browser) - the `browser` merge is the
+interim path.
+
+### NEXT: Settings + loop + benchmark audit (agentic reliability)
+
+Prioritized, evidence-backed fixes from a full audit of the live config, the agent loop, and the
+benchmark live in `docs/settings-loop-benchmark-audit-2026-07.md`. Current status: context shortfall
+is now a hard failure when the backend reports actual context below the profile request;
+non-InferenceBridge providers have been stripped from the live config; grammar constraints are
+disabled until a live probe proves they help. Reasoning Effort is coherent on no-think profiles as
+of 2026-07-12 via a short thinking-sibling pass followed by no-think tool execution. Still do: run
+real profile benchmarks and keep `agent_eval` as the regression gate.
+
+### NEXT: Agent-loop upgrade tier (Hermes / Claude-Code-class patterns)
+
+Implementable specs (files, signatures, algorithm, wiring anchors, tests, acceptance) live in
+`docs/agent-loop-upgrade-roadmap.md` (U1-U7), with the cross-project analysis in
+`docs/agent-loop-upgrade-plan-2026-06.md`. Order: U1 dynamic reasoning-effort tool -> U2 tool-result
+disk offload + `read_tool_result` -> U3 Doctor launch-flag/quant assertions -> U4 Go-native
+programmatic tool execution over the registry -> U5 graduated compaction ladder -> U6 externalized
+`PROGRESS.md` resume -> U7 grammar-constrained tool args (held on a live probe). Go-native runtime
+update: `docs/go-native-agent-runtime-update-2026-06-30.md` supersedes older Python-first
+`run_script` wording. Keep orchestration, validation, timing, cancellation, ledgering, prompt
+accounting, and program step execution in Go; Python is only workload code via shell/WSL when
+needed. This builds on the now-complete reliability roadmap (R1-R10). The HelixClaw mirror is
+`C:\Users\richa\Documents\HelixClaw\HELIXCLAW_AGENT_LOOP_UPGRADE.md`.
+
+Reliability-spine follow-up now lives in `docs/agent-loop-upgrade-roadmap.md` as U8-U13:
+deterministic tool/session state machine, live Run Facts/evidence prompt packet, critical-action
+verifier loop, phase-specific run tool routing, clickable Run evidence cockpit, and reliability
+benchmarks. First passes are in place for U8-U15: terminal/session state-machine guards,
+Run Facts/evidence prompt packets, verifier gates, phase routing, Run evidence cards,
+request-scoped execution-state packets, structured result contracts, and reliability benchmark
+counters. Continue by hardening the explicit Plan/Act/Observe/Reflect loop, live shell smoke tests,
+and the final lean tool registry.
+
+**HelixClaw-parity ports (U16-U23).** A direct code-read comparison of both agent cores
+(`docs/helixclaw-parity-comparison-2026-07.md`) found the remaining gap: HelixClaw is a hierarchical
+multi-agent OS (CEO -> supervisor actor -> typed workers, each planner->executor->observer with
+role-scoped tools); TheMauler is one hardened loop. Backport specs live in
+`docs/agent-loop-upgrade-roadmap.md` as U16-U23, in priority order: U16 every-turn message-structure
+repair (7-phase, from HelixClaw `session_repair.rs`) -> U20 tool permission classes -> U18 structural
+write-guards (protected paths / patch-size / file-count caps) -> U19 role-scoped tool sets -> U17
+verification-gate loop (build/test/lint gates that block completion) -> U21 plan->review completion
+rails -> U22 experience/tool-sequence learning -> U23 task-DAG dispatcher. Port selectively - do not
+regress Mauler's existing leads (tool-result offload, compaction ladder, loop-metrics anti-loop,
+`agent_eval` harness). HelixClaw source: `C:\Users\richa\Documents\HelixClaw\crates\helixclaw-agents\src\`.
+
+**Self-review loop for stable automated runs (S0-S4).** `docs/self-review-loop-plan-2026-07.md`
+supersedes and sequences U17 + U21 into one coherent review loop and adds the same-profile reviewer
+pass (S3) and orchestrator (S4). Key constraint: **no model swapping** - every review turn uses the
+run's active profile (the no-escalation cousin of R6). Before an autonomous run may report `done` it
+must pass S1 whole-task verify gate (build/test/lint) -> S2 completion rails (spec-coverage +
+deliverable-exists) -> S3 fresh-context read-only reviewer sub-pass, bounded by `MaxReviewCycles`.
+Order: S0 config/gateability -> S1 verify gate (ship alone first) -> S4 orchestrator -> S2 rails
+(advisory then blocking) -> S3 reviewer pass. When these land, mark U17/U21 done and point them here.
+
+### NEXT: Local model tuning and role-split evals
+
+Track the concrete tuning lanes in `docs/context-management-tracker.md`: benchmark `batch` /
+`ubatch`, Q4_K_S vs Q5_K_M, exact context-size fit, KV cache, flash-attn, sampler profiles,
+and MTP settings with TTFT/inter-token latency/tool-call validity/VRAM stability. Add a
+planner/executor/reviewer eval lane before making split-agent orchestration default, and measure
+whether the uncensored fine-tune improves autonomy or hurts tool discipline through hallucinated
+tools, repeated loops, invalid schemas, and weak evidence grounding. Do not recommend Q6_K on the
+RTX 3090; it OOMs at useful context sizes.
+
+### NEXT: Hermes-inspired "next level" agent foundation
+
+The first Hermes-agent foundation pass is now mostly landed: session recall, structured run state, todo/planner tools, local skills, toolsets, and post-run skill suggestions are implemented. Keep the remaining UI polish sections below; do not remove them.
+
+### NEXT: Brain / RunLedger memory architecture
+
+Track the "smarter over time without context bloat" redesign in `docs/brain-memory-ledger-tracker.md`. Direction: centralize all run/tool/model/UI logging through one RunLedger event spine, then derive task logs, Run views, memory extraction, reflection lessons, skill promotion, evidence pointers, and retrieval-planned prompt packets from that ledger. Core RunLedger producer slices, Brain inspection UI, and reviewable learning candidates are in place; continue with retrieval-planned prompt packets and ledger-backed Run polish. Do not grow prompts by dumping raw logs, full shell output, web pages, or whole skills; keep bulky data external and retrieve summaries/chunks on demand.
+
+### NEXT: Workspace/folder model redesign
+
+Explorer now has a first-pass VS Code-like split between **Agent Root** and browse-only **Open Folders**. The agent root remains the authoritative cwd for tools, shell, memory/session scope, and prompts; extra folders can be added to Explorer without changing cwd or clearing chat context. The Explorer also has a generic pentest/lab status card for target, VPN/interface, shell, latest artifact, and user-chosen folder scaffolding. Continue the redesign with recent/saved workspace files and richer lab run cards. See `docs/workspace-redesign-plan.md`.
+
+### Latest local-LLM compatibility work, researched 2026-07-21
+
+The full b9842-to-b10075 review and ownership map is in
+`docs/llamacpp-upstream-review-2026-07-21.md`. InferenceBridge already has the current b10075
+runtime installed. Mauler now reads llama.cpp streams through `[DONE]` so the usage/timings event
+that follows `finish_reason` is not lost; model-call evidence and benchmarks retain authoritative
+cache, prompt-throughput, and decode-throughput data. Doctor reports the exact managed llama.cpp
+build from InferenceBridge runtime status, with `/props` and `/health` fallbacks.
+
+P1 - Provider/tool-call compatibility hardening:
+- Send `stream_options.include_usage=true` on streaming OpenAI-compatible requests so token accounting works on current LM Studio/llama.cpp-style APIs. Status: implemented.
+- Send `parallel_tool_calls=false` by default when tools are present; TheMauler owns batching through tools such as `read_many`, and local Qwen reliability is better with sequential tool calls. Status: implemented.
+- For llama.cpp-compatible backends, send `parse_tool_calls=true` when tools are present so native tool parsing is requested instead of relying only on text repair. Status: implemented.
+- Expand Doctor for LM Studio native metadata: tool/function capability, reasoning metadata, and loaded context length. Status: first pass implemented; keep polishing as LM Studio API fields evolve.
+
+P2 - Backend/profile modernization:
+- Keep current integration work Mauler-side and use InferenceBridge as the supported local OpenAI-compatible runtime. Do not add new LM Studio, vLLM, or SGLang provider paths as part of current work.
+- Re-check default Qwen3.6 profile sampling against the official model card: thinking/general, coding, and non-thinking parameter families. Status: defaults updated so thinking general/coding use `presence_penalty=0.0`, non-thinking keeps `presence_penalty=1.5`.
+- Keep llama.cpp diagnostics current for `chat_format`, fallback templates, `parse_tool_calls`, reasoning output format, and experimental server-side built-in tools. Status: Doctor covers format/template and warns if dangerous server-side built-in file/shell tools appear enabled in `/props`.
+
+P3 - Hermes-style agent foundation follow-up:
+- Add bounded subagents for Researcher, Reviewer, Test/Fix, and Summarizer with profile/toolset/context/time/output contracts. Status: first pass implemented as `subagent_research`, `subagent_review`, `subagent_testfix`, and `subagent_summarize` tools with scratch history and budgets.
+- Add post-write verification: file mutation verifier plus optional LSP/diagnostic run after edits. Status: mutation verifier implemented; LSP diagnostics still planned.
+- Add promptware/secret-exfiltration guardrails for fetched docs, repo content, and tool results before passing them back into the model. Status: first pass implemented for all tool results; keep tuning patterns and UX.
+- Consider worktree-per-task isolation for high-risk autonomous changes. Status: planned.
+- Add regression tests for Hermes/Qwen XML tool-call examples and local-provider compatibility flags. Status: partial; compatibility flag tests and Hermes JSON `<tool_call>` tests added.
+
+1. **Bounded subagents** - add focused subagent runners for Researcher, Reviewer, Test/Fix, and Summarizer with explicit profile, toolset, timeout, context budget, and output contract. Status: first pass implemented as bounded subagent tools.
+2. **Doctor diagnostics** - one-click health report for provider reachability, duplicate LM Studio loads, context mismatch, shell backend, path translation, browser automation, memory DB, logs, and web search. Status: first pass backend/app surface appears present; verify UX in app and fill any missing checks.
+3. **Live in-run state updates** - structured run state exists in task logs and now streams into the bottom status bar during a run. Status: implemented; keep polishing state copy.
+4. **PDF/OCR document handling** - `read_pdf` now extracts text from text-based PDFs. Next: add OCR fallback or a clear scanned-PDF workflow for image-only PDFs. Status: text extraction implemented.
+5. **Sandbox shell backends** - keep local/WSL first, then add Docker and SSH execution backends for safer unrestricted work. Status: planned.
+6. **Skill import/marketplace later** - support direct URL/GitHub import once local skills are stable. Status: planned.
+
+### 2. Agent Controls Polish
+
+- Add a compact live run-state indicator, backed by live `mauler:run_state` events, so the user can see thinking/reading/editing/testing/recovering while a task is running. Status: implemented in the bottom status bar.
+- Add a first-class top-bar Doctor/Health action that opens/runs diagnostics without hunting through the Agent footer. Status: implemented.
+- Add collapsed side rails for Explorer and Agent panes so hidden panes remain discoverable after double-click collapse. Status: implemented.
+- Make guarded/tool/system outputs visually distinct in chat and logs, especially promptware guardrail notices. Status: implemented for chat guardrails and log guardrail severity.
+- Verify access preset UX in-app: Unrestricted, Balanced, and Offline copy/state should be obvious from the Agent tab.
+- Continue improving full-auto flow: mode selection, task budgets, safe-list interaction, and concise stop/report behavior when blocked.
+- Add visible explanation of Offline vs Balanced presets.
+- Add richer browser activity cards with screenshot preview links.
+- Add HTB/lab run cards that show target, shell backend, agent root, command phase, and latest scan/output artifact.
+
+### 3. Settings UX Polish
+
+- Add profile create/rename alongside duplicate/delete.
+- Add validation for empty profile names, invalid URLs, and numeric bounds.
+- The Image settings tab was added in the last session - verify it saves and loads correctly end-to-end.
+
+### 4. Local Provider Polish
+
+- Add a quick model picker that fills `model_id` from the selected provider's `/models` response (calls existing `ListModelsForProvider` binding).
+- Better error messages for unreachable LAN IPs, blocked firewalls, and missing `/v1` path.
+- Add a model health panel showing loaded model, context, quantization, TTFT, and tokens/sec when the provider exposes it.
+- Replace character-based context estimates with `/v1/chat/completions/input_tokens` preflight for the final composed local request, retaining the estimate only as a compatibility fallback.
+- Add capability-gated llama.cpp SSE replay only after InferenceBridge forwards the conversation/replay contract and Mauler has delta deduplication plus duplicate-tool-call prevention.
+- Consume llama.cpp speculative acceptance metrics in benchmarks after InferenceBridge exposes them safely; do not recommend MTP/draft settings from an assumed speed-up.
+- Consider per-request reasoning budgets and a Skip reasoning control only for explicitly selected thinking runs. Keep ordinary local chat, coding, and tool turns no-thinking.
+
+### 5. Web Tools Polish
+
+- Prefer a configured local SearXNG instance for private search.
+- Keep DuckDuckGo as no-key fallback and Brave as optional API-key mode.
+- Add result caching and source cards in the agent panel.
+- Add browser wait/navigation helpers and optional visible-browser mode for inspecting automation live.
+- Add tool-result summaries so large web/shell outputs do not bloat the chat context.
+- Extend lazy context retrieval beyond master skills: apply outline/query/capped retrieval patterns to large web, shell, session, and document results.
+- Add a run replay/debug view for reviewing agent decisions, tool calls, denials, and stop reasons.
+- Terminal follow-up: add an explicit AI pause/take-over control, command attachment/pinning for scan artifacts, and richer long-running command progress cards.
+
+---
+
+## Known Gotchas
+
+1. Always run `wails dev` and `wails build` from `C:\Users\richa\Desktop\TheMauler`.
+2. Do not launch a plain `go build` binary such as root `mauler.exe`; Wails will show a build-tags dialog. Use `wails build -clean` or `.\build.ps1`, then run `build\bin\TheMauler.exe`.
+3. On Linux/WSL, use `./build.sh` and run `build/bin/TheMauler`; do not run a plain `go build` binary.
+4. `frontend/dist/` must exist for Wails packaging. `.\build.ps1` and `./build.sh` handle this.
+5. Shell execution is platform-aware. On Windows auto uses PowerShell; choose `wsl` in Settings when commands should run inside WSL. Shared terminal mode only applies to WSL/bash backends; PowerShell/cmd shell tool calls fall back to isolated execution. `terminal_send` is for live terminal interaction; `http_probe`/`shell` are for independent HTTP/webshell/curl checks. File tools normalize common Windows/WSL path forms.
+6. `ProfilesFile.Profiles` is `map[string]Profile`.
+7. `encoding/base64` in `app.go` is used by `EncodeFileBase64`.
+8. There is no `.git` metadata in this workspace right now, so use direct file inspection rather than git diff/status.
+9. Do not delete working code just to simplify a change. Preserve good code and existing capabilities unless there is a very strong, explicit reason to remove them; prefer additive, guarded, or compatibility-preserving edits.
+10. Use UTF-8 or ASCII only; do not introduce mojibake.

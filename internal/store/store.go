@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 12
 
 func DefaultPath() (string, error) {
 	dir, err := settings.ConfigDir()
@@ -96,9 +96,52 @@ func runMigration(db *sql.DB, version int) error {
 		return migrateV8ChannelWorkQueue(db)
 	case 9:
 		return migrateV9AppState(db)
+	case 10:
+		return migrateV10Engagements(db)
+	case 11:
+		return migrateV11TaskRunClaimants(db)
+	case 12:
+		return migrateV12TaskRunControlPlane(db)
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}
+}
+
+func migrateV12TaskRunControlPlane(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN contract_json TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_runs ADD COLUMN contract_digest TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_runs ADD COLUMN control_phase TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_runs ADD COLUMN control_state_json TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_task_runs_control_phase ON task_runs(control_phase);
+CREATE INDEX IF NOT EXISTS idx_task_runs_contract_digest ON task_runs(contract_digest);
+PRAGMA user_version=12;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV11TaskRunClaimants(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN claimant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_runs ADD COLUMN claimant_alias TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_runs ADD COLUMN origin TEXT NOT NULL DEFAULT '';
+PRAGMA user_version=11;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func migrateV1SessionRecall(db *sql.DB) error {
@@ -407,6 +450,41 @@ CREATE TABLE IF NOT EXISTS app_state (
   updated_at TEXT NOT NULL
 );
 PRAGMA user_version=9;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV10Engagements(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS engagements (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  workflow_version TEXT,
+  workflow_digest TEXT,
+  checklist_id TEXT NOT NULL,
+  checklist_version TEXT,
+  checklist_digest TEXT,
+  workflow_json TEXT NOT NULL,
+  checklist_json TEXT NOT NULL,
+  state_json TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_engagements_workspace ON engagements(workspace, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_engagements_updated_at ON engagements(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_engagements_pack ON engagements(workflow_id, workflow_version, checklist_id, checklist_version);
+
+PRAGMA user_version=10;
 `); err != nil {
 		_ = tx.Rollback()
 		return err

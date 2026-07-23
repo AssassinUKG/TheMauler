@@ -1,0 +1,28 @@
+{
+  "name": "gemma4-e4b",
+  "family": "gemma4",
+  "huggingface_repo": "google/gemma-4-E4B-it",
+  "backend": "llama.cpp",
+  "quant": "Q4/Q8-class",
+  "adapter": "gemma4",
+  "tool_protocol": "native-openai",
+  "chat_template": "embedded-gguf-jinja",
+  "requires_jinja": true,
+  "supports": {
+    "tools": true,
+    "thinking": true,
+    "mtp": false
+  },
+  "defaults": {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 64,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "repeat_penalty": 1.0
+  },
+  "recommended_ctx": 65536,
+  "kv_type_k": "q8_0",
+  "kv_type_v": "q8_0",
+  "notes": "Use the GGUF's embedded Gemma 4 Jinja template. Native function calling and thinking on/off are supported; Mauler keeps no-thinking as the tool-heavy default. Prefer Q4_K_M over Q8_0 unless a repeated quality test proves the extra VRAM is useful."
+}

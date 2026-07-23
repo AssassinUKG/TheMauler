@@ -213,21 +213,51 @@
 }
 
 .resize-handle {
+  position: relative;
   z-index: 4;
-  min-width: 4px;
+  min-width: 6px;
   cursor: col-resize;
   background: var(--border);
   transition: background var(--transition);
+  outline: none;
 }
 
-.resize-handle:hover {
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  width: 3px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, .42);
+  transform: translateY(-50%);
+}
+
+.resize-handle:hover,
+.resize-handle:focus-visible {
   background: var(--accent);
+}
+
+.resize-handle:hover::after,
+.resize-handle:focus-visible::after {
+  background: var(--accent-text);
 }
 
 .resize-handle.disabled {
   min-width: 0;
   cursor: default;
   background: transparent;
+}
+
+.resize-handle.disabled::after {
+  display: none;
+}
+
+html.workbench-resizing-col,
+html.workbench-resizing-col * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 /* ── Terminal panel (bottom, above status bar) ──────── */
@@ -312,15 +342,36 @@
 }
 
 .terminal-resize-handle {
+  position: relative;
   flex-shrink: 0;
-  height: 4px;
+  height: 8px;
   background: var(--border);
   cursor: row-resize;
   z-index: 4;
   transition: background var(--transition);
+  outline: none;
 }
-.terminal-resize-handle:hover {
+
+.terminal-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  width: 48px;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, .50);
+  transform: translateX(-50%);
+}
+
+.terminal-resize-handle:hover,
+.terminal-resize-handle:focus-visible {
   background: var(--accent);
+}
+
+.terminal-resize-handle:hover::after,
+.terminal-resize-handle:focus-visible::after {
+  background: var(--accent-text);
 }
 
 /* ── Center pane & tabs ─────────────────────────────── */
@@ -486,7 +537,7 @@
 }
 
 .resize-handle {
-  min-width: 5px;
+  min-width: 6px;
   background: var(--border);
 }
 

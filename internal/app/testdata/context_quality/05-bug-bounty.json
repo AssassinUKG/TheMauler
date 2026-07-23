@@ -1,0 +1,20 @@
+{
+  "id": "bug-bounty-assessment",
+  "category": "Bug Bounty Hunter assessment",
+  "prompts": [
+    "Review these post-recon JavaScript endpoints and HTTP headers as a bug bounty manual-assessment plan; search public documentation only when useful.",
+    "As a bug bounty hunter, analyse the supplied Burp requests and prioritise manual checks without claiming vulnerabilities; use public docs when needed.",
+    "Create a post-recon web application pentest plan from the observed APIs and authentication flow, clearly separating observations from hypotheses."
+  ],
+  "expected_policy": "relevant_workspace",
+  "expected_class": "relevant",
+  "expected_routes": ["bug-bounty-assessment"],
+  "expected_modes": ["Bug Bounty Hunter"],
+  "required_sources": ["AGENTS.md", "non-negotiables.md", "feature-catalog.md"],
+  "forbidden_sources": ["MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["read", "grep"],
+  "forbidden_tools": ["write", "edit", "shell", "run_script", "terminal_send"],
+  "required_prompt_text": ["never invent vulnerabilities", "untrusted data"],
+  "forbidden_prompt_text": [],
+  "max_project_tokens": 4000
+}

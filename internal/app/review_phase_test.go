@@ -23,6 +23,23 @@ func TestReviewPhaseProceedsWhenAllPass(t *testing.T) {
 	}
 }
 
+func TestVerifyGateSkipsMissingVerifierWhenContractDoesNotRequireOne(t *testing.T) {
+	withTempWorkingDir(t)
+	cfg := settings.DefaultSettings()
+	cfg.Agents.ReviewLoop.VerifyCommands = nil
+	run := startTaskRun("replace TODO with DONE", "Builder", "profile", "model")
+	run.Tools = append(run.Tools, TaskToolEvent{Name: "edit", Status: "done"})
+	if err := (&App{}).initializeRunControlPlane(&run, &cfg, AgentMode{Name: "Builder"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if controlNeedsProjectVerification(run) {
+		t.Fatal("plain-text fixture unexpectedly requires a project verifier")
+	}
+	if verdicts := (&App{}).runVerifyGate(context.Background(), &run, &cfg); len(verdicts) != 0 {
+		t.Fatalf("missing optional verifier produced verdicts: %#v", verdicts)
+	}
+}
+
 func TestReviewPhaseLoopsOnBlockingVerdict(t *testing.T) {
 	withTempWorkingDir(t)
 	mustWriteFile(t, "go.mod", "module example.com/reviewphase\n\ngo 1.23\n")

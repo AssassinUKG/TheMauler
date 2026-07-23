@@ -169,6 +169,18 @@ func TestDetectToolCycle(t *testing.T) {
 	}
 }
 
+func TestDetectToolCycleDoesNotTreatProgressingPlanUpdatesAsALoop(t *testing.T) {
+	tools := []TaskToolEvent{
+		{Name: "todo_write", Input: `{"action":"update","id":"todo-1","status":"done"}`},
+		{Name: "write", Input: `{"path":"generated/long.txt","content":"Line 1"}`},
+		{Name: "todo_write", Input: `{"action":"update","id":"todo-2","status":"done"}`},
+		{Name: "write", Input: `{"path":"generated/long.txt","content":"Line 2","append":true}`},
+	}
+	if detected, period := detectToolCycle(tools); detected || period != 0 {
+		t.Fatalf("progressing plan/action sequence detected as cycle: (%t,%d)", detected, period)
+	}
+}
+
 func TestLoopStalledPredicate(t *testing.T) {
 	cases := []struct {
 		name string
@@ -228,24 +240,35 @@ func TestLoopMetricsCountsReviewGateFailures(t *testing.T) {
 
 func TestCircuitBreakerInjectsOnceThenPauses(t *testing.T) {
 	metrics := LoopMetrics{StabilityScore: 0, RepeatedToolInputs: 3}
-	if got := decideLoopCircuitBreaker(metrics, false, 0, 3); got != loopCircuitBreakerInject {
+	if got := decideLoopCircuitBreaker(metrics, false, LoopMetrics{}, 0, 3); got != loopCircuitBreakerInject {
 		t.Fatalf("first stalled turn = %q, want inject", got)
 	}
-	if got := decideLoopCircuitBreaker(metrics, true, 3, 3); got != loopCircuitBreakerNone {
+	if got := decideLoopCircuitBreaker(metrics, true, metrics, 3, 3); got != loopCircuitBreakerNone {
 		t.Fatalf("same turn after injection = %q, want none", got)
 	}
-	if got := decideLoopCircuitBreaker(metrics, true, 3, 4); got != loopCircuitBreakerPause {
+	worse := metrics
+	worse.RepeatedToolInputs++
+	if got := decideLoopCircuitBreaker(worse, true, metrics, 3, 4); got != loopCircuitBreakerPause {
 		t.Fatalf("next stalled tool turn = %q, want pause", got)
 	}
 	recovered := LoopMetrics{StabilityScore: 60}
-	if got := decideLoopCircuitBreaker(recovered, true, 3, 4); got != loopCircuitBreakerReset {
+	if got := decideLoopCircuitBreaker(recovered, true, metrics, 3, 4); got != loopCircuitBreakerReset {
 		t.Fatalf("recovered turn = %q, want reset", got)
+	}
+}
+
+func TestCircuitBreakerResetsAfterNovelOutcomeEvenWhenHistoricalRepeatRemains(t *testing.T) {
+	trip := LoopMetrics{StabilityScore: 35, RepeatedIdenticalOutcomes: 2}
+	current := trip
+	current.StabilityScore = 40
+	if got := decideLoopCircuitBreaker(current, true, trip, 7, 8); got != loopCircuitBreakerReset {
+		t.Fatalf("novel corrective action = %q, want reset", got)
 	}
 }
 
 func TestCircuitBreakerPromptIsActionable(t *testing.T) {
 	prompt := loopCircuitBreakerPrompt(LoopMetrics{StabilityScore: 0, RepeatedToolInputs: 3, ToolErrors: 1})
-	for _, want := range []string{"Loop-health is critical", "Stop repeating", "DIFFERENT action", "confirmed target IP", "Do not rerun"} {
+	for _, want := range []string{"Loop-health is critical", "Stop repeating", "DIFFERENT action", "web_search/fetch_url", "methodology, not current evidence", "confirmed target IP", "Do not rerun"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}

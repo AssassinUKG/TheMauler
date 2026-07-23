@@ -1,0 +1,20 @@
+{
+  "id": "wsl-terminal-operation",
+  "category": "WSL/terminal operational task",
+  "prompts": [
+    "Fix the WSL terminal startup path validation for CreateProcessCommon chdir failures and verify the shared terminal behavior.",
+    "Repair Mauler when a moved workspace makes WSL start at root, preserving the visible shared terminal.",
+    "Patch the terminal startup fallback so an invalid Windows workspace is not passed to wsl.exe --cd."
+  ],
+  "expected_policy": "relevant_workspace",
+  "expected_class": "relevant",
+  "expected_routes": ["terminal-and-wsl"],
+  "expected_modes": ["Auto", "Fixer"],
+  "required_sources": ["AGENTS.md", "non-negotiables.md", "troubleshooting.md"],
+  "forbidden_sources": ["MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["shell", "terminal_read", "terminal_send"],
+  "forbidden_tools": [],
+  "required_prompt_text": ["CreateProcessCommon"],
+  "forbidden_prompt_text": [],
+  "max_project_tokens": 4000
+}

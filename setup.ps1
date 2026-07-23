@@ -144,10 +144,13 @@ if ($python) {
 		$issues.Add("Kokoro Python packages missing")
         if (Confirm-Install "Kokoro Python packages") {
             & $python -m pip install --upgrade pip
-            & $python -m pip install "kokoro>=0.9.4" soundfile
+            & $python -m pip install "numpy<2.4" "kokoro>=0.9.4" soundfile
 			$actions.Add("Kokoro Python packages installed")
 		}
 	}
+	# Kokoro may change shared numerical dependencies, so verify Whisper again
+	# after any Kokoro repair rather than relying on the earlier probe.
+	$whisperOk = (Test-PythonModule $python "whisper")
 	if ($whisperOk -or (Test-Command "whisper")) {
 		Write-Ok "Whisper STT detected"
 	} else {
@@ -155,7 +158,10 @@ if ($python) {
 		$issues.Add("Whisper STT missing for Telegram voice-in")
 		if (Confirm-Install "Whisper STT Python package") {
 			& $python -m pip install --upgrade pip
-			& $python -m pip install openai-whisper
+			# numba (used by openai-whisper) currently requires NumPy below 2.4.
+			# Pin it because Kokoro's dependency resolution may otherwise upgrade
+			# NumPy and silently break a previously working Whisper installation.
+			& $python -m pip install "numpy<2.4" openai-whisper
 			$actions.Add("Whisper STT Python package installed")
 		}
 	}

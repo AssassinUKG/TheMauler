@@ -7,6 +7,7 @@ type GenerationParams struct {
 	TopK            int     `toml:"top_k" json:"top_k"`
 	MinP            float64 `toml:"min_p" json:"min_p"`
 	PresencePenalty float64 `toml:"presence_penalty" json:"presence_penalty"`
+	RepeatPenalty   float64 `toml:"repeat_penalty" json:"repeat_penalty"`
 	MaxTokens       int     `toml:"max_tokens" json:"max_tokens"`
 	Seed            int64   `toml:"seed" json:"seed"` // -1 = random
 }
@@ -129,7 +130,7 @@ type ReviewLoopConfig struct {
 
 // AgentsConfig holds auto-agent routing and safety settings.
 type AgentsConfig struct {
-	ModeOverride          string                     `toml:"mode_override" json:"mode_override"` // Auto | Manual | Builder | Fixer | Reviewer | Researcher | Planner
+	ModeOverride          string                     `toml:"mode_override" json:"mode_override"` // Auto | Manual | Builder | Fixer | Reviewer | Researcher | Planner | Bug Bounty Hunter
 	DefaultAutonomy       string                     `toml:"default_autonomy" json:"default_autonomy"`
 	OfflineOnly           bool                       `toml:"offline_only" json:"offline_only"`
 	MaxToolCalls          int                        `toml:"max_tool_calls" json:"max_tool_calls"`
@@ -146,6 +147,14 @@ type WorkspaceFolder struct {
 	Path string `toml:"path" json:"path"`
 	Name string `toml:"name" json:"name"`
 	Role string `toml:"role" json:"role"` // root | notes | loot | scans | scripts | reference | folder
+}
+
+// WorkspacePreference keeps small UI/runtime choices scoped to one canonical
+// workspace so an agent selected for security work does not leak into another
+// project. Conversation and evidence data remain in their existing stores.
+type WorkspacePreference struct {
+	Path      string `toml:"path" json:"path"`
+	AgentMode string `toml:"agent_mode" json:"agent_mode"`
 }
 
 type LabContext struct {
@@ -192,18 +201,19 @@ type EnvironmentConfig struct {
 
 // ContextConfig holds context window and compaction settings.
 type ContextConfig struct {
-	AutoInjectFile              bool              `toml:"auto_inject_file" json:"auto_inject_file"`
-	AutoInjectCursor            bool              `toml:"auto_inject_cursor" json:"auto_inject_cursor"`
-	CompactionAt                float64           `toml:"compaction_at" json:"compaction_at"` // fraction, default 0.85
-	ShowCompaction              bool              `toml:"show_compaction" json:"show_compaction"`
-	MAULERMDPath                string            `toml:"mauler_md_path" json:"mauler_md_path"` // explicit single file; empty = layered auto-discover
-	ProjectDocMaxBytes          int               `toml:"project_doc_max_bytes" json:"project_doc_max_bytes"`
-	ProjectDocFallbackFilenames []string          `toml:"project_doc_fallback_filenames" json:"project_doc_fallback_filenames"`
-	WorkspaceDir                string            `toml:"workspace_dir" json:"workspace_dir"`
-	OpenFolders                 []WorkspaceFolder `toml:"open_folders" json:"open_folders"`
-	Lab                         LabContext        `toml:"lab" json:"lab"`
-	ActiveLabProfile            string            `toml:"active_lab_profile" json:"active_lab_profile"`
-	LabProfiles                 []LabProfile      `toml:"lab_profiles" json:"lab_profiles"`
+	AutoInjectFile              bool                  `toml:"auto_inject_file" json:"auto_inject_file"`
+	AutoInjectCursor            bool                  `toml:"auto_inject_cursor" json:"auto_inject_cursor"`
+	CompactionAt                float64               `toml:"compaction_at" json:"compaction_at"` // fraction, default 0.85
+	ShowCompaction              bool                  `toml:"show_compaction" json:"show_compaction"`
+	MAULERMDPath                string                `toml:"mauler_md_path" json:"mauler_md_path"` // explicit single file; empty = layered auto-discover
+	ProjectDocMaxBytes          int                   `toml:"project_doc_max_bytes" json:"project_doc_max_bytes"`
+	ProjectDocFallbackFilenames []string              `toml:"project_doc_fallback_filenames" json:"project_doc_fallback_filenames"`
+	WorkspaceDir                string                `toml:"workspace_dir" json:"workspace_dir"`
+	OpenFolders                 []WorkspaceFolder     `toml:"open_folders" json:"open_folders"`
+	WorkspacePreferences        []WorkspacePreference `toml:"workspace_preferences" json:"workspace_preferences"`
+	Lab                         LabContext            `toml:"lab" json:"lab"`
+	ActiveLabProfile            string                `toml:"active_lab_profile" json:"active_lab_profile"`
+	LabProfiles                 []LabProfile          `toml:"lab_profiles" json:"lab_profiles"`
 }
 
 // MemoryConfig holds durable project-memory settings.

@@ -33,6 +33,21 @@ func TestPromptBudgetSnapshotHashesAndWarnsOverTwentyPercent(t *testing.T) {
 	}
 }
 
+func TestHashToolDefsIsOrderIndependent(t *testing.T) {
+	params := json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)
+	read := llm.ToolDef{Type: "function", Function: llm.ToolFunctionDef{Name: "read", Description: "Read", Parameters: params}}
+	grep := llm.ToolDef{Type: "function", Function: llm.ToolFunctionDef{Name: "grep", Description: "Search", Parameters: params}}
+
+	forward := hashToolDefs([]llm.ToolDef{read, grep})
+	reverse := hashToolDefs([]llm.ToolDef{grep, read})
+	if forward == "" || reverse == "" {
+		t.Fatal("expected non-empty tool-schema hashes")
+	}
+	if forward != reverse {
+		t.Fatalf("tool-schema hash changed with declaration order: %q != %q", forward, reverse)
+	}
+}
+
 func TestPromptBudgetSnapshotWarnsOnAbsoluteTargets(t *testing.T) {
 	largeDescription := stringsRepeat("schema ", 1400)
 	toolParams := json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)
@@ -84,14 +99,26 @@ func TestModelCallObserverRecordsTimingMetadata(t *testing.T) {
 	obs.startedAt = time.Now().Add(-30 * time.Millisecond)
 	obs.observe(llm.Delta{Content: "a"})
 	time.Sleep(time.Millisecond)
-	obs.observe(llm.Delta{Content: "b", Usage: &llm.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}})
-	obs.record(&run, &llm.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}, "ok", nil)
+	usage := &llm.Usage{
+		PromptTokens:              10,
+		CompletionTokens:          2,
+		TotalTokens:               12,
+		CachedPromptTokens:        4,
+		PromptTokensPerSecond:     1031.5,
+		CompletionTokensPerSecond: 29.86,
+	}
+	obs.observe(llm.Delta{Content: "b", Usage: usage})
+	obs.record(&run, usage, "ok", nil)
 
 	var found bool
 	for _, event := range run.Events {
 		if event.Kind == "model_call" {
 			found = true
-			if !strings.Contains(event.Detail, "ttft_ms=") || !strings.Contains(event.Detail, "tool_schema_hash=tools") {
+			if !strings.Contains(event.Detail, "ttft_ms=") ||
+				!strings.Contains(event.Detail, "tool_schema_hash=tools") ||
+				!strings.Contains(event.Detail, "cached_prompt_tokens=4") ||
+				!strings.Contains(event.Detail, "prompt_tokens_per_second=1031.50") ||
+				!strings.Contains(event.Detail, "tokens_per_second=29.86") {
 				t.Fatalf("model_call detail missing metrics: %s", event.Detail)
 			}
 		}

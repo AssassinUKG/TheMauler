@@ -97,8 +97,10 @@ func recordSynthesis(audio Audio, err error) {
 func Status() RuntimeStatus {
 	status := RuntimeStatus{WorkerState: "stopped"}
 	globalKokoroWorker.mu.Lock()
+	if globalKokoroWorker.state != "" {
+		status.WorkerState = globalKokoroWorker.state
+	}
 	if globalKokoroWorker.cmd != nil && globalKokoroWorker.cmd.Process != nil {
-		status.WorkerState = "ready"
 		status.WorkerPID = globalKokoroWorker.cmd.Process.Pid
 	}
 	globalKokoroWorker.mu.Unlock()
@@ -115,6 +117,64 @@ func RestartWorker() {
 	globalKokoroWorker.mu.Lock()
 	globalKokoroWorker.stop()
 	globalKokoroWorker.mu.Unlock()
+	runtimeHealth.Lock()
+	runtimeHealth.lastError = ""
+	runtimeHealth.Unlock()
+}
+
+// WarmKokoro starts the persistent Kokoro runtime in the background and loads
+// the selected voice family before the next spoken reply.
+func WarmKokoro(python, voice string) {
+	python = ResolveKokoroPython(python)
+	voice = firstNonEmpty(voice, os.Getenv("MAULER_KOKORO_VOICE"), DefaultKokoroVoice)
+	runtimeHealth.Lock()
+	runtimeHealth.lastError = ""
+	runtimeHealth.Unlock()
+	globalKokoroWorker.mu.Lock()
+	if globalKokoroWorker.state == "ready" && globalKokoroWorker.python == python {
+		globalKokoroWorker.mu.Unlock()
+		return
+	}
+	globalKokoroWorker.state = "loading"
+	globalKokoroWorker.mu.Unlock()
+	go func() {
+		globalKokoroWorker.mu.Lock()
+		err := globalKokoroWorker.ensureStarted(python, voice)
+		if err != nil {
+			globalKokoroWorker.stop()
+			globalKokoroWorker.state = "error"
+		}
+		globalKokoroWorker.mu.Unlock()
+		runtimeHealth.Lock()
+		if err != nil {
+			runtimeHealth.lastError = err.Error()
+		} else {
+			runtimeHealth.lastError = ""
+		}
+		runtimeHealth.Unlock()
+	}()
+}
+
+// RestartKokoro performs the action promised by the UI: stop the old worker,
+// clear its stale error, and immediately warm a replacement.
+func RestartKokoro(python, voice string) {
+	globalKokoroWorker.mu.Lock()
+	globalKokoroWorker.stop()
+	globalKokoroWorker.mu.Unlock()
+	WarmKokoro(python, voice)
+}
+
+func ResolveKokoroPython(configured string) string {
+	for _, candidate := range []string{configured, os.Getenv("MAULER_KOKORO_PYTHON"), "python", "py", "python3"} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path
+		}
+	}
+	return ""
 }
 
 func ShutdownWorkers() {
@@ -233,6 +293,7 @@ type kokoroWorkerRequest struct {
 
 type kokoroWorkerResponse struct {
 	OK    bool   `json:"ok"`
+	Ready bool   `json:"ready,omitempty"`
 	WAV   string `json:"wav,omitempty"`
 	Error string `json:"error,omitempty"`
 	Voice string `json:"voice,omitempty"`
@@ -245,6 +306,7 @@ type kokoroWorker struct {
 	stdout *json.Decoder
 	python string
 	script string
+	state  string
 }
 
 var globalKokoroWorker kokoroWorker
@@ -268,7 +330,7 @@ func synthesizeKokoroWorker(ctx context.Context, text string, opts TTSOptions) (
 func (w *kokoroWorker) synthesize(ctx context.Context, python, text, voice string, speed float64) (Audio, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.ensureStarted(python); err != nil {
+	if err := w.ensureStarted(python, voice); err != nil {
 		w.stop()
 		return Audio{}, err
 	}
@@ -318,16 +380,21 @@ func (w *kokoroWorker) synthesize(ctx context.Context, python, text, voice strin
 	}
 }
 
-func (w *kokoroWorker) ensureStarted(python string) error {
-	if w.cmd != nil && w.cmd.Process != nil && w.python == python {
+func (w *kokoroWorker) ensureStarted(python, voice string) error {
+	python = ResolveKokoroPython(python)
+	if python == "" {
+		return fmt.Errorf("Python for Kokoro is not available")
+	}
+	if w.cmd != nil && w.cmd.Process != nil && w.python == python && w.state == "ready" {
 		return nil
 	}
 	w.stop()
+	w.state = "loading"
 	script, err := ensureKokoroWorkerScript()
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(python, "-u", script)
+	cmd := exec.Command(python, "-u", script, firstNonEmpty(voice, DefaultKokoroVoice))
 	hideChildProcessWindow(cmd)
 	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
 	stdin, err := cmd.StdinPipe()
@@ -345,11 +412,35 @@ func (w *kokoroWorker) ensureStarted(python string) error {
 		_ = stdin.Close()
 		return fmt.Errorf("start kokoro worker: %w", err)
 	}
+	decoder := json.NewDecoder(stdout)
+	type readyResult struct {
+		resp kokoroWorkerResponse
+		err  error
+	}
+	readyCh := make(chan readyResult, 1)
+	go func() {
+		var resp kokoroWorkerResponse
+		err := decoder.Decode(&resp)
+		readyCh <- readyResult{resp: resp, err: err}
+	}()
+	select {
+	case result := <-readyCh:
+		if result.err != nil || !result.resp.OK || !result.resp.Ready {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+			return fmt.Errorf("load kokoro worker: %v %s %s", result.err, result.resp.Error, truncate(strings.TrimSpace(stderr.String()), 800))
+		}
+	case <-time.After(120 * time.Second):
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return fmt.Errorf("loading Kokoro voice %s timed out", firstNonEmpty(voice, DefaultKokoroVoice))
+	}
 	w.cmd = cmd
 	w.stdin = stdin
-	w.stdout = json.NewDecoder(stdout)
+	w.stdout = decoder
 	w.python = python
 	w.script = script
+	w.state = "ready"
 	return nil
 }
 
@@ -365,6 +456,7 @@ func (w *kokoroWorker) stop() {
 	w.stdin = nil
 	w.stdout = nil
 	w.python = ""
+	w.state = "stopped"
 }
 
 func ensureKokoroWorkerScript() (string, error) {
@@ -402,6 +494,10 @@ def tensor_to_numpy(audio):
     if hasattr(audio, "detach"):
         audio = audio.detach().cpu().numpy()
     return np.asarray(audio, dtype=np.float32)
+
+warm_voice = (sys.argv[1] if len(sys.argv) > 1 else "af_heart").strip()
+get_pipeline(warm_voice)
+print(json.dumps({"ok": True, "ready": True, "voice": warm_voice}), flush=True)
 
 for line in sys.stdin:
     try:

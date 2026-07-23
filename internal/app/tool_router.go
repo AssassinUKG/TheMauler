@@ -90,6 +90,12 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 	if len(selected) < 6 {
 		addReadTools(selected)
 	}
+	if looksPublicExploitLookup(lower) {
+		// A methodology skill is not current vulnerability evidence. Keeping the
+		// broad master skill in this narrow route encouraged local models to reread
+		// it instead of calling web_search/fetch_url.
+		delete(selected, "skill")
+	}
 	return selected
 }
 
@@ -139,6 +145,7 @@ func addAlwaysAvailableTools(selected map[string]bool) {
 		"read_tool_result",
 		"skill",
 		"todo_write",
+		"engagement",
 	} {
 		selected[name] = true
 	}
@@ -304,7 +311,7 @@ func looksReportOrDocsTask(lower string) bool {
 
 func looksCodeOrWorkspaceTask(lower string) bool {
 	return looksCodebaseTask(lower) || hasAny(lower,
-		"fix", "bug", "implement", "patch", "refactor", "test", "tests", "build",
+		"fix", "repair", "restore", "bug", "implement", "patch", "refactor", "update", "edit", "change", "modify", "wire", "test", "tests", "build",
 		"compile", "lint", "typecheck", "type-check", "function", "class", "component",
 		"file", "files", "folder", "directory", "grep", "search", "find in", "read ",
 	)

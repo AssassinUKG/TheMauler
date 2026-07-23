@@ -52,6 +52,8 @@ type telegramRuntime struct {
 	lastProgress   map[int64]time.Time
 	progressIDs    map[int64]int64
 	progressChats  map[int64]bool
+	progressTasks  map[int64]string
+	progressStarts map[int64]time.Time
 	progressChatID int64
 	lastPoll       time.Time
 	lastUpdate     time.Time
@@ -84,17 +86,19 @@ func (a *App) restartTelegramRuntime(cfg settings.TelegramConfig) {
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	runtime := &telegramRuntime{
-		app:           a,
-		client:        telegram.NewClient(cfg.Token),
-		cfg:           cfg,
-		lastProgress:  map[int64]time.Time{},
-		progressIDs:   map[int64]int64{},
-		progressChats: map[int64]bool{},
-		seenMessages:  map[string]bool{},
-		voiceChats:    map[int64]bool{},
-		ttsVoice:      map[int64]string{},
-		ttsSpeed:      map[int64]float64{},
-		offset:        a.loadTelegramOffset(cfg),
+		app:            a,
+		client:         telegram.NewClient(cfg.Token),
+		cfg:            cfg,
+		lastProgress:   map[int64]time.Time{},
+		progressIDs:    map[int64]int64{},
+		progressChats:  map[int64]bool{},
+		progressTasks:  map[int64]string{},
+		progressStarts: map[int64]time.Time{},
+		seenMessages:   map[string]bool{},
+		voiceChats:     map[int64]bool{},
+		ttsVoice:       map[int64]string{},
+		ttsSpeed:       map[int64]float64{},
+		offset:         a.loadTelegramOffset(cfg),
 	}
 	a.telegramCancel = cancel
 	a.telegramRunning = true
@@ -165,6 +169,46 @@ func (a *App) telegramNotifyRunState(state, detail string) {
 		return
 	}
 	svc.notifyRunState(context.Background(), state, detail)
+}
+
+func (a *App) telegramNotifyRunTerminalState(state, detail string) {
+	a.telegramMu.Lock()
+	svc := a.telegramService
+	a.telegramMu.Unlock()
+	if svc == nil {
+		return
+	}
+	svc.notifyRunTerminalState(context.Background(), state, detail)
+}
+
+func (a *App) trackQueuedTelegramRun(env channelbus.Envelope, task string) (int64, bool) {
+	if env.Source != "telegram" || env.Metadata == nil {
+		return 0, false
+	}
+	chatID, err := strconv.ParseInt(strings.TrimSpace(env.Metadata["chat_id"]), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	a.telegramMu.Lock()
+	svc := a.telegramService
+	a.telegramMu.Unlock()
+	if svc == nil {
+		return 0, false
+	}
+	svc.trackProgressChat(chatID, task)
+	return chatID, true
+}
+
+func (a *App) untrackQueuedTelegramRun(chatID int64) {
+	if chatID == 0 {
+		return
+	}
+	a.telegramMu.Lock()
+	svc := a.telegramService
+	a.telegramMu.Unlock()
+	if svc != nil {
+		svc.untrackProgressChat(chatID)
+	}
 }
 
 func (a *App) sendQueuedChannelReply(env channelbus.Envelope, status, text string) {
@@ -381,13 +425,30 @@ func (r *telegramRuntime) handleMessage(ctx context.Context, msg telegram.Messag
 			"chat_type":  msg.Chat.Type,
 		},
 	}
+	route := channelbus.RouteEnvelope(env)
+	pretracked := false
+	if route.Lane == channelbus.LaneWork && !r.app.isAgentRunning() {
+		r.trackProgressChat(msg.Chat.ID, route.Argument)
+		pretracked = true
+	}
 	resp, err := r.app.DispatchChannelMessage(env)
 	if err != nil {
+		if pretracked {
+			r.untrackProgressChat(msg.Chat.ID)
+		}
 		r.sendTelegramReply(ctx, msg, "Telegram route failed: "+err.Error(), "route_error")
 		return
 	}
-	if resp.RunStarted && r.cfg.SendProgress {
-		r.trackProgressChat(msg.Chat.ID)
+	if resp.RunStarted {
+		if !pretracked {
+			task := route.Argument
+			if resp.Data != nil && strings.TrimSpace(resp.Data["task"]) != "" {
+				task = resp.Data["task"]
+			}
+			r.trackProgressChat(msg.Chat.ID, task)
+		}
+	} else if pretracked {
+		r.untrackProgressChat(msg.Chat.ID)
 	}
 	reply := resp.Message
 	if resp.Queued && resp.QueueID != "" {
@@ -722,7 +783,7 @@ var runLocalWhisperTranscription = persistentLocalWhisperTranscription
 var synthesizeTelegramVoice = defaultSynthesizeTelegramVoice
 
 func persistentLocalWhisperTranscription(ctx context.Context, path string) string {
-	transcript, err := audio.TranscribeWhisper(ctx, path, audio.ResolveWhisperPython())
+	transcript, err := audio.TranscribeWhisper(ctx, path, "")
 	if err == nil && strings.TrimSpace(transcript) != "" {
 		return strings.TrimSpace(transcript)
 	}
@@ -1094,7 +1155,15 @@ func (r *telegramRuntime) stripMention(text string) string {
 }
 
 func (r *telegramRuntime) notifyRunState(ctx context.Context, state, detail string) {
-	if !r.cfg.SendProgress {
+	r.notifyRunStateWithTerminal(ctx, state, detail, isRemoteRunDeliveryTerminalState(state))
+}
+
+func (r *telegramRuntime) notifyRunTerminalState(ctx context.Context, state, detail string) {
+	r.notifyRunStateWithTerminal(ctx, state, detail, true)
+}
+
+func (r *telegramRuntime) notifyRunStateWithTerminal(ctx context.Context, state, detail string, terminal bool) {
+	if !r.cfg.SendProgress && !terminal {
 		return
 	}
 	r.mu.Lock()
@@ -1102,28 +1171,43 @@ func (r *telegramRuntime) notifyRunState(ctx context.Context, state, detail stri
 	if interval <= 0 {
 		interval = 10 * time.Second
 	}
-	chats := make([]int64, 0, len(r.progressChats))
+	type progressTarget struct {
+		chatID  int64
+		task    string
+		elapsed time.Duration
+	}
+	targets := make([]progressTarget, 0, len(r.progressChats))
 	for chatID := range r.progressChats {
-		if time.Since(r.lastProgress[chatID]) < interval && state != "done" && state != "failed" && state != "blocked" && state != "stopped" {
+		if time.Since(r.lastProgress[chatID]) < interval && !terminal {
 			continue
 		}
 		r.lastProgress[chatID] = time.Now()
-		chats = append(chats, chatID)
+		elapsed := time.Duration(0)
+		if started := r.progressStarts[chatID]; !started.IsZero() {
+			elapsed = time.Since(started)
+		}
+		targets = append(targets, progressTarget{chatID: chatID, task: r.progressTasks[chatID], elapsed: elapsed})
 	}
-	if state == "done" || state == "failed" || state == "blocked" || state == "stopped" {
+	if terminal {
 		r.progressChats = map[int64]bool{}
+		r.progressTasks = map[int64]string{}
+		r.progressStarts = map[int64]time.Time{}
 	}
 	r.mu.Unlock()
-	if len(chats) == 0 {
+	if len(targets) == 0 {
 		return
 	}
-	msg := formatTelegramRunProgressMessage(state, detail)
-	for _, chatID := range chats {
-		r.sendTelegramProgressUpdate(ctx, chatID, state, msg)
+	for _, target := range targets {
+		msg := formatTelegramRunProgressMessageForTask(state, detail, target.task, target.elapsed)
+		r.sendTelegramProgressUpdateWithTerminal(ctx, target.chatID, state, msg, terminal)
 	}
 }
 
 func (r *telegramRuntime) sendTelegramProgressUpdate(ctx context.Context, chatID int64, state, text string) {
+	r.sendTelegramProgressUpdateWithTerminal(ctx, chatID, state, text, isRemoteRunDeliveryTerminalState(state))
+}
+
+func (r *telegramRuntime) sendTelegramProgressUpdateWithTerminal(ctx context.Context, chatID int64, state, text string, terminal bool) {
 	start := time.Now()
 	r.mu.Lock()
 	existingID := r.progressIDs[chatID]
@@ -1146,7 +1230,7 @@ func (r *telegramRuntime) sendTelegramProgressUpdate(ctx context.Context, chatID
 		detail = err.Error()
 	} else {
 		r.mu.Lock()
-		if state == "done" || state == "failed" || state == "blocked" || state == "stopped" {
+		if terminal {
 			delete(r.progressIDs, chatID)
 		} else if messageID > 0 {
 			r.progressIDs[chatID] = messageID
@@ -1172,36 +1256,67 @@ func (r *telegramRuntime) sendTelegramProgressUpdate(ctx context.Context, chatID
 
 func formatRemoteRunStartMessage(prompt string, cfg *settings.Settings) string {
 	var lines []string
-	lines = append(lines, "▶ Run started")
-	lines = append(lines, "Mode: /cmd local agent run")
+	lines = append(lines, "\u25b6 Mauler run started")
 	if cfg != nil {
 		if cfg.ActiveProfile != "" {
-			lines = append(lines, "Profile: "+cfg.ActiveProfile)
+			lines = append(lines, "Model profile: "+cfg.ActiveProfile)
 		}
 		if cfg.Tools.ActiveToolset != "" {
-			lines = append(lines, "Tools: "+cfg.Tools.ActiveToolset)
+			lines = append(lines, "Access: "+cfg.Tools.ActiveToolset)
 		}
 	}
 	if trimmed := strings.TrimSpace(prompt); trimmed != "" {
 		lines = append(lines, "Task: "+truncateRunes(trimmed, 360))
 	}
-	lines = append(lines, "I will send progress updates while it works.")
+	if cfg != nil && cfg.Telegram.SendProgress {
+		lines = append(lines, "I will keep one status message updated and include the final result.")
+	} else {
+		lines = append(lines, "I will send the final result when the run finishes.")
+	}
 	return strings.Join(lines, "\n")
 }
 
 func formatTelegramRunProgressMessage(state, detail string) string {
+	return formatTelegramRunProgressMessageForTask(state, detail, "", 0)
+}
+
+func formatTelegramRunProgressMessageForTask(state, detail, task string, elapsed time.Duration) string {
 	state = strings.TrimSpace(state)
 	detail = strings.TrimSpace(detail)
 	if state == "" {
 		state = "working"
 	}
-	lines := []string{"Working - " + remoteRunHeading(state)}
-	lines = append(lines, "Agent - Mauler")
-	lines = append(lines, "Now - "+remoteRunPhase(state))
+	lines := []string{remoteRunTitle(state)}
+	if task = strings.TrimSpace(task); task != "" {
+		lines = append(lines, "Task: "+truncateRunes(task, 360))
+	}
+	lines = append(lines, "Stage: "+remoteRunPhase(state))
 	if model := formatTelegramModelLoadDetail(detail); state == "model_loading" && model != "" {
 		lines = append(lines, splitNonEmptyLines(model)...)
-	} else if latest := cleanTelegramRunDetail(detail); latest != "" {
-		lines = append(lines, "Latest - "+truncateRunes(latest, 700))
+	} else if isRemoteRunTerminalState(state) {
+		terminalDetail := detail
+		if state != "done" {
+			terminalDetail = cleanTelegramRunDetail(detail)
+		}
+		if result := cleanTelegramRunResult(terminalDetail); result != "" {
+			label := "Reason:"
+			switch state {
+			case "done":
+				label = "Result:"
+			case "failed":
+				label = "Error:"
+			}
+			lines = append(lines, label, result)
+		}
+	} else if current := telegramRunCurrentAction(state, detail); current != "" {
+		lines = append(lines, "Current: "+truncateRunes(current, 700))
+	}
+	if elapsed > 0 {
+		label := "Elapsed: "
+		if isRemoteRunTerminalState(state) {
+			label = "Finished in: "
+		}
+		lines = append(lines, label+formatRemoteRunDuration(elapsed))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1256,49 +1371,184 @@ func runStatusMessage(title, summary, detail string) string {
 
 */
 
-func remoteRunHeading(state string) string {
+func remoteRunTitle(state string) string {
 	switch state {
 	case "done":
-		return "done"
+		return "\u2705 Mauler finished"
 	case "failed":
-		return "failed"
+		return "\u274c Mauler failed"
 	case "blocked":
-		return "blocked"
+		return "\u26d4 Mauler needs attention"
 	case "stopped":
-		return "stopped"
+		return "\u23f9 Mauler stopped"
 	default:
-		return "in progress"
+		return "\u23f3 Mauler is working"
 	}
 }
 
 func remoteRunPhase(state string) string {
 	switch state {
 	case "model_loading":
-		return "loading the model"
+		return "Loading the model"
 	case "planning":
-		return "planning the run"
+		return "Planning"
 	case "researching":
-		return "researching"
+		return "Researching"
 	case "reading":
-		return "reading context"
+		return "Reading context"
 	case "editing":
-		return "editing files"
+		return "Editing files"
 	case "testing":
-		return "verifying the work"
+		return "Verifying"
 	case "using_tools":
-		return "using a tool"
+		return "Using a tool"
 	case "thinking":
-		return "thinking"
+		return "Thinking"
 	case "done":
-		return "completed successfully"
+		return "Complete"
 	case "failed":
-		return "stopped with an error"
+		return "Failed"
 	case "blocked":
-		return "blocked by loop guard"
+		return "Blocked by the loop guard"
 	case "stopped":
-		return "stopped by request"
+		return "Stopped"
 	default:
-		return strings.ReplaceAll(state, "_", " ")
+		words := strings.ReplaceAll(state, "_", " ")
+		if words == "" {
+			return "Working"
+		}
+		return strings.ToUpper(words[:1]) + words[1:]
+	}
+}
+
+func isRemoteRunTerminalState(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "done", "failed", "blocked", "stopped":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRemoteRunDeliveryTerminalState(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "done", "failed", "stopped":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatRemoteRunDuration(elapsed time.Duration) string {
+	if elapsed < time.Second {
+		return "<1s"
+	}
+	seconds := int64(elapsed.Round(time.Second) / time.Second)
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	seconds %= 60
+	if seconds == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%dm %ds", minutes, seconds)
+}
+
+func telegramRunCurrentAction(state, detail string) string {
+	detail = strings.TrimSpace(detail)
+	switch detail {
+	case "shell":
+		return "Running a shell command"
+	case "terminal_send":
+		return "Running a command in the shared terminal"
+	case "terminal_read":
+		return "Reading terminal output"
+	case "read", "read_file", "read_pdf":
+		return "Reading a file"
+	case "glob", "grep", "session_search":
+		return "Searching local context"
+	case "web_search", "fetch_url", "http_probe":
+		return "Collecting scoped web evidence"
+	case "browser":
+		return "Inspecting the browser"
+	case "write", "edit":
+		return "Updating a file"
+	}
+	if state == "thinking" && (strings.Contains(detail, "tool_choice=") || strings.Contains(detail, "messages=")) {
+		return "Choosing the next useful action"
+	}
+	return cleanTelegramRunDetail(detail)
+}
+
+func cleanTelegramRunResult(detail string) string {
+	detail = strings.TrimSpace(strings.ReplaceAll(detail, "\x00", " "))
+	if detail == "" {
+		return ""
+	}
+	var lines []string
+	blank := false
+	for _, line := range strings.Split(strings.ReplaceAll(detail, "\r\n", "\n"), "\n") {
+		line = strings.TrimRight(line, " \t\r")
+		if strings.TrimSpace(line) == "" {
+			if len(lines) > 0 && !blank {
+				lines = append(lines, "")
+				blank = true
+			}
+			continue
+		}
+		lines = append(lines, line)
+		blank = false
+	}
+	return truncateRunes(strings.TrimSpace(strings.Join(lines, "\n")), 2800)
+}
+
+func telegramRunCompletionDetail(run TaskRun, finalSummary string) string {
+	summary := strings.TrimSpace(finalSummary)
+	if summary != "" && !isGenericTelegramCompletion(summary) {
+		return summary
+	}
+	for i := len(run.Tools) - 1; i >= 0; i-- {
+		tool := run.Tools[i]
+		if !telegramResultBearingTool(tool.Name) || (tool.Status != "done" && tool.Status != "routed") {
+			continue
+		}
+		if result := cleanTelegramRunResult(tool.Result); result != "" {
+			return result
+		}
+	}
+	if summary != "" {
+		return summary
+	}
+	if response := strings.TrimSpace(run.Response); response != "" {
+		return response
+	}
+	return "The run completed successfully, but it did not produce a final text result."
+}
+
+func isGenericTelegramCompletion(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	normalized = strings.Trim(normalized, " .!`*_#:-")
+	switch normalized {
+	case "done", "complete", "completed", "finished", "success", "successful",
+		"run completed successfully", "task completed successfully", "command completed successfully":
+		return true
+	}
+	if len([]rune(normalized)) <= 180 {
+		return strings.Contains(normalized, "completed successfully") ||
+			strings.Contains(normalized, "finished successfully") ||
+			strings.Contains(normalized, "command succeeded") ||
+			strings.Contains(normalized, "ran successfully")
+	}
+	return false
+}
+
+func telegramResultBearingTool(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "shell", "terminal_send", "terminal_read", "http_probe", "read", "read_pdf", "grep", "sqlite", "browser":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1355,10 +1605,25 @@ func formatTelegramModelLoadDetail(detail string) string {
 	return cleanTelegramRunDetail(detail)
 }
 
-func (r *telegramRuntime) trackProgressChat(chatID int64) {
+func (r *telegramRuntime) trackProgressChat(chatID int64, task string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.progressChats[chatID] = true
+	r.progressTasks[chatID] = strings.TrimSpace(task)
+	r.progressStarts[chatID] = time.Now()
+	// Give the acknowledgement message a chance to arrive before the first
+	// periodic edit. Terminal states bypass this interval and are never delayed.
+	r.lastProgress[chatID] = time.Now()
+}
+
+func (r *telegramRuntime) untrackProgressChat(chatID int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.progressChats, chatID)
+	delete(r.progressTasks, chatID)
+	delete(r.progressStarts, chatID)
+	delete(r.lastProgress, chatID)
+	delete(r.progressIDs, chatID)
 }
 
 func (r *telegramRuntime) setStatus(status string) {

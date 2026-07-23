@@ -1,6 +1,6 @@
 # TheMauler Agentic Reliability Issues
 
-Last reviewed: 2026-07-12
+Last reviewed: 2026-07-15
 Status: MAULER-AR-001 through MAULER-AR-005 are closed; keep this register as the verification record.
 
 This is the canonical issue register for failures that can make an autonomous run act on incorrect terminal state, lose evidence, interfere with another run, or approve incomplete work.
@@ -161,9 +161,13 @@ Closure criteria: one command from the Benchmark page runs the same end-to-end J
 
 ## Verification Baseline
 
-Review verification on 2026-07-10:
+Review verification on 2026-07-15:
 
 - `go test ./...`: passed.
 - `go vet ./...`: passed.
-- `npm run build`: passed, with a non-blocking large-bundle warning.
-- `go test -race ./internal/app ./internal/tools`: failed on MAULER-AR-001 and MAULER-AR-002.
+- `npm run --prefix frontend build`: passed, with a non-blocking large-bundle warning.
+- `go test -race ./internal/app ./internal/tools -count=1`: passed.
+- `go test -race ./internal/engagement/... ./internal/store -count=1`: passed.
+- `go test -race ./internal/controlplane ./internal/store -count=1`: passed.
+- Headless settings regression: runtime-owned audio/Telegram workers do not start before Wails
+  `OnStartup`, preventing asynchronous worker processes from inheriting and locking test workspaces.

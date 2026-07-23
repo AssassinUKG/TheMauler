@@ -2,6 +2,9 @@
 
 Goal: make the live workbench feel like a clear project cockpit, not three competing logs. The user should always know what the agent is doing, what machine/project is active, and where to look for raw output versus structured tool history.
 
+The screenshot-driven continuation and implementation order for remaining polish is
+`ui-polish-plan-2026-07-12.md`. It preserves this tracker's surface roles and four-zone layout.
+
 ## Surface Roles
 
 - Main chat: user messages, assistant replies, and a compact live "what the agent is doing now" card. Do not dump tool output here.
@@ -39,6 +42,11 @@ Goal: make the live workbench feel like a clear project cockpit, not three compe
 9. Tone down the bottom context bar.
    Persistent saturated green reads as success. Use neutral styling for ongoing context/budget telemetry and reserve strong green for positive events.
 
+10. Keep context maintenance out of the conversation.
+    Repeated `[Context compacted]` system cards interrupt assistant answers and make the transcript
+    look as if messages were replaced. Compaction is operational activity, not assistant speech;
+    show it in Activity/Logs and filter legacy compaction cards when loading saved sessions.
+
 ## Implementation Order
 
 - C1 done: Group consecutive similar AI Commands and make errors loud. Files: `frontend/src/components/TerminalPane.tsx`, `frontend/src/components/TerminalPane.css`.
@@ -49,6 +57,15 @@ Goal: make the live workbench feel like a clear project cockpit, not three compe
 - C6 first pass done: Profile no longer duplicates in the sidebar, Doctor opens the correct panel, session controls are grouped, and composer `Stop`/`Send` positions are stable. Continue later with iconography/compact topbar treatment if needed.
 - C8 done: Doctor is a first-class center page/tab with its own run button, score cards, grouped check list, and persisted in-tab result while browsing the workbench. The topbar Doctor action opens/runs this page directly instead of hiding results inside Agent settings.
 - C7 done: Neutralize the bottom context bar and reserve saturated green for success states. Files: `frontend/src/components/StatusBar.css`.
+- C9 done: Restore first-class workbench resizing. Terminal and AI Commands now have a visible,
+  persistent splitter even when the command rail is collapsed or empty; dragging the collapsed edge
+  reopens it, wide layouts resize horizontally, and narrow layouts resize vertically. Explorer and
+  Inspector widths persist locally, all four workbench separators have larger visible hit targets,
+  and arrow-key resizing is supported. Files: `frontend/src/App.tsx`, `frontend/src/App.css`,
+  `frontend/src/components/TerminalPane.tsx`, `frontend/src/components/TerminalPane.css`.
+- C10 done: Context-compaction events no longer append repeated system cards to Chat. They remain
+  visible as operational Activity/Logs evidence, and legacy `[Context compacted]` cards are filtered
+  when saved sessions are loaded. Files: `frontend/src/App.tsx`.
 
 ## Acceptance
 
@@ -57,3 +74,6 @@ Goal: make the live workbench feel like a clear project cockpit, not three compe
 - Error command rows are obvious without opening them.
 - Profile, state, context, target, and workspace each have one primary display location.
 - Active run layout gives the terminal/command stream enough space to inspect what is happening without hiding the agent's current intent.
+- Explorer, Inspector, bottom work area, and Terminal/AI Commands dividers remain draggable; saved
+  horizontal pane positions survive a reload, and an empty AI Commands history can still be opened
+  and resized.

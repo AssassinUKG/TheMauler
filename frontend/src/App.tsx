@@ -11,7 +11,9 @@ import { MemoryPage } from './components/MemoryPage'
 import { BenchmarkPage } from './components/BenchmarkPage'
 import { LiveOpsPage } from './components/LiveOpsPage'
 import { BrainPage } from './components/BrainPage'
+import { ContextInspectorPage } from './components/ContextInspectorPage'
 import { ProjectsPage } from './components/ProjectsPage'
+import { EngagementPage } from './components/EngagementPage'
 import { TelegramPage } from './components/TelegramPage'
 import { DoctorPage } from './components/DoctorPage'
 import { SideChatPage } from './components/SideChatPage'
@@ -37,17 +39,25 @@ import {
   GetAutoAgents,
   GetAutonomous,
   GetAgentMode,
+  ListAgentDefinitions,
+  SelectWorkingDir,
+  SetWorkingDir,
+  SetAgentModeOverride,
+  GetProfiles,
   GetSettings,
   GetHistoryStats,
   ListTodos,
   SendMessage,
+  SendMessageWithProfile,
   UpdateSettings,
   type ChatAttachment,
   StopAgent,
   type ChatRole,
+  type ProfilesFile,
   type SessionChatMessage,
   type SkillSuggestion,
   type TodoItem,
+  type AgentDefinition,
 } from './wailsjs/go'
 import './App.css'
 
@@ -78,6 +88,18 @@ function applyAccentColor(hex: string) {
 function applyPrimaryColor(hex: string) {
   document.documentElement.style.setProperty('--btn-primary', hex)
   document.documentElement.style.setProperty('--btn-primary-text', contrastText(hex))
+}
+
+function oneTaskCloudProfiles(profilesFile: ProfilesFile): RunProfileOption[] {
+  return Object.entries(profilesFile.profiles ?? {})
+    .filter(([, profile]) => {
+      const providerName = String(profile.provider || '').toLowerCase()
+      const provider = profilesFile.providers?.[profile.provider]
+      const baseURL = String(provider?.base_url || '').toLowerCase()
+      return providerName === 'openrouter' || baseURL.includes('openrouter.ai')
+    })
+    .map(([name, profile]) => ({ name, model: profile.model_id || name }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 function toolTimeoutFromInput(input: string): number {
@@ -125,6 +147,18 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
   queued?: boolean
   thinking?: string
+}
+
+interface PendingMessage {
+  text: string
+  images: string[]
+  attachments: ChatAttachment[]
+  profileOverride: string
+}
+
+export interface RunProfileOption {
+  name: string
+  model: string
 }
 
 export interface ConfirmPayload {
@@ -180,6 +214,29 @@ export interface BackgroundJob {
   updated_at_unix?: number
 }
 
+const LEFT_PANE_DEFAULT = 300
+const LEFT_PANE_MIN = 180
+const LEFT_PANE_MAX = 520
+const RIGHT_PANE_DEFAULT = 460
+const RIGHT_PANE_MIN = 320
+const RIGHT_PANE_MAX = 840
+
+function loadStoredLayoutNumber(key: string, fallback: number, min: number, max: number) {
+  const value = Number(localStorage.getItem(key) || '')
+  return Number.isFinite(value) && value >= min && value <= max ? value : fallback
+}
+
+function loadStoredLayoutBoolean(key: string, fallback: boolean) {
+  const value = localStorage.getItem(key)
+  if (value === '1') return true
+  if (value === '0') return false
+  return fallback
+}
+
+function storeLayoutNumber(key: string, value: number) {
+  localStorage.setItem(key, String(Math.round(value)))
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
@@ -193,9 +250,12 @@ export default function App() {
   const [sessions, setSessions] = useState<string[]>([])
   const [selectedSession, setSelectedSession] = useState('')
   const [activeProfile, setActiveProfile] = useState('')
+  const [cloudRunProfiles, setCloudRunProfiles] = useState<RunProfileOption[]>([])
+  const [runProfileOverride, setRunProfileOverride] = useState('')
+  const [activeRunProfile, setActiveRunProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'telegram' | 'benchmarks' | 'doctor'>('projects')
+  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'engagement' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'context' | 'telegram' | 'benchmarks' | 'doctor'>('projects')
   const [chatLane, setChatLane] = useState<'project' | 'quick'>('project')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
@@ -203,6 +263,8 @@ export default function App() {
   const [artifactRunning, setArtifactRunning] = useState(false)
   const [activity, setActivity] = useState<AgentActivity[]>([])
   const [agentMode, setAgentMode] = useState('Auto')
+  const [agentSelection, setAgentSelection] = useState('Auto')
+  const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([])
   const [runState, setRunState] = useState<RunStatePayload | null>(null)
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [doctorRunRequest, setDoctorRunRequest] = useState(0)
@@ -216,24 +278,23 @@ export default function App() {
     setToasts(prev => [...prev, { id, message, level }])
   }, [])
 
-  const persistTerminalPrefs = useCallback(async (open: boolean, height: number) => {
+  const persistTerminalHeight = useCallback(async (height: number) => {
     const settings = await GetSettings().catch(() => null)
     if (!settings) return
     await UpdateSettings({
       ...settings,
       ui: {
         ...settings.ui,
-        terminal_default_open: open,
         terminal_height: Math.round(height),
       },
     }).catch(() => null)
   }, [])
-  const [pendingInterrupt, setPendingInterrupt] = useState<{ text: string; images: string[]; attachments: ChatAttachment[] } | null>(null)
-  const pendingInterruptRef = useRef<{ text: string; images: string[]; attachments: ChatAttachment[] } | null>(null)
-  const [leftOpen, setLeftOpen] = useState(true)
-  const [rightOpen, setRightOpen] = useState(true)
-  const [leftWidth, setLeftWidth] = useState(300)
-  const [rightWidth, setRightWidth] = useState(460)
+  const [pendingInterrupt, setPendingInterrupt] = useState<PendingMessage | null>(null)
+  const pendingInterruptRef = useRef<PendingMessage | null>(null)
+  const [leftOpen, setLeftOpen] = useState(() => loadStoredLayoutBoolean('mauler.layout.leftOpen', true))
+  const [rightOpen, setRightOpen] = useState(() => loadStoredLayoutBoolean('mauler.layout.rightOpen', true))
+  const [leftWidth, setLeftWidth] = useState(() => loadStoredLayoutNumber('mauler.layout.leftWidth', LEFT_PANE_DEFAULT, LEFT_PANE_MIN, LEFT_PANE_MAX))
+  const [rightWidth, setRightWidth] = useState(() => loadStoredLayoutNumber('mauler.layout.rightWidth', RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, RIGHT_PANE_MAX))
   const [thinkingBuffer, setThinkingBuffer] = useState('')
   const pendingThinkingRef = useRef('')
   const [showTerminal, setShowTerminal] = useState(false)
@@ -245,15 +306,48 @@ export default function App() {
   const [showToolCountdown, setShowToolCountdown] = useState(false)
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
+  const [chatDraftRequest, setChatDraftRequest] = useState<{ id: string; text: string } | null>(null)
+
+  useEffect(() => {
+    localStorage.setItem('mauler.layout.leftOpen', leftOpen ? '1' : '0')
+  }, [leftOpen])
+
+  useEffect(() => {
+    localStorage.setItem('mauler.layout.rightOpen', rightOpen ? '1' : '0')
+  }, [rightOpen])
+
+  const toggleTerminalPanel = useCallback(() => {
+    if (showTerminal && bottomTab === 'terminal') {
+      setShowTerminal(false)
+      return
+    }
+    setBottomTab('terminal')
+    setShowTerminal(true)
+  }, [bottomTab, showTerminal])
+
+  const prepareEngagementRun = useCallback((prompt: string) => {
+    setChatDraftRequest({ id: crypto.randomUUID(), text: prompt })
+    setChatLane('project')
+    setCenterTab('chat')
+  }, [])
 
   const refreshTodos = useCallback(() => {
     void ListTodos().then(setTodos).catch(() => setTodos([]))
   }, [])
 
   useEffect(() => {
+    const sendPendingMessage = (pending: PendingMessage) => {
+      const request = pending.profileOverride
+        ? SendMessageWithProfile(pending.text, pending.images, pending.attachments, pending.profileOverride)
+        : SendMessage(pending.text, pending.images, pending.attachments)
+      void request
+        .then(() => setRunProfileOverride(''))
+        .catch(e => console.error('interrupt SendMessage:', e))
+    }
     const offs = [
-      EventsOn('mauler:stream_start', () => {
+      EventsOn('mauler:stream_start', (...args: unknown[]) => {
         setStreaming(true)
+        setActiveRunProfile(String(args[0] || ''))
         setRunStartedAt(Date.now())
         setRunState({ state: 'starting', detail: 'Preparing request' })
         setStreamBuffer('')
@@ -289,6 +383,7 @@ export default function App() {
       }),
       EventsOn('mauler:stream_done', () => {
         setStreaming(false)
+        setActiveRunProfile('')
         setToolCountdown(null)
         setStreamBuffer(prev => {
           const visible = cleanAssistantTranscriptText(prev)
@@ -320,12 +415,13 @@ export default function App() {
             attachments: pending.attachments,
             timestamp: Date.now(),
           }])
-          void SendMessage(pending.text, pending.images, pending.attachments).catch(e => console.error('interrupt SendMessage:', e))
+          sendPendingMessage(pending)
         }
       }),
       EventsOn('mauler:stream_error', (...args: unknown[]) => {
         const err = args[0] as string
         setStreaming(false)
+        setActiveRunProfile('')
         setToolCountdown(null)
         setStreamBuffer('')
         setRunState({ state: 'failed', detail: err })
@@ -347,7 +443,7 @@ export default function App() {
             attachments: pending.attachments,
             timestamp: Date.now(),
           }])
-          void SendMessage(pending.text, pending.images, pending.attachments).catch(e => console.error('interrupt SendMessage:', e))
+          sendPendingMessage(pending)
         }
       }),
       EventsOn('mauler:tool_call', (...args: unknown[]) => {
@@ -418,12 +514,15 @@ export default function App() {
       }),
       EventsOn('mauler:compact', (...args: unknown[]) => {
         const summary = args[0] as string
-        setMessages(m => [...m, {
-          id: crypto.randomUUID(),
-          role: 'system',
-          content: `[Context compacted] ${summary.slice(0, 120)}...`,
-          timestamp: Date.now(),
-        }])
+        const now = Date.now()
+        setActivity(items => [{
+          id: `context-compact-${now}`,
+          name: 'context_compaction',
+          status: 'done' as const,
+          result: summary,
+          startTime: now,
+          durationMs: 0,
+        }, ...items].slice(0, 12))
       }),
       EventsOn('mauler:agent_mode', (...args: unknown[]) => {
         setAgentMode((args[0] as string) || 'Auto')
@@ -436,7 +535,23 @@ export default function App() {
         setTaskRunVersion(v => v + 1)
         refreshTodos()
       }),
+      EventsOn('mauler:engagement_changed', () => {
+        setTaskRunVersion(v => v + 1)
+      }),
       EventsOn('mauler:workspace_changed', () => {
+        setMessages([])
+        setStreamBuffer('')
+        setThinkingBuffer('')
+        setRunProfileOverride('')
+        setActiveRunProfile('')
+        setSelectedSession('')
+        setConfirm(null)
+        setConfirmAction(null)
+        setOpenFiles(files => files.filter(file => !file.path))
+        setActiveFileIdx(0)
+        setCenterTab('chat')
+        setChatLane('project')
+        refreshTodos()
         setWorkspaceVersion(v => v + 1)
         setStatsVersion(v => v + 1)
       }),
@@ -471,15 +586,18 @@ export default function App() {
   }, [refreshSessions])
 
   const refreshProfiles = useCallback(async () => {
-    const [settings, auto, autoAgentEnabled, mode] = await Promise.all([
+    const [settings, profilesFile, auto, autoAgentEnabled, mode, definitions] = await Promise.all([
       GetSettings().catch(() => null),
+      GetProfiles().catch(() => null),
       GetAutonomous().catch(() => false),
       GetAutoAgents().catch(() => true),
       GetAgentMode().catch(() => 'Auto'),
+      ListAgentDefinitions().catch(() => [] as AgentDefinition[]),
     ])
     if (settings) {
       setActiveProfile(settings.active_profile)
       setShowToolCountdown(settings.ui.tool_countdown ?? false)
+      setAgentSelection(settings.agents.mode_override || 'Auto')
       if (!appliedInitialUI.current) {
         appliedInitialUI.current = true
         setShowTerminal(settings.ui.terminal_default_open ?? false)
@@ -489,9 +607,11 @@ export default function App() {
       applyAccentColor(settings.ui.accent_color || '#4ade80')
       applyPrimaryColor(settings.ui.primary_color || settings.ui.accent_color || '#16a34a')
     }
+    setCloudRunProfiles(profilesFile ? oneTaskCloudProfiles(profilesFile) : [])
     setAutonomousState(auto)
     setAutoAgentsState(autoAgentEnabled)
     setAgentMode(mode || 'Auto')
+    setAgentDefinitions(definitions)
   }, [])
 
   useEffect(() => {
@@ -526,12 +646,7 @@ export default function App() {
       }
       if (e.key === '`' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
-        setShowTerminal(v => {
-          const next = !v
-          if (next) setBottomTab('terminal')
-          void persistTerminalPrefs(next, terminalHeight)
-          return next
-        })
+        toggleTerminalPanel()
       }
       if (e.key === 'Escape') {
         setShowSettings(false)
@@ -556,7 +671,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [persistTerminalPrefs, terminalHeight])
+  }, [toggleTerminalPanel])
 
   const handleUserMessage = useCallback((text: string, images: string[], attachments: ChatAttachment[] = []) => {
     setMessages(m => [...m, {
@@ -569,10 +684,15 @@ export default function App() {
     }])
   }, [])
 
-  const sendNow = useCallback(async (text: string, images: string[], attachments: ChatAttachment[]) => {
+  const sendNow = useCallback(async (text: string, images: string[], attachments: ChatAttachment[], profileOverride = '') => {
     handleUserMessage(text, images, attachments)
     try {
-      await SendMessage(text, images, attachments)
+      if (profileOverride) {
+        await SendMessageWithProfile(text, images, attachments, profileOverride)
+      } else {
+        await SendMessage(text, images, attachments)
+      }
+      setRunProfileOverride('')
     } catch (e) {
       console.error('SendMessage failed:', e)
       setMessages(m => [...m, {
@@ -584,14 +704,14 @@ export default function App() {
     }
   }, [handleUserMessage])
 
-  const handleSubmitMessage = useCallback((text: string, images: string[], attachments: ChatAttachment[]) => {
+  const handleSubmitMessage = useCallback((text: string, images: string[], attachments: ChatAttachment[], profileOverride = '') => {
     if (streaming) {
-      pendingInterruptRef.current = { text, images, attachments }
-      setPendingInterrupt({ text, images, attachments })
+      pendingInterruptRef.current = { text, images, attachments, profileOverride }
+      setPendingInterrupt({ text, images, attachments, profileOverride })
       void StopAgent()
       return
     }
-    void sendNow(text, images, attachments)
+    void sendNow(text, images, attachments, profileOverride)
   }, [sendNow, streaming])
 
   const handleCancelPending = useCallback(() => {
@@ -655,14 +775,74 @@ export default function App() {
     setAgentMode(enabled ? 'Auto' : 'Manual')
   }, [])
 
+  const handleAgentSelectionChange = useCallback(async (mode: string) => {
+    const next = mode.trim() || 'Auto'
+    try {
+      if (next === 'Manual') {
+        await SetAgentModeOverride(next)
+        await SetAutoAgents(false)
+        setAutoAgentsState(false)
+      } else {
+        await SetAutoAgents(true)
+        await SetAgentModeOverride(next)
+        setAutoAgentsState(true)
+      }
+      setAgentSelection(next)
+      setAgentMode(next)
+      setStatsVersion(v => v + 1)
+      pushToast(`${next} selected for this workspace.`, 'success')
+    } catch (error) {
+      pushToast(`Could not change agent: ${String(error)}`, 'danger')
+    }
+  }, [pushToast])
+
+  const handleSwitchWorkspace = useCallback(async (path: string) => {
+    if (streaming) {
+      pushToast('Stop the active run before changing workspace.')
+      return
+    }
+    try {
+      await SetWorkingDir(path)
+      pushToast(`Workspace opened: ${path}`, 'success')
+    } catch (error) {
+      pushToast(`Could not open workspace: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, streaming])
+
+  const handleChooseWorkspace = useCallback(async (bugBounty: boolean) => {
+    if (streaming) {
+      pushToast('Stop the active run before changing workspace.')
+      return
+    }
+    try {
+      const settings = await GetSettings()
+      const selected = await SelectWorkingDir(settings.context.workspace_dir || '')
+      if (!selected) return
+      if (bugBounty) {
+        await SetAutoAgents(true)
+        await SetAgentModeOverride('Bug Bounty Hunter')
+        setAutoAgentsState(true)
+        setAgentSelection('Bug Bounty Hunter')
+        setAgentMode('Bug Bounty Hunter')
+      }
+      setStatsVersion(v => v + 1)
+      pushToast(`${bugBounty ? 'Bug bounty workspace' : 'Workspace'} opened: ${selected}`, 'success')
+    } catch (error) {
+      pushToast(`Could not choose workspace: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, streaming])
+
   const mapSessionMessages = (loaded: SessionChatMessage[]): ChatMessage[] =>
-    loaded.map(m => ({
+    loaded
+      .filter(m => !(m.role === 'system' && m.content.trimStart().startsWith('[Context compacted]')))
+      .map(m => ({
       id: crypto.randomUUID(),
       role: m.role,
       content: m.content,
       images: m.images ?? [],
+      attachments: m.attachments ?? [],
       timestamp: Date.now(),
-    }))
+      }))
 
   const cleanSessionName = (name: string) =>
     name.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[._-]+|[._-]+$/g, '')
@@ -724,24 +904,57 @@ export default function App() {
     const startX = e.clientX
     const startLeft = leftWidth
     const startRight = rightWidth
+    let nextLeft = startLeft
+    let nextRight = startRight
+    document.documentElement.classList.add('workbench-resizing-col')
     const onMove = (move: MouseEvent) => {
       const dx = move.clientX - startX
       if (side === 'left') {
-        setLeftWidth(Math.min(420, Math.max(180, startLeft + dx)))
+        nextLeft = Math.min(LEFT_PANE_MAX, Math.max(LEFT_PANE_MIN, startLeft + dx))
+        setLeftWidth(nextLeft)
       } else {
-        setRightWidth(Math.min(680, Math.max(320, startRight - dx)))
+        nextRight = Math.min(RIGHT_PANE_MAX, Math.max(RIGHT_PANE_MIN, startRight - dx))
+        setRightWidth(nextRight)
       }
     }
     const onUp = () => {
+      document.documentElement.classList.remove('workbench-resizing-col')
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
+      if (side === 'left') storeLayoutNumber('mauler.layout.leftWidth', nextLeft)
+      else storeLayoutNumber('mauler.layout.rightWidth', nextRight)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     e.preventDefault()
   }, [leftWidth, rightWidth])
 
-  const gridColumns = `${leftOpen ? leftWidth : 28}px ${leftOpen ? 4 : 0}px 1fr ${rightOpen ? 4 : 0}px ${rightOpen ? rightWidth : 28}px`
+  const resizePaneByKeyboard = useCallback((side: 'left' | 'right', key: string, shiftKey: boolean) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(key)) return false
+    if (key === 'Home') {
+      if (side === 'left') {
+        setLeftWidth(LEFT_PANE_DEFAULT)
+        storeLayoutNumber('mauler.layout.leftWidth', LEFT_PANE_DEFAULT)
+      } else {
+        setRightWidth(RIGHT_PANE_DEFAULT)
+        storeLayoutNumber('mauler.layout.rightWidth', RIGHT_PANE_DEFAULT)
+      }
+      return true
+    }
+    const amount = shiftKey ? 48 : 16
+    if (side === 'left') {
+      const next = Math.min(LEFT_PANE_MAX, Math.max(LEFT_PANE_MIN, leftWidth + (key === 'ArrowRight' ? amount : -amount)))
+      setLeftWidth(next)
+      storeLayoutNumber('mauler.layout.leftWidth', next)
+    } else {
+      const next = Math.min(RIGHT_PANE_MAX, Math.max(RIGHT_PANE_MIN, rightWidth + (key === 'ArrowLeft' ? amount : -amount)))
+      setRightWidth(next)
+      storeLayoutNumber('mauler.layout.rightWidth', next)
+    }
+    return true
+  }, [leftWidth, rightWidth])
+
+  const gridColumns = `${leftOpen ? leftWidth : 28}px ${leftOpen ? 6 : 0}px 1fr ${rightOpen ? 6 : 0}px ${rightOpen ? rightWidth : 28}px`
 
   return (
     <div className="app-shell">
@@ -781,17 +994,10 @@ export default function App() {
           >Doctor</button>
           <div className="titlebar-sep" />
           <button
-            onClick={() => {
-              setShowTerminal(v => {
-                const next = !v
-                if (next) setBottomTab('terminal')
-                void persistTerminalPrefs(next, terminalHeight)
-                return next
-              })
-            }}
-            title="Toggle bottom panel (Ctrl+`)"
-            className={showTerminal ? 'panel-toggle on' : 'panel-toggle'}
-          >Bottom</button>
+            onClick={toggleTerminalPanel}
+            title="Show or hide Terminal (Ctrl+`)"
+            className={showTerminal && bottomTab === 'terminal' ? 'panel-toggle on' : 'panel-toggle'}
+          >Terminal</button>
           <div className="titlebar-sep" />
           <button onClick={() => setShowSettings(true)} title="Settings (Ctrl+,)">Settings</button>
         </div>
@@ -823,7 +1029,14 @@ export default function App() {
           className={leftOpen ? 'resize-handle resize-handle-left' : 'resize-handle disabled'}
           onMouseDown={leftOpen ? startResize('left') : undefined}
           onDoubleClick={() => setLeftOpen(false)}
-          title={leftOpen ? 'Drag to resize, double-click to collapse Explorer' : undefined}
+          onKeyDown={e => {
+            if (leftOpen && resizePaneByKeyboard('left', e.key, e.shiftKey)) e.preventDefault()
+          }}
+          role="separator"
+          aria-label="Resize Explorer"
+          aria-orientation="vertical"
+          tabIndex={leftOpen ? 0 : -1}
+          title={leftOpen ? 'Drag or use arrow keys to resize; double-click to collapse Explorer' : undefined}
         />
 
         <main className="center-pane">
@@ -831,9 +1044,10 @@ export default function App() {
             <button className={centerTab === 'projects' ? 'active' : ''} onClick={() => setCenterTab('projects')}>Home</button>
             <button className={centerTab === 'chat' ? 'active' : ''} onClick={() => setCenterTab('chat')}>Chat</button>
             <button className={centerTab === 'ops' ? 'active' : ''} onClick={() => setCenterTab('ops')}>Run</button>
+            <button className={centerTab === 'engagement' ? 'active' : ''} onClick={() => setCenterTab('engagement')}>Grid</button>
             <button className={centerTab === 'benchmarks' ? 'active' : ''} onClick={() => setCenterTab('benchmarks')}>Benchmarks</button>
-            <select className="center-more-select" value={['services','logs','memory','brain','telegram','doctor'].includes(centerTab) ? centerTab : ''} onChange={e => { if (e.target.value) setCenterTab(e.target.value as typeof centerTab) }} title="Secondary workbench pages">
-              <option value="">More…</option><option value="services">Services</option><option value="logs">Logs</option><option value="memory">Memory</option><option value="brain">Brain</option><option value="telegram">Telegram</option><option value="doctor">Doctor</option>
+            <select className="center-more-select" value={['services','logs','memory','brain','context','telegram','doctor'].includes(centerTab) ? centerTab : ''} onChange={e => { if (e.target.value) setCenterTab(e.target.value as typeof centerTab) }} title="Secondary workbench pages">
+              <option value="">More…</option><option value="services">Services</option><option value="logs">Logs</option><option value="memory">Memory</option><option value="brain">Brain</option><option value="context">Context</option><option value="telegram">Telegram</option><option value="doctor">Doctor</option>
             </select>
             {openFiles.map((f, i) => (
               <span key={`${f.path || f.name}-${i}`} className={`center-file-tab ${centerTab === 'file' && activeFileIdx === i ? 'active' : ''}`}>
@@ -845,11 +1059,15 @@ export default function App() {
           <div className="center-content">
             {centerTab === 'chat' && chatLane === 'project' ? (
               <ChatPane
+                key={`project-chat-${workspaceVersion}`}
                 messages={messages}
                 streaming={streaming}
                 streamBuffer={streamBuffer}
                 thinkingBuffer={thinkingBuffer}
                 activeProfile={activeProfile}
+                activeRunProfile={activeRunProfile}
+                cloudRunProfiles={cloudRunProfiles}
+                runProfileOverride={runProfileOverride}
                 autonomous={autonomous}
                 pendingInterrupt={pendingInterrupt !== null}
                 toolCountdown={showToolCountdown ? toolCountdown : null}
@@ -857,13 +1075,22 @@ export default function App() {
                 todos={todos}
                 activity={activity}
                 settingsVersion={statsVersion}
+                agentDefinitions={agentDefinitions}
+                agentSelection={agentSelection}
+                draftRequest={chatDraftRequest}
                 onSubmitMessage={handleSubmitMessage}
+                onRunProfileOverrideChange={setRunProfileOverride}
                 onCancelPending={handleCancelPending}
                 onStopAgent={() => void StopAgent()}
                 onClearChat={handleClearChat}
                 onArtifact={handleArtifact}
                 onAutonomousChange={handleToggleAutonomous}
                 onOpenQuickChat={() => setChatLane('quick')}
+                onOpenSettings={() => setShowSettings(true)}
+                onAgentSelectionChange={handleAgentSelectionChange}
+                onChooseWorkspace={handleChooseWorkspace}
+                onSwitchWorkspace={handleSwitchWorkspace}
+                onOpenProjects={() => setCenterTab('projects')}
                 onClearPlan={async () => { await ClearTodos(); refreshTodos() }}
               />
             ) : centerTab === 'chat' ? (
@@ -882,9 +1109,13 @@ export default function App() {
               />
             ) : centerTab === 'services' ? (
               <ServicesPage jobs={backgroundJobs} onOpenSettings={() => setShowSettings(true)} onOpenJobs={() => { setShowTerminal(true); setBottomTab('jobs') }} />
+            ) : centerTab === 'engagement' ? (
+              <EngagementPage version={taskRunVersion + statsVersion + workspaceVersion} onOpenChat={() => { setChatLane('project'); setCenterTab('chat') }} onPrepareRun={prepareEngagementRun} />
             ) : centerTab === 'projects' ? (
               <ProjectsPage
                 version={statsVersion + workspaceVersion}
+                onOpenEngagement={() => setCenterTab('engagement')}
+                onPrepareEngagementRun={prepareEngagementRun}
                 onProjectChanged={(project, previousName) => {
                   setWorkspaceVersion(v => v + 1)
                   setStatsVersion(v => v + 1)
@@ -900,6 +1131,8 @@ export default function App() {
               <MemoryPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'brain' ? (
               <BrainPage version={taskRunVersion + statsVersion} />
+            ) : centerTab === 'context' ? (
+              <ContextInspectorPage version={taskRunVersion + statsVersion + workspaceVersion} onOpenFile={handleOpenFile} onOpenSettings={() => setShowSettings(true)} />
             ) : centerTab === 'telegram' ? (
               <TelegramPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'doctor' ? (
@@ -929,7 +1162,14 @@ export default function App() {
           className={rightOpen ? 'resize-handle resize-handle-right' : 'resize-handle disabled'}
           onMouseDown={rightOpen ? startResize('right') : undefined}
           onDoubleClick={() => setRightOpen(false)}
-          title={rightOpen ? 'Drag to resize, double-click to collapse inspector panel' : undefined}
+          onKeyDown={e => {
+            if (rightOpen && resizePaneByKeyboard('right', e.key, e.shiftKey)) e.preventDefault()
+          }}
+          role="separator"
+          aria-label="Resize Inspector"
+          aria-orientation="vertical"
+          tabIndex={rightOpen ? 0 : -1}
+          title={rightOpen ? 'Drag or use arrow keys to resize; double-click to collapse Inspector' : undefined}
         />
         <div className={rightOpen ? 'pane-slot' : 'pane-slot closed'}>
           {rightOpen ? (
@@ -973,7 +1213,11 @@ export default function App() {
       {showTerminal && (
         <div
           className="terminal-resize-handle"
-          title="Drag to resize, double-click to collapse bottom panel"
+          role="separator"
+          aria-label="Resize bottom panel"
+          aria-orientation="horizontal"
+          tabIndex={0}
+          title="Drag or use arrow keys to resize; double-click to collapse bottom panel"
           onMouseDown={e => {
             const startY = e.clientY
             const startH = terminalHeight
@@ -986,15 +1230,26 @@ export default function App() {
             const onUp = () => {
               window.removeEventListener('mousemove', onMove)
               window.removeEventListener('mouseup', onUp)
-              void persistTerminalPrefs(showTerminal, nextH)
+              void persistTerminalHeight(nextH)
             }
             window.addEventListener('mousemove', onMove)
             window.addEventListener('mouseup', onUp)
             e.preventDefault()
           }}
+          onKeyDown={e => {
+            const amount = e.shiftKey ? 48 : 16
+            const next = e.key === 'ArrowUp'
+              ? Math.min(600, terminalHeight + amount)
+              : e.key === 'ArrowDown'
+                ? Math.max(100, terminalHeight - amount)
+                : e.key === 'Home' ? 260 : null
+            if (next == null) return
+            e.preventDefault()
+            setTerminalHeight(next)
+            void persistTerminalHeight(next)
+          }}
           onDoubleClick={() => {
             setShowTerminal(false)
-            void persistTerminalPrefs(false, terminalHeight)
           }}
         />
       )}

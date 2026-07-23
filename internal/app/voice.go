@@ -45,18 +45,24 @@ type AudioHealth struct {
 var audioSTTProbeCache struct {
 	sync.Mutex
 	ready     bool
+	detail    string
 	checkedAt time.Time
 }
 
-func audioSTTReady() bool {
+func audioSTTDependencyStatus() (bool, string) {
 	audioSTTProbeCache.Lock()
 	defer audioSTTProbeCache.Unlock()
 	if time.Since(audioSTTProbeCache.checkedAt) < 30*time.Second {
-		return audioSTTProbeCache.ready
+		return audioSTTProbeCache.ready, audioSTTProbeCache.detail
 	}
-	_, _, audioSTTProbeCache.ready = resolveWhisperCommand()
+	_, err := audio.ProbeWhisperPython()
+	audioSTTProbeCache.ready = err == nil
+	audioSTTProbeCache.detail = ""
+	if err != nil {
+		audioSTTProbeCache.detail = err.Error()
+	}
 	audioSTTProbeCache.checkedAt = time.Now()
-	return audioSTTProbeCache.ready
+	return audioSTTProbeCache.ready, audioSTTProbeCache.detail
 }
 
 func (a *App) GetAudioHealth() AudioHealth {
@@ -65,15 +71,13 @@ func (a *App) GetAudioHealth() AudioHealth {
 	a.mu.Unlock()
 	runtimeStatus := audio.Status()
 	sttStatus := audio.WhisperStatus()
-	sttReady := audioSTTReady()
-	overall := "ready"
-	if !cfg.Enabled {
-		overall = "disabled"
-	} else if runtimeStatus.LastError != "" || sttStatus.State == "error" {
-		overall = "error"
-	} else if !sttReady {
-		overall = "degraded"
+	sttReady, sttDependencyError := audioSTTDependencyStatus()
+	sttLastError := sttStatus.LastError
+	if sttLastError == "" {
+		sttLastError = sttDependencyError
 	}
+	overall := audioOverall(cfg.Enabled, audioUsesKokoro(cfg.TTSEngine), runtimeStatus.WorkerState,
+		runtimeStatus.LastError, sttStatus.State, sttReady, sttLastError)
 	return AudioHealth{
 		Enabled: cfg.Enabled, Overall: overall, ConfiguredTTS: firstNonEmpty(cfg.TTSEngine, "auto"),
 		ActualTTS: runtimeStatus.LastEngine, Voice: firstNonEmpty(runtimeStatus.LastVoice, cfg.Voice),
@@ -83,14 +87,51 @@ func (a *App) GetAudioHealth() AudioHealth {
 		SpeakReplies: cfg.SpeakReplies, WorkerHidden: true,
 		STTWorkerState: sttStatus.State, STTWorkerPID: sttStatus.PID, STTModel: sttStatus.Model,
 		STTLastDurationMS: sttStatus.LastDurationMS, STTLastAudioMS: sttStatus.LastAudioMS,
-		STTLastSuccess: sttStatus.LastSuccess.Format(time.RFC3339), STTLastError: sttStatus.LastError,
+		STTLastSuccess: sttStatus.LastSuccess.Format(time.RFC3339), STTLastError: sttLastError,
 	}
 }
 
+func audioOverall(enabled, requiresKokoro bool, ttsState, ttsLastError, sttState string, sttReady bool, sttLastError string) string {
+	if !enabled {
+		return "disabled"
+	}
+	ttsState = strings.ToLower(strings.TrimSpace(ttsState))
+	sttState = strings.ToLower(strings.TrimSpace(sttState))
+	if ttsState == "error" || sttState == "error" {
+		return "error"
+	}
+	if ttsState == "loading" || sttState == "loading" {
+		return "loading"
+	}
+	if !sttReady || sttState == "stopped" || (requiresKokoro && ttsState == "stopped") || ttsLastError != "" || sttLastError != "" {
+		return "degraded"
+	}
+	return "ready"
+}
+
 func (a *App) RestartAudioWorker() AudioHealth {
-	audio.RestartWorker()
-	audio.RestartWhisper(audio.ResolveWhisperPython())
+	a.mu.Lock()
+	cfg := settingsAudioSnapshot(a.cfg)
+	a.mu.Unlock()
+	if cfg.Enabled && audioUsesKokoro(cfg.TTSEngine) {
+		audio.RestartKokoro(os.Getenv("MAULER_KOKORO_PYTHON"), cfg.Voice)
+	} else {
+		audio.RestartWorker()
+	}
+	if cfg.Enabled && strings.EqualFold(firstNonEmpty(cfg.STTEngine, "whisper"), "whisper") {
+		audioSTTProbeCache.Lock()
+		audioSTTProbeCache.checkedAt = time.Time{}
+		audioSTTProbeCache.Unlock()
+		audio.RestartWhisper("")
+	} else {
+		audio.StopWhisper()
+	}
 	return a.GetAudioHealth()
+}
+
+func audioUsesKokoro(engine string) bool {
+	engine = strings.ToLower(strings.TrimSpace(engine))
+	return engine == "" || engine == "auto" || engine == "kokoro"
 }
 
 func (a *App) ListKokoroVoices() []string {
@@ -129,7 +170,7 @@ func (a *App) TranscribeVoiceClip(dataURI string) (string, error) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	transcript, workerErr := audio.TranscribeWhisper(runCtx, path, audio.ResolveWhisperPython())
+	transcript, workerErr := audio.TranscribeWhisper(runCtx, path, "")
 	transcript = strings.TrimSpace(transcript)
 	if audio.IsSpeechRejected(workerErr) {
 		return "", workerErr

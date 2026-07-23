@@ -105,6 +105,81 @@
   min-width: 0;
 }
 
+.terminal-stack.with-ai-command-rail .terminal-session {
+  min-width: 0;
+}
+
+.terminal-ai-rail {
+  display: flex;
+  flex: 0 0 108px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 108px;
+  padding: 9px 10px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--c-pane);
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+}
+
+.terminal-ai-rail:hover {
+  background: var(--bg2);
+  color: var(--text);
+}
+
+.terminal-ai-rail strong {
+  color: var(--text-bright);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.terminal-ai-rail > span {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.terminal-ai-rail small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.terminal-ai-rail.is-running {
+  border-left-color: var(--accent);
+}
+
+.terminal-ai-rail.is-running > span {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.terminal-ai-rail.has-error {
+  border-left-color: #ef4444;
+  background: rgba(127, 29, 29, .16);
+}
+
+.terminal-ai-rail.has-error > span {
+  border-color: rgba(248, 113, 113, .62);
+  background: rgba(239, 68, 68, .15);
+  color: #fecaca;
+}
+
+.terminal-ai-rail.has-error small {
+  color: #fca5a5;
+}
+
 .terminal-session {
   flex-direction: column;
   flex: 1;
@@ -294,25 +369,68 @@
 
 .terminal-ai-history {
   display: flex;
+  box-sizing: border-box;
+  width: var(--ai-commands-width, 420px);
+  flex: 0 0 var(--ai-commands-width, 420px);
   flex-direction: column;
-  min-width: 320px;
-  max-width: 65%;
+  min-width: 300px;
+  max-width: calc(100% - 320px);
   min-height: 0;
   background: var(--c-pane);
 }
 
 .terminal-ai-resize {
-  width: 6px;
-  flex: 0 0 6px;
+  position: relative;
+  width: 10px;
+  flex: 0 0 10px;
   cursor: col-resize;
+  touch-action: none;
+  outline: none;
   border-left: 1px solid var(--border);
   border-right: 1px solid rgba(255,255,255,0.04);
-  background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.07), rgba(255,255,255,0.02));
+  background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.10), rgba(255,255,255,0.02));
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.terminal-ai-resize::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 3px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, .45);
+  transform: translateY(-50%);
+}
+
+.terminal-ai-resize.collapsed::before {
+  background: rgba(74, 222, 128, .62);
 }
 
 .terminal-ai-resize:hover,
-.terminal-ai-resize:active {
+.terminal-ai-resize:active,
+.terminal-ai-resize:focus-visible {
+  border-color: rgba(74, 222, 128, .65);
   background: rgba(74, 222, 128, 0.22);
+}
+
+.terminal-ai-resize:hover::before,
+.terminal-ai-resize:active::before,
+.terminal-ai-resize:focus-visible::before {
+  background: var(--accent);
+}
+
+html.terminal-ai-resizing-col,
+html.terminal-ai-resizing-col * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+html.terminal-ai-resizing-row,
+html.terminal-ai-resizing-row * {
+  cursor: row-resize !important;
+  user-select: none !important;
 }
 
 .terminal-ai-history-head {
@@ -509,19 +627,30 @@
 
   .terminal-ai-history {
     width: 100%;
+    height: var(--ai-commands-height, 120px);
+    flex: 0 0 var(--ai-commands-height, 120px);
     min-width: 0;
     max-width: none;
-    max-height: 40%;
+    min-height: 64px;
+    max-height: calc(100% - 90px);
     border-top: 1px solid var(--border);
   }
 
   .terminal-ai-resize {
     width: 100%;
-    height: 6px;
-    flex: 0 0 6px;
+    height: 10px;
+    flex: 0 0 10px;
     cursor: row-resize;
     border-left: 0;
     border-top: 1px solid var(--border);
     border-right: 0;
+  }
+
+  .terminal-ai-resize::before {
+    top: 3px;
+    left: 50%;
+    width: 44px;
+    height: 3px;
+    transform: translateX(-50%);
   }
 }

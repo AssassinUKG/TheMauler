@@ -4,38 +4,49 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"mauler/internal/controlplane"
 	"mauler/internal/ledger"
 	"mauler/internal/settings"
 )
 
 type TaskRun struct {
-	ID               string          `json:"id"`
-	Prompt           string          `json:"prompt"`
-	Mode             string          `json:"mode"`
-	Profile          string          `json:"profile"`
-	Model            string          `json:"model,omitempty"`
-	Status           string          `json:"status"`
-	State            string          `json:"state,omitempty"`
-	StopReason       string          `json:"stop_reason,omitempty"`
-	StopDetail       string          `json:"stop_detail,omitempty"`
-	StartedAt        string          `json:"started_at"`
-	EndedAt          string          `json:"ended_at,omitempty"`
-	DurationMs       int64           `json:"duration_ms,omitempty"`
-	PromptTokens     int             `json:"prompt_tokens,omitempty"`
-	CompletionTokens int             `json:"completion_tokens,omitempty"`
-	TotalTokens      int             `json:"total_tokens,omitempty"`
-	Summary          string          `json:"summary,omitempty"`
-	Response         string          `json:"response,omitempty"`
-	Tools            []TaskToolEvent `json:"tools,omitempty"`
-	Events           []TaskRunEvent  `json:"events,omitempty"`
+	ID                 string                     `json:"id"`
+	Prompt             string                     `json:"prompt"`
+	Mode               string                     `json:"mode"`
+	Profile            string                     `json:"profile"`
+	Model              string                     `json:"model,omitempty"`
+	ContextPacketClass string                     `json:"context_packet_class,omitempty"`
+	ClaimantID         string                     `json:"claimant_id,omitempty"`
+	ClaimantAlias      string                     `json:"claimant_alias,omitempty"`
+	Origin             string                     `json:"origin,omitempty"`
+	Contract           *controlplane.TaskContract `json:"contract,omitempty"`
+	Control            *controlplane.MachineState `json:"control,omitempty"`
+	Status             string                     `json:"status"`
+	State              string                     `json:"state,omitempty"`
+	StopReason         string                     `json:"stop_reason,omitempty"`
+	StopDetail         string                     `json:"stop_detail,omitempty"`
+	StartedAt          string                     `json:"started_at"`
+	EndedAt            string                     `json:"ended_at,omitempty"`
+	DurationMs         int64                      `json:"duration_ms,omitempty"`
+	PromptTokens       int                        `json:"prompt_tokens,omitempty"`
+	CompletionTokens   int                        `json:"completion_tokens,omitempty"`
+	TotalTokens        int                        `json:"total_tokens,omitempty"`
+	Summary            string                     `json:"summary,omitempty"`
+	Response           string                     `json:"response,omitempty"`
+	Tools              []TaskToolEvent            `json:"tools,omitempty"`
+	Events             []TaskRunEvent             `json:"events,omitempty"`
 
 	startMs              int64 // not serialised; used to compute DurationMs
 	ledger               *ledger.Ledger
 	memoryConflictEvents map[string]int
 }
+
+var taskRunSequence atomic.Uint64
 
 type TaskRunEvent struct {
 	Kind      string `json:"kind"`
@@ -87,7 +98,8 @@ func (a *App) ImportTaskRunsJSON(raw string) (int, error) {
 func startTaskRun(prompt, mode, profile, model string) TaskRun {
 	now := time.Now()
 	return TaskRun{
-		ID:        "task-" + strings.ReplaceAll(now.Format(time.RFC3339), ":", "-"),
+		ID: "task-" + strings.ReplaceAll(now.Format(time.RFC3339Nano), ":", "-") +
+			"-" + strconv.FormatUint(taskRunSequence.Add(1), 36),
 		Prompt:    strings.TrimSpace(prompt),
 		Mode:      mode,
 		Profile:   profile,

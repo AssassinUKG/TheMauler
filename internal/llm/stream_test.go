@@ -368,6 +368,64 @@ func TestParseSSEUsageChunk(t *testing.T) {
 	}
 }
 
+func TestParseSSELlamacppTrailingUsageAndTimings(t *testing.T) {
+	// Current llama.cpp order: finish_reason, trailing usage/timings, [DONE].
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}`,
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":22026,"completion_tokens":217,"total_tokens":22243,"prompt_tokens_details":{"cached_tokens":236}},"timings":{"cache_n":236,"prompt_n":21790,"prompt_ms":21351.966,"prompt_per_second":1031.5677,"predicted_n":217,"predicted_ms":7266.06,"predicted_per_second":29.8648}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+
+	var usage *Usage
+	var doneCount int
+	for _, d := range collectSSE(input) {
+		if d.Usage != nil {
+			usage = d.Usage
+		}
+		if d.Done {
+			doneCount++
+		}
+	}
+	if usage == nil {
+		t.Fatal("expected trailing llama.cpp usage delta")
+	}
+	if usage.PromptTokens != 22026 || usage.CompletionTokens != 217 || usage.TotalTokens != 22243 {
+		t.Fatalf("usage counts = %+v", usage)
+	}
+	if usage.CachedPromptTokens != 236 || usage.PromptTokensPerSecond != 1031.5677 || usage.CompletionTokensPerSecond != 29.8648 {
+		t.Fatalf("usage timings = %+v", usage)
+	}
+	if doneCount != 1 {
+		t.Fatalf("done count = %d, want 1", doneCount)
+	}
+}
+
+func TestParseSSELlamacppTrailingUsageAfterToolCalls(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"whoami\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"total_tokens":112},"timings":{"prompt_per_second":500,"predicted_per_second":25}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+
+	var usage *Usage
+	var calls []ToolCallDef
+	for _, d := range collectSSE(input) {
+		if d.Usage != nil {
+			usage = d.Usage
+		}
+		calls = append(calls, d.ToolCalls...)
+	}
+	if usage == nil || usage.TotalTokens != 112 {
+		t.Fatalf("usage = %+v", usage)
+	}
+	if len(calls) != 1 || calls[0].Function.Name != "shell" {
+		t.Fatalf("calls = %#v", calls)
+	}
+}
+
 // --- [DONE] sentinel ---
 
 func TestParseSSEDoneSentinelBreaksLoop(t *testing.T) {

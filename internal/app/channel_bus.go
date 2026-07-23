@@ -373,6 +373,7 @@ func (a *App) runSideChatCompletion(ctx context.Context, client llm.Client, prof
 		TopK:             params.TopK,
 		MinP:             params.MinP,
 		PresencePenalty:  params.PresencePenalty,
+		RepeatPenalty:    params.RepeatPenalty,
 		Seed:             params.Seed,
 		ToolChoice:       "none",
 		EnableThinking:   false,
@@ -421,6 +422,25 @@ func (a *App) sideChatProfile() (*settings.Settings, *settings.ProfilesFile, set
 }
 
 func (a *App) sideChatMessages(sessionID string, env channelbus.Envelope, text string, cfg *settings.Settings, pf *settings.ProfilesFile) []llm.Message {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(env.Source)), "desktop") {
+		system := "You are Mauler Fast Chat, a concise no-tools local assistant. Answer the user's question directly and naturally. " +
+			"This lane deliberately receives no workspace documents, project memory, tool schemas, control-plane packet, planning pass, or reviewer pass. " +
+			"Do not claim to have inspected files, run commands, searched the web, or changed the project. If the request requires action, briefly direct the user to Project Agent."
+		if cfg != nil {
+			system += " Active local profile: " + cfg.ActiveProfile + "."
+		}
+		msgs := []llm.Message{llm.NewTextMessage(llm.RoleSystem, system)}
+		a.sideChatMu.Lock()
+		history := append([]llm.Message(nil), a.sideChatHistories[sessionID]...)
+		a.sideChatMu.Unlock()
+		if len(history) > 8 {
+			history = history[len(history)-8:]
+		}
+		msgs = append(msgs, history...)
+		msgs = append(msgs, llm.NewTextMessage(llm.RoleUser, text))
+		return msgs
+	}
+
 	system := "You are MaulBot, TheMauler's Telegram side-chat assistant running on the user's local Windows machine. Reply conversationally and directly. " +
 		"Do not claim you are cloud-hosted, remote-only, or unable to access the local machine because you are in the cloud. " +
 		"Your side-chat lane has no tools, but /cmd starts a local TheMauler agent run with approved local tools and CLI access. " +
@@ -785,7 +805,8 @@ func (a *App) handleChannelWork(env channelbus.Envelope, route channelbus.Route)
 	}
 	a.applyTelegramWorkDefaults()
 	images := channelImageDataURIs(env)
-	if err := a.SendMessage(prompt, images, nil); err != nil {
+	claimantID, claimantAlias, origin := channelRunClaimant(env)
+	if err := a.sendMessageWithClaimant(prompt, images, nil, claimantID, claimantAlias, origin); err != nil {
 		item := a.ensureChannelQueue().Enqueue(env, route)
 		return channelbus.Response{
 			Lane:    route.Lane,
@@ -800,7 +821,40 @@ func (a *App) handleChannelWork(env channelbus.Envelope, route channelbus.Route)
 		Status:     "started",
 		Message:    formatRemoteRunStartMessage(prompt, a.cfg),
 		RunStarted: true,
+		Data:       map[string]string{"task": prompt},
 	}, nil
+}
+
+func channelRunClaimant(env channelbus.Envelope) (id, alias, origin string) {
+	source := claimantSegment(env.Source)
+	session := claimantSegment(env.SessionID)
+	message := claimantSegment(env.ID)
+	if source == "" {
+		source = "channel"
+	}
+	if session == "" {
+		session = "default"
+	}
+	if message == "" {
+		message = fmt.Sprintf("msg-%d", time.Now().UnixNano())
+	}
+	id = "channel:" + source + ":" + session + ":" + message
+	alias = strings.TrimSpace(env.Username)
+	if alias == "" {
+		alias = firstNonEmpty(strings.TrimSpace(env.UserID), source)
+	}
+	return id, alias, source
+}
+
+func claimantSegment(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var sb strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			sb.WriteRune(r)
+		}
+	}
+	return strings.Trim(sb.String(), ".-_")
 }
 
 func channelImageDataURIs(env channelbus.Envelope) []string {
@@ -938,7 +992,12 @@ func (a *App) dispatchQueuedChannelItem(item channelbus.WorkItem) (channelbus.Re
 	case channelbus.LaneQuick:
 		return a.handleChannelQuickAction(env, route)
 	case channelbus.LaneWork:
-		return a.handleChannelWork(env, route)
+		chatID, tracked := a.trackQueuedTelegramRun(env, route.Argument)
+		resp, err := a.handleChannelWork(env, route)
+		if tracked && (err != nil || !resp.RunStarted) {
+			a.untrackQueuedTelegramRun(chatID)
+		}
+		return resp, err
 	case channelbus.LaneControl:
 		return a.handleChannelControl(env, route)
 	case channelbus.LaneInterrupt, channelbus.LaneNote:

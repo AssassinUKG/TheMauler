@@ -1,6 +1,6 @@
 {
   "name": "redirect-loop-guard",
-  "prompt": "Target: 10.129.26.26. Continue from the project files. If HTTP redirects to connected.htb, follow the redirect once with -L or use the Location target directly. Do not repeat the same curl with only head/tail/timeout changes.",
+  "prompt": "Target: 10.129.26.26. Inspect the existing project files and explain the single next HTTP command that should be used when the response redirects to connected.htb. This is a planning-only question: do not execute shell, HTTP, browser, terminal, DNS, curl, or nmap tools. Do not repeat or launch a probe.",
   "workspace": {
     ".mauler/project-recap.md": "target: 10.129.26.26\nlast HTTP probe returned 301 Location: http://connected.htb/\n",
     "http_probe_connected.htb_20260706.txt": "HTTP/1.1 301 Moved Permanently\nLocation: http://connected.htb/\n"
@@ -8,5 +8,6 @@
   "mode": "Builder",
   "max_tool_calls": 8,
   "expect_status": "done",
+  "forbid_tools": ["shell", "http_probe", "browser", "terminal_send", "terminal_read"],
   "max_auto_continues": 3
 }

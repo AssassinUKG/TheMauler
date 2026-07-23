@@ -1,4 +1,5 @@
-import { useRef, useEffect, useState, useCallback, useMemo, type KeyboardEvent } from 'react'
+import { useRef, useEffect, useState, useCallback, useMemo, useLayoutEffect, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -23,8 +24,10 @@ import {
   type TodoItem,
   type ChannelWorkItem,
   type TerminalStateSnapshot,
+  type AgentDefinition,
+  type Settings,
 } from '../wailsjs/go'
-import type { AgentActivity, ChatMessage, RunStatePayload, ToolCountdown } from '../App'
+import type { AgentActivity, ChatMessage, RunProfileOption, RunStatePayload, ToolCountdown } from '../App'
 import './ChatPane.css'
 
 interface Props {
@@ -33,6 +36,9 @@ interface Props {
   streamBuffer: string
   thinkingBuffer: string
   activeProfile: string
+  activeRunProfile: string
+  cloudRunProfiles: RunProfileOption[]
+  runProfileOverride: string
   autonomous: boolean
   pendingInterrupt: boolean
   toolCountdown: ToolCountdown | null
@@ -40,14 +46,29 @@ interface Props {
   todos: TodoItem[]
   activity: AgentActivity[]
   settingsVersion: number
-  onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[]) => void
+  agentDefinitions: AgentDefinition[]
+  agentSelection: string
+  draftRequest?: { id: string; text: string } | null
+  onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[], profileOverride?: string) => void
+  onRunProfileOverrideChange: (profile: string) => void
   onCancelPending: () => void
   onStopAgent: () => void
   onClearChat: () => void
   onArtifact: (code: string, lang: string) => void
   onAutonomousChange: (enabled: boolean) => void
   onOpenQuickChat: () => void
+  onOpenSettings: () => void
+  onAgentSelectionChange: (mode: string) => void | Promise<void>
+  onChooseWorkspace: (bugBounty: boolean) => void | Promise<void>
+  onSwitchWorkspace: (path: string) => void | Promise<void>
+  onOpenProjects: () => void
   onClearPlan: () => void | Promise<void>
+}
+
+interface ChatWorkspaceOption {
+  path: string
+  name: string
+  kind: 'project' | 'folder'
 }
 
 export function ChatPane({
@@ -56,6 +77,9 @@ export function ChatPane({
   streamBuffer,
   thinkingBuffer,
   activeProfile,
+  activeRunProfile,
+  cloudRunProfiles,
+  runProfileOverride,
   autonomous,
   pendingInterrupt,
   toolCountdown,
@@ -63,23 +87,39 @@ export function ChatPane({
   todos,
   activity,
   settingsVersion,
+  agentDefinitions,
+  agentSelection,
+  draftRequest,
   onSubmitMessage,
+  onRunProfileOverrideChange,
   onCancelPending,
   onStopAgent,
   onClearChat,
   onArtifact,
   onAutonomousChange,
   onOpenQuickChat,
+  onOpenSettings,
+  onAgentSelectionChange,
+  onChooseWorkspace,
+  onSwitchWorkspace,
+  onOpenProjects,
   onClearPlan,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const planTriggerRef = useRef<HTMLButtonElement>(null)
+  const toolsTriggerRef = useRef<HTMLButtonElement>(null)
+  const workspaceTriggerRef = useRef<HTMLButtonElement>(null)
+  const agentTriggerRef = useRef<HTMLButtonElement>(null)
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [videoStatus, setVideoStatus] = useState<string | null>(null)
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
+  const [attachmentEditor, setAttachmentEditor] = useState<{ attachment: ChatAttachment; source: 'draft' | 'message' } | null>(null)
+  const [attachmentEditorText, setAttachmentEditorText] = useState('')
+  const [attachmentCopied, setAttachmentCopied] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearch, setShowSearch] = useState(false)
   const [nowMs, setNowMs] = useState(Date.now())
@@ -88,8 +128,9 @@ export function ChatPane({
   const [channelStatus, setChannelStatus] = useState<Record<string, string>>({})
   const [channelQueue, setChannelQueue] = useState<ChannelWorkItem[]>([])
   const [terminalState, setTerminalState] = useState<TerminalStateSnapshot | null>(null)
-  const [openPopover, setOpenPopover] = useState<'plan' | 'tools' | null>(null)
+  const [openPopover, setOpenPopover] = useState<'plan' | 'tools' | 'workspace' | 'agent' | null>(null)
   const [audioConfig, setAudioConfig] = useState<AudioConfig | null>(null)
+  const [workspaceOptions, setWorkspaceOptions] = useState<ChatWorkspaceOption[]>([])
   const [recording, setRecording] = useState(false)
   const [voiceSession, setVoiceSession] = useState(false)
   const [voiceStatus, setVoiceStatus] = useState('')
@@ -103,6 +144,14 @@ export function ChatPane({
   const speechOffsetRef = useRef(0)
   const speechBufferRef = useRef('')
   const wasStreamingRef = useRef(false)
+  const appliedDraftRequestRef = useRef('')
+
+  useEffect(() => {
+    if (!draftRequest?.id || appliedDraftRequestRef.current === draftRequest.id) return
+    appliedDraftRequestRef.current = draftRequest.id
+    setInput(current => current.trim() ? `${current}\n\n${draftRequest.text}` : draftRequest.text)
+    window.setTimeout(() => inputRef.current?.focus(), 0)
+  }, [draftRequest])
 
   const visibleMessages = useMemo(() => {
     if (!searchQuery.trim()) return messages
@@ -125,7 +174,13 @@ export function ChatPane({
   }, [toolCountdown])
 
   useEffect(() => {
-    void GetSettings().then(value => setAudioConfig(value.audio)).catch(() => setAudioConfig(null))
+    void GetSettings().then(value => {
+      setAudioConfig(value.audio)
+      setWorkspaceOptions(chatWorkspaceOptions(value))
+    }).catch(() => {
+      setAudioConfig(null)
+      setWorkspaceOptions([])
+    })
   }, [settingsVersion])
 
   const stopSpeech = useCallback(() => {
@@ -222,7 +277,7 @@ export function ChatPane({
           .then(TranscribeVoiceClip)
           .then(transcript => {
             setVoiceStatus(`Heard: ${transcript}`)
-            onSubmitMessage(transcript, [], [])
+            onSubmitMessage(transcript, [], [], runProfileOverride)
           })
           .catch(error => setVoiceStatus(`Transcription failed: ${String(error)}`))
       }
@@ -234,7 +289,7 @@ export function ChatPane({
     } catch (error) {
       setVoiceStatus(`Microphone unavailable: ${String(error)}`)
     }
-  }, [audioConfig, onStopAgent, onSubmitMessage, stopSpeech, streaming])
+  }, [audioConfig, onStopAgent, onSubmitMessage, runProfileOverride, stopSpeech, streaming])
 
   useEffect(() => {
     let cancelled = false
@@ -305,8 +360,8 @@ export function ChatPane({
     const atts = [...attachments]
     setImages([])
     setAttachments([])
-    onSubmitMessage(text, imgs, atts)
-  }, [input, images, attachments, messages, onSubmitMessage])
+    onSubmitMessage(text, imgs, atts, runProfileOverride)
+  }, [input, images, attachments, messages, onSubmitMessage, runProfileOverride])
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -525,6 +580,54 @@ export function ChatPane({
     setAttachments(prev => prev.filter(a => a.id !== id))
   }, [])
 
+  const openAttachment = useCallback((attachment: ChatAttachment, source: 'draft' | 'message') => {
+    setAttachmentEditor({ attachment, source })
+    setAttachmentEditorText(attachment.content ?? attachment.path ?? '')
+    setAttachmentCopied(false)
+  }, [])
+
+  const closeAttachment = useCallback(() => {
+    setAttachmentEditor(null)
+    setAttachmentEditorText('')
+    setAttachmentCopied(false)
+  }, [])
+
+  const copyAttachment = useCallback(async () => {
+    await navigator.clipboard.writeText(attachmentEditorText)
+    setAttachmentCopied(true)
+    window.setTimeout(() => setAttachmentCopied(false), 1600)
+  }, [attachmentEditorText])
+
+  const saveAttachmentEdit = useCallback(() => {
+    if (!attachmentEditor || !attachmentIsEditable(attachmentEditor.attachment)) return
+    if (attachmentEditor.source === 'draft') {
+      setAttachments(prev => prev.map(att => att.id === attachmentEditor.attachment.id
+        ? { ...att, content: attachmentEditorText, size: attachmentEditorText.length, truncated: false }
+        : att))
+    } else {
+      setAttachments(prev => [...prev, {
+        ...attachmentEditor.attachment,
+        id: crypto.randomUUID(),
+        name: editedAttachmentName(attachmentEditor.attachment.name),
+        path: undefined,
+        content: attachmentEditorText,
+        size: attachmentEditorText.length,
+        truncated: false,
+      }])
+    }
+    closeAttachment()
+    window.setTimeout(() => inputRef.current?.focus(), 0)
+  }, [attachmentEditor, attachmentEditorText, closeAttachment])
+
+  useEffect(() => {
+    if (!attachmentEditor) return
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') closeAttachment()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [attachmentEditor, closeAttachment])
+
   // Open code blocks as scratch snippets in the File tab.
   const handleCodeBlock = useCallback((code: string, lang: string) => {
     onArtifact(code, lang || 'plaintext')
@@ -532,7 +635,7 @@ export function ChatPane({
 
   return (
     <div className="chat-pane">
-      <div className="chat-lane-banner"><strong>Project agent</strong><span>Tools and selected-box context are active.</span><button onClick={onOpenQuickChat}>Quick question · no tools</button></div>
+      <div className="chat-lane-banner"><strong>Project agent</strong><span>Tools and selected-box context are active.</span><button onClick={onOpenQuickChat}>Fast chat · no tools/context</button></div>
       {showSearch && (
         <div className="chat-search-bar">
           <input
@@ -585,6 +688,7 @@ export function ChatPane({
             msg={msg}
             onCodeBlock={handleCodeBlock}
             onImageClick={setLightboxImage}
+            onAttachmentOpen={att => openAttachment(att, 'message')}
             onReadResult={(id) => {
               setInput(`Use read_tool_result to read result_id=${id} offset=0 limit=8000`)
               setTimeout(() => inputRef.current?.focus(), 0)
@@ -623,6 +727,46 @@ export function ChatPane({
         </button>
       )}
 
+      {attachmentEditor && (
+        <div className="attachment-dialog-backdrop" onMouseDown={event => {
+          if (event.target === event.currentTarget) closeAttachment()
+        }}>
+          <section className="attachment-dialog" role="dialog" aria-modal="true" aria-label={`Attachment ${attachmentEditor.attachment.name}`}>
+            <header className="attachment-dialog-header">
+              <div>
+                <strong>{attachmentEditor.attachment.name}</strong>
+                <span>{attachmentSubtitle(attachmentEditor.attachment)}{attachmentEditor.attachment.truncated ? ' / truncated' : ''}</span>
+              </div>
+              <button onClick={closeAttachment} title="Close attachment">Close</button>
+            </header>
+            <textarea
+              className="attachment-dialog-editor"
+              value={attachmentEditorText}
+              onChange={event => setAttachmentEditorText(event.target.value)}
+              readOnly={!attachmentIsEditable(attachmentEditor.attachment)}
+              spellCheck={false}
+              aria-label="Attachment contents"
+            />
+            <footer className="attachment-dialog-actions">
+              <span>
+                {attachmentEditorText.length.toLocaleString()} characters
+                {attachmentEditor.source === 'message' && attachmentIsEditable(attachmentEditor.attachment)
+                  ? ' / edits become a new draft attachment'
+                  : ''}
+              </span>
+              <div>
+                <button onClick={() => void copyAttachment()}>{attachmentCopied ? 'Copied' : 'Copy all'}</button>
+                {attachmentIsEditable(attachmentEditor.attachment) && (
+                  <button className="primary" onClick={saveAttachmentEdit}>
+                    {attachmentEditor.source === 'draft' ? 'Save changes' : 'Add edited copy to draft'}
+                  </button>
+                )}
+              </div>
+            </footer>
+          </section>
+        </div>
+      )}
+
       <div className="chat-input-area">
         {pendingInterrupt && (
           <div className="chat-pending-interrupt">
@@ -633,6 +777,7 @@ export function ChatPane({
         <div className="chat-run-footer">
           <div className="run-popover-wrap">
             <button
+              ref={planTriggerRef}
               type="button"
               className={`run-popover-trigger ${openPopover === 'plan' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'plan' ? null : 'plan')}
@@ -641,11 +786,14 @@ export function ChatPane({
               Plan <strong>{todoSummary(todos)}</strong>
             </button>
             {openPopover === 'plan' && (
-              <PlanPopover todos={todos} onClear={onClearPlan} />
+              <ComposerPopoverPortal anchor={planTriggerRef.current}>
+                <PlanPopover todos={todos} onClear={onClearPlan} />
+              </ComposerPopoverPortal>
             )}
           </div>
           <div className="run-popover-wrap">
             <button
+              ref={toolsTriggerRef}
               type="button"
               className={`run-popover-trigger ${openPopover === 'tools' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'tools' ? null : 'tools')}
@@ -654,20 +802,99 @@ export function ChatPane({
               Tools <strong>{toolSummary(activity, toolCountdown)}</strong>
             </button>
             {openPopover === 'tools' && (
-              <ToolboxPopover
-                activity={activity}
-                countdown={toolCountdown}
-                runState={runState}
-                profile={activeProfile}
-                context={formatContext(historyStats)}
-                workspace={workspaceRoot}
-                autonomous={autonomous}
-                channelStatus={channelStatus}
-                channelQueue={channelQueue}
-                terminalState={terminalState}
-              />
+              <ComposerPopoverPortal anchor={toolsTriggerRef.current}>
+                <ToolboxPopover
+                  activity={activity}
+                  countdown={toolCountdown}
+                  runState={runState}
+                  profile={activeProfile}
+                  context={formatContext(historyStats)}
+                  workspace={workspaceRoot}
+                  autonomous={autonomous}
+                  channelStatus={channelStatus}
+                  channelQueue={channelQueue}
+                  terminalState={terminalState}
+                />
+              </ComposerPopoverPortal>
             )}
           </div>
+          <div className="run-popover-wrap run-workspace-wrap">
+            <button
+              ref={workspaceTriggerRef}
+              type="button"
+              className={`run-popover-trigger ${openPopover === 'workspace' ? 'active' : ''}`}
+              onClick={() => setOpenPopover(v => v === 'workspace' ? null : 'workspace')}
+              title={workspaceRoot || 'Choose the active workspace'}
+            >
+              Workspace <strong>{shortPath(workspaceRoot) || 'choose'}</strong>
+            </button>
+            {openPopover === 'workspace' && (
+              <ComposerPopoverPortal anchor={workspaceTriggerRef.current} width={560}>
+                <WorkspacePopover
+                  current={workspaceRoot}
+                  options={workspaceOptions}
+                  disabled={streaming}
+                  onChoose={async bugBounty => {
+                    setOpenPopover(null)
+                    await onChooseWorkspace(bugBounty)
+                  }}
+                  onSwitch={async path => {
+                    setOpenPopover(null)
+                    await onSwitchWorkspace(path)
+                  }}
+                  onManage={() => {
+                    setOpenPopover(null)
+                    onOpenProjects()
+                  }}
+                />
+              </ComposerPopoverPortal>
+            )}
+          </div>
+          <div className="run-popover-wrap run-agent-wrap">
+            <button
+              ref={agentTriggerRef}
+              type="button"
+              className={`run-popover-trigger ${openPopover === 'agent' ? 'active' : ''}`}
+              onClick={() => setOpenPopover(v => v === 'agent' ? null : 'agent')}
+              title="Choose the agent remembered for this workspace"
+            >
+              Agent <strong>{agentSelection || 'Auto'}</strong>
+            </button>
+            {openPopover === 'agent' && (
+              <ComposerPopoverPortal anchor={agentTriggerRef.current} width={560}>
+                <AgentPopover
+                  definitions={agentDefinitions}
+                  selected={agentSelection || 'Auto'}
+                  disabled={streaming}
+                  onSelect={async mode => {
+                    setOpenPopover(null)
+                    await onAgentSelectionChange(mode)
+                  }}
+                />
+              </ComposerPopoverPortal>
+            )}
+          </div>
+          <label className={`run-profile-once ${runProfileOverride ? 'cloud' : 'local'}`} title="Choose a model for the next task only. Mauler always returns to the local default afterward.">
+            <span>Next task</span>
+            <select
+              value={runProfileOverride}
+              onChange={event => onRunProfileOverrideChange(event.target.value)}
+              aria-label="Model for next task"
+            >
+              <option value="">Local default · {activeProfile || 'local profile'}</option>
+              {cloudRunProfiles.map(profile => (
+                <option key={profile.name} value={profile.name}>Cloud once · {profile.model}</option>
+              ))}
+            </select>
+          </label>
+          {cloudRunProfiles.length === 0 && (
+            <button type="button" className="run-cloud-setup" onClick={onOpenSettings} title="Add an OpenRouter model in Settings, then use it for one task at a time.">
+              Add cloud boost
+            </button>
+          )}
+          {activeRunProfile && activeRunProfile !== activeProfile && (
+            <RunPill label="This run" value={`Cloud · ${activeRunProfile}`} tone="live" />
+          )}
           <label className={`run-autonomy ${autonomous ? 'active' : ''}`} title="Autonomous mode lets the agent run tools without confirmation prompts.">
             <input
               type="checkbox"
@@ -683,7 +910,12 @@ export function ChatPane({
           {attachments.length > 0 && (
             <div className="attachment-previews">
               {attachments.map(att => (
-                <AttachmentChip key={att.id} attachment={att} onRemove={() => removeAttachment(att.id)} />
+                <AttachmentChip
+                  key={att.id}
+                  attachment={att}
+                  onOpen={() => openAttachment(att, 'draft')}
+                  onRemove={() => removeAttachment(att.id)}
+                />
               ))}
             </div>
           )}
@@ -785,6 +1017,47 @@ function toolSummary(activity: AgentActivity[], countdown: ToolCountdown | null)
   return last ? `${last.name} ${last.status}` : 'idle'
 }
 
+function ComposerPopoverPortal({
+  anchor,
+  width = 520,
+  children,
+}: {
+  anchor: HTMLElement | null
+  width?: number
+  children: ReactNode
+}) {
+  const [style, setStyle] = useState<CSSProperties>({ visibility: 'hidden' })
+
+  useLayoutEffect(() => {
+    if (!anchor) return
+    const update = () => {
+      const rect = anchor.getBoundingClientRect()
+      const margin = 12
+      const gap = 8
+      const resolvedWidth = Math.min(width, Math.max(280, window.innerWidth - margin * 2))
+      const left = Math.min(
+        Math.max(margin, rect.left),
+        Math.max(margin, window.innerWidth - resolvedWidth - margin),
+      )
+      const above = Math.max(0, rect.top - margin - gap)
+      const below = Math.max(0, window.innerHeight - rect.bottom - margin - gap)
+      if (below > above) {
+        setStyle({ left, top: rect.bottom + gap, width: resolvedWidth, maxHeight: Math.max(140, below) })
+      } else {
+        setStyle({ left, bottom: window.innerHeight - rect.top + gap, width: resolvedWidth, maxHeight: Math.max(140, above) })
+      }
+    }
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [anchor, width])
+
+  return createPortal(
+    <div className="composer-popover-portal" style={style}>{children}</div>,
+    document.body,
+  )
+}
+
 function PlanPopover({ todos, onClear }: { todos: TodoItem[]; onClear: () => void | Promise<void> }) {
   const current = todos.find(t => t.status === 'in_progress') || todos.find(t => t.status === 'blocked') || todos.find(t => t.status !== 'done')
   return (
@@ -812,6 +1085,131 @@ function PlanPopover({ todos, onClear }: { todos: TodoItem[]; onClear: () => voi
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+function chatWorkspaceOptions(settings: Settings): ChatWorkspaceOption[] {
+  const seen = new Set<string>()
+  const options: ChatWorkspaceOption[] = []
+  const add = (path: string, name: string, kind: ChatWorkspaceOption['kind']) => {
+    const cleanPath = String(path || '').trim().replaceAll('\\', '/')
+    if (!cleanPath) return
+    const key = cleanPath.toLowerCase().replace(/\/$/, '')
+    if (seen.has(key)) return
+    seen.add(key)
+    options.push({ path: cleanPath, name: String(name || '').trim() || shortPath(cleanPath), kind })
+  }
+  for (const project of settings.context.lab_profiles ?? []) {
+    add(project.workspace_dir, project.name || project.id, 'project')
+  }
+  for (const folder of settings.context.open_folders ?? []) {
+    add(folder.path, folder.name, 'folder')
+  }
+  add(settings.context.workspace_dir, shortPath(settings.context.workspace_dir), 'folder')
+  return options
+}
+
+function WorkspacePopover({
+  current,
+  options,
+  disabled,
+  onChoose,
+  onSwitch,
+  onManage,
+}: {
+  current: string
+  options: ChatWorkspaceOption[]
+  disabled: boolean
+  onChoose: (bugBounty: boolean) => void | Promise<void>
+  onSwitch: (path: string) => void | Promise<void>
+  onManage: () => void
+}) {
+  const currentKey = current.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase()
+  return (
+    <div className="composer-popover composer-workspace-popover">
+      <div className="composer-popover-head">
+        <span>Active workspace</span>
+        <strong title={current}>{shortPath(current) || 'Not selected'}</strong>
+      </div>
+      <p className="composer-popover-note">Switching opens a clean project chat and restores the agent remembered for that folder. Files, memory, saved sessions, evidence, and logs are preserved.</p>
+      {disabled && <div className="workspace-switch-warning">Stop the active run before changing workspace.</div>}
+      <div className="workspace-action-grid">
+        <button disabled={disabled} onClick={() => void onChoose(false)}>
+          <strong>Choose folder...</strong>
+          <span>Open any existing workspace</span>
+        </button>
+        <button disabled={disabled} onClick={() => void onChoose(true)}>
+          <strong>Choose bounty folder...</strong>
+          <span>Open it with Bug Bounty Hunter</span>
+        </button>
+      </div>
+      <div className="workspace-popover-list">
+        {options.length === 0 ? (
+          <div className="empty-popover-row">No recent workspaces yet.</div>
+        ) : options.map(option => {
+          const key = option.path.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase()
+          const active = key === currentKey
+          return (
+            <button
+              key={option.path}
+              className={`workspace-popover-row${active ? ' active' : ''}`}
+              disabled={disabled || active}
+              onClick={() => void onSwitch(option.path)}
+              title={option.path}
+            >
+              <span>{option.kind}</span>
+              <strong>{option.name}</strong>
+              <small>{option.path}</small>
+            </button>
+          )
+        })}
+      </div>
+      <button className="workspace-manage-button" onClick={onManage}>Manage workspaces...</button>
+    </div>
+  )
+}
+
+function AgentPopover({
+  definitions,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  definitions: AgentDefinition[]
+  selected: string
+  disabled: boolean
+  onSelect: (mode: string) => void | Promise<void>
+}) {
+  const items = definitions.length > 0 ? definitions : [{
+    id: 'auto', name: 'Auto', description: 'Choose the right working style for the task.', version: '1',
+    default_toolset: 'balanced', default_autonomy: 'balanced', planning_only: false, builtin: true,
+  }]
+  return (
+    <div className="composer-popover composer-agent-popover">
+      <div className="composer-popover-head">
+        <span>Workspace agent</span>
+        <strong>{selected}</strong>
+      </div>
+      <p className="composer-popover-note">This choice is remembered for the current workspace. It does not change the local model default or one-task cloud boost.</p>
+      <div className="agent-popover-list">
+        {items.map(definition => (
+          <button
+            key={definition.id}
+            className={`agent-popover-row${definition.name === selected ? ' active' : ''}`}
+            disabled={disabled || definition.name === selected}
+            onClick={() => void onSelect(definition.name)}
+          >
+            <span className="agent-popover-title">
+              <strong>{definition.name}</strong>
+              {definition.planning_only && <small>Planning only</small>}
+            </span>
+            <span className="agent-popover-description">{definition.description}</span>
+            <span className="agent-popover-policy">{definition.default_autonomy || 'balanced'} / {definition.default_toolset || 'balanced'}</span>
+          </button>
+        ))}
+      </div>
+      {disabled && <div className="workspace-switch-warning">Stop the active run before changing agent.</div>}
     </div>
   )
 }
@@ -951,21 +1349,58 @@ function attachmentSubtitle(att: ChatAttachment): string {
   return 'File'
 }
 
+function attachmentIsEditable(att: ChatAttachment): boolean {
+  return att.kind === 'document' && att.content !== undefined
+}
+
+function editedAttachmentName(name: string): string {
+  const value = name.trim() || 'Pasted text.txt'
+  const dot = value.lastIndexOf('.')
+  if (dot > 0) return `${value.slice(0, dot)} (edited)${value.slice(dot)}`
+  return `${value} (edited)`
+}
+
 function AttachmentChip({
   attachment,
+  onOpen,
   onRemove,
 }: {
   attachment: ChatAttachment
+  onOpen?: () => void
   onRemove?: () => void
 }) {
+  const openOnKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!onOpen || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault()
+    onOpen()
+  }
   return (
-    <div className="attachment-chip" title={attachment.path || attachment.name}>
+    <div
+      className={`attachment-chip${onOpen ? ' attachment-chip-openable' : ''}`}
+      title={onOpen ? `Open ${attachment.name}` : (attachment.path || attachment.name)}
+      role={onOpen ? 'button' : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onClick={onOpen}
+      onKeyDown={openOnKeyboard}
+    >
       <div className="attachment-icon">TXT</div>
       <div className="attachment-meta">
         <div className="attachment-name">{attachment.name}</div>
-        <div className="attachment-kind">{attachmentSubtitle(attachment)}{attachment.truncated ? ' / truncated' : ''}</div>
+        <div className="attachment-kind">
+          {attachmentSubtitle(attachment)}{attachment.truncated ? ' / truncated' : ''}
+          {onOpen && <span className="attachment-open-hint"> / {onRemove ? 'open or edit' : 'open or copy'}</span>}
+        </div>
       </div>
-      {onRemove && <button className="attachment-remove" onClick={onRemove} title="Remove attachment">x</button>}
+      {onRemove && (
+        <button
+          className="attachment-remove"
+          onClick={event => {
+            event.stopPropagation()
+            onRemove()
+          }}
+          title="Remove attachment"
+        >x</button>
+      )}
     </div>
   )
 }
@@ -998,11 +1433,13 @@ function MessageBubble({
   msg,
   onCodeBlock,
   onImageClick,
+  onAttachmentOpen,
   onReadResult,
 }: {
   msg: ChatMessage
   onCodeBlock: (code: string, lang: string) => void
   onImageClick: (src: string) => void
+  onAttachmentOpen: (attachment: ChatAttachment) => void
   onReadResult: (id: string) => void
 }) {
   const [copied, setCopied] = useState(false)
@@ -1026,7 +1463,12 @@ function MessageBubble({
   }
 
   const copyMessage = () => {
-    void navigator.clipboard.writeText(msg.content).then(() => {
+    const attachmentText = (msg.attachments ?? []).map(att => {
+      const content = att.content ?? att.path ?? ''
+      return content ? `${att.name}\n${content}` : att.name
+    })
+    const copyText = [msg.content, ...attachmentText].filter(Boolean).join('\n\n')
+    void navigator.clipboard.writeText(copyText).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 1600)
     })
@@ -1044,7 +1486,7 @@ function MessageBubble({
     }
   }
 
-  const canCopy = msg.role === 'assistant' || msg.role === 'system' || msg.role === 'tool_result'
+  const canCopy = msg.role === 'user' || msg.role === 'assistant' || msg.role === 'system' || msg.role === 'tool_result'
 
   return (
     <div className={roleClass}>
@@ -1088,7 +1530,11 @@ function MessageBubble({
         {msg.attachments && msg.attachments.length > 0 && (
           <div className="message-attachments">
             {msg.attachments.map((att, index) => (
-              <AttachmentChip key={att.id || `${att.name}-${index}`} attachment={att} />
+              <AttachmentChip
+                key={att.id || `${att.name}-${index}`}
+                attachment={att}
+                onOpen={() => onAttachmentOpen(att)}
+              />
             ))}
           </div>
         )}

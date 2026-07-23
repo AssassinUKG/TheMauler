@@ -1,9 +1,9 @@
 {
   "name": "chunked-write",
-  "prompt": "Create generated/long.txt with at least 150 numbered lines. Use write_file and append chunks if needed.",
+  "prompt": "Create generated/long.txt containing the lines Line 1 through Line 150, one numbered line per line. First create a short plan with todo_write. Use the model-facing write tool for the first chunk and write with append=true for later chunks; do not overwrite an earlier chunk. Verify that Line 150 is present before finishing.",
   "workspace": {},
   "mode": "Builder",
-  "max_tool_calls": 12,
+  "max_tool_calls": 14,
   "expect_files": {
     "generated/long.txt": "Line 150"
   },

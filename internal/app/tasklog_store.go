@@ -2,9 +2,12 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
+	"mauler/internal/controlplane"
 	"mauler/internal/settings"
 )
 
@@ -133,17 +136,37 @@ func replaceTaskRunTx(tx *sql.Tx, run TaskRun) error {
 	if _, err := tx.Exec(`delete from task_run_events where run_id = ?`, run.ID); err != nil {
 		return err
 	}
+	contractJSON, controlJSON, err := marshalTaskRunControl(run)
+	if err != nil {
+		return err
+	}
+	contractDigest, controlPhase := "", ""
+	if run.Contract != nil {
+		contractDigest = run.Contract.Digest
+	}
+	if run.Control != nil {
+		controlPhase = string(run.Control.Phase)
+	}
 	if _, err := tx.Exec(`
 insert into task_runs (
-  id, prompt, mode, profile, model, status, state, stop_reason, stop_detail,
+  id, prompt, mode, profile, model, claimant_id, claimant_alias, origin,
+  contract_json, contract_digest, control_phase, control_state_json,
+  status, state, stop_reason, stop_detail,
   started_at, ended_at, duration_ms, prompt_tokens, completion_tokens,
   total_tokens, summary, response
-) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 on conflict(id) do update set
   prompt=excluded.prompt,
   mode=excluded.mode,
   profile=excluded.profile,
   model=excluded.model,
+  claimant_id=excluded.claimant_id,
+  claimant_alias=excluded.claimant_alias,
+  origin=excluded.origin,
+  contract_json=excluded.contract_json,
+  contract_digest=excluded.contract_digest,
+  control_phase=excluded.control_phase,
+  control_state_json=excluded.control_state_json,
   status=excluded.status,
   state=excluded.state,
   stop_reason=excluded.stop_reason,
@@ -156,7 +179,8 @@ on conflict(id) do update set
   total_tokens=excluded.total_tokens,
   summary=excluded.summary,
   response=excluded.response
-`, run.ID, run.Prompt, run.Mode, run.Profile, run.Model, run.Status, run.State, run.StopReason, run.StopDetail,
+`, run.ID, run.Prompt, run.Mode, run.Profile, run.Model, run.ClaimantID, run.ClaimantAlias, run.Origin,
+		contractJSON, contractDigest, controlPhase, controlJSON, run.Status, run.State, run.StopReason, run.StopDetail,
 		run.StartedAt, run.EndedAt, run.DurationMs, run.PromptTokens, run.CompletionTokens, run.TotalTokens, run.Summary, run.Response); err != nil {
 		return err
 	}
@@ -177,7 +201,8 @@ on conflict(id) do update set
 
 func loadTaskRunsDB(db *sql.DB) ([]TaskRun, error) {
 	rows, err := db.Query(`
-select id, prompt, mode, profile, model, status, state, stop_reason, stop_detail,
+select id, prompt, mode, profile, model, coalesce(claimant_id, ''), coalesce(claimant_alias, ''), coalesce(origin, ''), status, state, stop_reason, stop_detail,
+       coalesce(contract_json, ''), coalesce(control_state_json, ''),
        started_at, ended_at, duration_ms, prompt_tokens, completion_tokens,
        total_tokens, summary, response
 from task_runs
@@ -189,10 +214,14 @@ order by started_at desc`)
 	var runs []TaskRun
 	for rows.Next() {
 		var run TaskRun
-		if err := rows.Scan(&run.ID, &run.Prompt, &run.Mode, &run.Profile, &run.Model, &run.Status, &run.State,
-			&run.StopReason, &run.StopDetail, &run.StartedAt, &run.EndedAt, &run.DurationMs, &run.PromptTokens,
+		var contractJSON, controlJSON string
+		if err := rows.Scan(&run.ID, &run.Prompt, &run.Mode, &run.Profile, &run.Model, &run.ClaimantID, &run.ClaimantAlias, &run.Origin, &run.Status, &run.State,
+			&run.StopReason, &run.StopDetail, &contractJSON, &controlJSON, &run.StartedAt, &run.EndedAt, &run.DurationMs, &run.PromptTokens,
 			&run.CompletionTokens, &run.TotalTokens, &run.Summary, &run.Response); err != nil {
 			return nil, err
+		}
+		if err := unmarshalTaskRunControl(&run, contractJSON, controlJSON); err != nil {
+			return nil, fmt.Errorf("load task run %s control state: %w", run.ID, err)
 		}
 		runs = append(runs, run)
 	}
@@ -218,6 +247,61 @@ order by started_at desc`)
 		return []TaskRun{}, nil
 	}
 	return runs, nil
+}
+
+func marshalTaskRunControl(run TaskRun) (string, string, error) {
+	contractJSON, controlJSON := "", ""
+	if run.Contract != nil {
+		if err := run.Contract.Validate(); err != nil {
+			return "", "", fmt.Errorf("task contract: %w", err)
+		}
+		data, err := json.Marshal(run.Contract)
+		if err != nil {
+			return "", "", err
+		}
+		contractJSON = string(data)
+	}
+	if run.Control != nil {
+		if err := run.Control.Validate(); err != nil {
+			return "", "", fmt.Errorf("control state: %w", err)
+		}
+		data, err := json.Marshal(run.Control)
+		if err != nil {
+			return "", "", err
+		}
+		controlJSON = string(data)
+	}
+	return contractJSON, controlJSON, nil
+}
+
+func unmarshalTaskRunControl(run *TaskRun, contractJSON, controlJSON string) error {
+	if run == nil {
+		return nil
+	}
+	if contractJSON = strings.TrimSpace(contractJSON); contractJSON != "" {
+		var contract controlplane.TaskContract
+		if err := json.Unmarshal([]byte(contractJSON), &contract); err != nil {
+			return err
+		}
+		if err := contract.Validate(); err != nil {
+			return err
+		}
+		run.Contract = &contract
+	}
+	if controlJSON = strings.TrimSpace(controlJSON); controlJSON != "" {
+		var state controlplane.MachineState
+		if err := json.Unmarshal([]byte(controlJSON), &state); err != nil {
+			return err
+		}
+		if err := state.Validate(); err != nil {
+			return err
+		}
+		if run.Contract == nil || state.ContractDigest != run.Contract.Digest {
+			return errors.New("control state does not match task contract")
+		}
+		run.Control = &state
+	}
+	return nil
 }
 
 func loadTaskRunToolsDB(db *sql.DB, runID string) ([]TaskToolEvent, error) {

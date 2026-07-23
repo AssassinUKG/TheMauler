@@ -480,6 +480,45 @@ func TestLlamacppLaunchAssertionsWarnOnSpeculative(t *testing.T) {
 	}
 }
 
+func TestCheckLlamacppVersionUsesInferenceBridgeExactBuild(t *testing.T) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/runtime/status" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"server_version": "b10075",
+			"server_path":    `C:\runtime\llama-server.exe`,
+		})
+	})
+
+	status, message, detail := checkLlamacppVersionWithClient("http://doctor.test/v1", client)
+	if status != "ok" || message != "llama.cpp b10075 via InferenceBridge" {
+		t.Fatalf("version check = %q, %q, %q", status, message, detail)
+	}
+	if !strings.Contains(detail, "llama-server.exe") {
+		t.Fatalf("version detail = %q", detail)
+	}
+}
+
+func TestCheckLlamacppVersionFallsBackToProps(t *testing.T) {
+	client := doctorTestClient(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runtime/status":
+			http.NotFound(w, r)
+		case "/props":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	status, message, _ := checkLlamacppVersionWithClient("http://doctor.test/v1", client)
+	if status != "ok" || !strings.Contains(message, "/props available") {
+		t.Fatalf("version check = %q, %q", status, message)
+	}
+}
+
 func TestShellNetworkBoundaryCheckWarnsForWindowsHostToolsWithWSL(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-specific host/WSL boundary check")

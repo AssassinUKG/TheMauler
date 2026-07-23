@@ -92,6 +92,17 @@ All tool calls, model responses, state changes, confirmations, errors, terminal 
    - First slice is implemented: a full-page Brain tab reads `ListLedgerEvents`, supports search/source/kind filters, event limits, JSON export, ledger clear, KPI counts, problem signals, selected-event expansion, and event-kind distribution.
    - Approval slice is implemented: Brain can save learning candidates as Memory entries or Skills through existing Wails bindings.
 
+8. **Files & Knowledge corpus index and split retrieval**
+   - Keep curated Memory and prior-session recall separate from a source-corpus index; arbitrary
+     user-selected folders/files are untrusted evidence, not durable facts or instructions.
+   - Add streaming manifests, file hashes, bounded chunks, FTS5, explicit omission/error status, and
+     optional InferenceBridge embeddings through the native store/ledger spine.
+   - Let Chat split a large read-only review across bounded child tasks only after a deterministic
+     manifest exists, then merge findings through immutable file/chunk evidence.
+   - Default the explicit per-file limit to `0` (unlimited) while bounding chunk, retrieval, and
+     embedding requests. Never put whole large files or the whole index into prompt context.
+   - Full design and gates: `docs/repository-intelligence-parity-plan-2026-07.md`.
+
 ## Hermes-Inspired Capability Tracker
 
 Added: 2026-06-14

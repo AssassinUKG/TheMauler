@@ -1,0 +1,20 @@
+{
+  "id": "go-backend-fix",
+  "category": "Go backend bug fix",
+  "prompts": [
+    "Fix the Go race in internal/app task logging and run the focused tests.",
+    "The backend task-run logger is broken; patch the Go implementation and verify it.",
+    "Fix the failing Go app test around persisted task state, keeping the change scoped."
+  ],
+  "expected_policy": "relevant_workspace",
+  "expected_class": "relevant",
+  "expected_routes": ["workspace-implementation"],
+  "expected_modes": ["Fixer"],
+  "required_sources": ["AGENTS.md", "architecture.md", "verification.md"],
+  "forbidden_sources": ["MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["read", "grep", "edit", "shell"],
+  "forbidden_tools": [],
+  "required_prompt_text": ["targeted edits"],
+  "forbidden_prompt_text": [],
+  "max_project_tokens": 4000
+}

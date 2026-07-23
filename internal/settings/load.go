@@ -155,6 +155,7 @@ func normaliseSettings(s *Settings) {
 	}
 	s.Context.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(s.Context.WorkspaceDir))
 	s.Context.OpenFolders = normaliseWorkspaceFolders(s.Context.OpenFolders, s.Context.WorkspaceDir)
+	s.Context.WorkspacePreferences = normaliseWorkspacePreferences(s.Context.WorkspacePreferences)
 	s.Context.Lab = normaliseLabContext(s.Context.Lab, defaults.Context.Lab)
 	s.Context.LabProfiles = normaliseLabProfiles(s.Context.LabProfiles, s.Context.Lab, s.Context.WorkspaceDir)
 	if strings.TrimSpace(s.Context.ActiveLabProfile) == "" {
@@ -452,6 +453,25 @@ func normaliseWorkspaceFolders(folders []WorkspaceFolder, agentRoot string) []Wo
 	return out
 }
 
+func normaliseWorkspacePreferences(preferences []WorkspacePreference) []WorkspacePreference {
+	seen := map[string]bool{}
+	out := make([]WorkspacePreference, 0, len(preferences))
+	for _, preference := range preferences {
+		preference.Path = filepath.ToSlash(strings.TrimSpace(preference.Path))
+		preference.AgentMode = strings.TrimSpace(preference.AgentMode)
+		if preference.Path == "" || preference.AgentMode == "" {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(preference.Path))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, preference)
+	}
+	return out
+}
+
 func mergeStringList(existing, defaults []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(existing)+len(defaults))
@@ -730,12 +750,32 @@ func migrateProviders(pf *ProfilesFile) {
 		profile.Backend = ""
 		profile.BaseURL = ""
 		profile.APIKeyEnv = ""
+		normaliseRepeatPenalty(&profile)
 		pf.Profiles[name] = profile
 	}
 	for name, provider := range pf.Providers {
 		key := providerKey(provider.Backend, provider.BaseURL)
 		if canonical[key] != name {
 			delete(pf.Providers, name)
+		}
+	}
+}
+
+func normaliseRepeatPenalty(profile *Profile) {
+	if profile == nil {
+		return
+	}
+	repeat := 1.0
+	model := strings.ToLower(profile.Name + " " + profile.ModelID)
+	if strings.Contains(model, "qwen3.6") || strings.Contains(model, "qwen-3.6") {
+		repeat = 1.05
+	}
+	if strings.Contains(model, "gemma4-26b-a4b-qat") && strings.Contains(model, "hauhaucs-balanced") {
+		repeat = 1.1
+	}
+	for _, params := range []*GenerationParams{&profile.ThinkGeneral, &profile.ThinkCoding, &profile.NoThink} {
+		if params.RepeatPenalty <= 0 {
+			params.RepeatPenalty = repeat
 		}
 	}
 }

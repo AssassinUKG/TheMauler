@@ -78,6 +78,33 @@ func TestDispatchChannelSideChatDoesNotStartRun(t *testing.T) {
 	}
 }
 
+func TestDesktopFastChatUsesCompactNoProjectPacket(t *testing.T) {
+	app := &App{
+		cfg: &settings.Settings{ActiveProfile: "fast-local"},
+	}
+	messages := app.sideChatMessages(
+		"desktop:ask:test",
+		channelbus.Envelope{Source: "desktop-ask", SessionID: "desktop:ask:test"},
+		"Explain decode speed.",
+		app.cfg,
+		nil,
+	)
+	if len(messages) != 2 {
+		t.Fatalf("desktop fast chat messages = %d, want compact system + user", len(messages))
+	}
+	prompt := messageText(messages[0])
+	for _, want := range []string{"Mauler Fast Chat", "no-tools local assistant", "no workspace documents", "Active local profile: fast-local"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("desktop fast chat prompt missing %q: %s", want, prompt)
+		}
+	}
+	for _, notWant := range []string{"Current status packet", "Telegram voice", "master skill", "RunLedger"} {
+		if strings.Contains(prompt, notWant) {
+			t.Fatalf("desktop fast chat prompt leaked project/channel context %q: %s", notWant, prompt)
+		}
+	}
+}
+
 type sideChatEchoClient struct{}
 
 func (sideChatEchoClient) Chat(ctx context.Context, req llm.Request) (<-chan llm.Delta, error) {
@@ -410,6 +437,7 @@ func TestBuildChatRequestUsesAllActiveProfileGenerationSettings(t *testing.T) {
 			TopK:            33,
 			MinP:            0.07,
 			PresencePenalty: 1.25,
+			RepeatPenalty:   1.08,
 			MaxTokens:       7777,
 			Seed:            12345,
 		},
@@ -426,7 +454,7 @@ func TestBuildChatRequestUsesAllActiveProfileGenerationSettings(t *testing.T) {
 	if req.MaxTokens != 7777 {
 		t.Fatalf("MaxTokens = %d, want 7777", req.MaxTokens)
 	}
-	if req.Temperature != 0.61 || req.TopP != 0.91 || req.TopK != 33 || req.MinP != 0.07 || req.PresencePenalty != 1.25 {
+	if req.Temperature != 0.61 || req.TopP != 0.91 || req.TopK != 33 || req.MinP != 0.07 || req.PresencePenalty != 1.25 || req.RepeatPenalty != 1.08 {
 		t.Fatalf("sampling params not copied correctly: %#v", req)
 	}
 	if req.Seed != 12345 {
@@ -992,6 +1020,58 @@ func TestComposeUserTextWithAttachments(t *testing.T) {
 	}
 }
 
+func TestSessionMessageDisplayPreservesAttachmentMetadata(t *testing.T) {
+	msg := llm.NewTextMessage(llm.RoleUser, "summarise this\n\nAttached context from the user:\nmodel payload")
+	msg.DisplayContent = "summarise this"
+	msg.Attachments = []llm.MessageAttachment{{
+		ID: "paste-1", Name: "Pasted text.txt", Kind: "document", MIME: "text/plain",
+		Content: "editable source", Size: 15,
+	}}
+
+	content, attachments := sessionMessageDisplay(msg)
+	if content != "summarise this" {
+		t.Fatalf("display content = %q, want original user text", content)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	if got := attachments[0]; got.ID != "paste-1" || got.Content != "editable source" || got.Kind != "document" {
+		t.Fatalf("attachment metadata was not preserved: %#v", got)
+	}
+}
+
+func TestParseLegacyChatAttachments(t *testing.T) {
+	composed := composeUserTextWithAttachments("summarise this", []ChatAttachment{{
+		Name: "Pasted text.txt", Kind: "document", MIME: "text/plain",
+		Content: "first line\nsecond line", Size: 22, Truncated: true,
+	}, {
+		Name: "notes.txt", Kind: "document", MIME: "text/plain",
+		Path: `C:\work\notes.txt`, Content: "saved notes", Size: 11,
+	}})
+
+	content, attachments := parseLegacyChatAttachments(composed)
+	if content != "summarise this" {
+		t.Fatalf("legacy display content = %q", content)
+	}
+	if len(attachments) != 2 {
+		t.Fatalf("legacy attachments = %d, want 2", len(attachments))
+	}
+	if attachments[0].Name != "Pasted text.txt" || attachments[0].Content != "first line\nsecond line" || !attachments[0].Truncated {
+		t.Fatalf("first legacy attachment decoded incorrectly: %#v", attachments[0])
+	}
+	if attachments[1].Path != `C:\work\notes.txt` || attachments[1].Content != "saved notes" {
+		t.Fatalf("second legacy attachment decoded incorrectly: %#v", attachments[1])
+	}
+
+	attachmentOnly := composeUserTextWithAttachments("", []ChatAttachment{{
+		Name: "Pasted text.txt", Kind: "document", Content: "standalone",
+	}})
+	content, attachments = parseLegacyChatAttachments(attachmentOnly)
+	if content != "" || len(attachments) != 1 || attachments[0].Content != "standalone" {
+		t.Fatalf("attachment-only legacy message decoded incorrectly: content=%q attachments=%#v", content, attachments)
+	}
+}
+
 func TestSetWorkingDirAppliesWorkspaceAndClearsRunContext(t *testing.T) {
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	project := t.TempDir()
@@ -1039,6 +1119,51 @@ func TestSetWorkingDirAppliesWorkspaceAndClearsRunContext(t *testing.T) {
 	}
 	if saved.Context.WorkspaceDir != filepath.ToSlash(project) {
 		t.Fatalf("saved workspace = %q, want %q", saved.Context.WorkspaceDir, filepath.ToSlash(project))
+	}
+}
+
+func TestWorkspaceSwitchRestoresItsPreferredAgent(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	restoreWorkingDir(t)
+	if err := os.Chdir(workspaceA); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(workspaceA)
+	profiles := settings.DefaultProfiles()
+	app := &App{
+		cfg:      &cfg,
+		profiles: &profiles,
+		history:  agent.NewHistory(4096),
+		rollback: &agent.Rollback{},
+		registry: tools.New(),
+	}
+	if err := app.SetAgentModeOverride("Bug Bounty Hunter"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SetWorkingDir(workspaceB); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.cfg.Agents.ModeOverride; got != "Auto" {
+		t.Fatalf("new workspace mode = %q, want Auto", got)
+	}
+	if err := app.SetAgentModeOverride("Reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.SetWorkingDir(workspaceA); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.cfg.Agents.ModeOverride; got != "Bug Bounty Hunter" {
+		t.Fatalf("restored workspace mode = %q, want Bug Bounty Hunter", got)
+	}
+	if err := app.SetWorkingDir(workspaceB); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.cfg.Agents.ModeOverride; got != "Reviewer" {
+		t.Fatalf("second workspace restored mode = %q, want Reviewer", got)
 	}
 }
 
@@ -1190,6 +1315,18 @@ func TestBlockingStopReasonKeepsBudgetRunFromCleanDone(t *testing.T) {
 func TestRequiresLivingDocUpdateAndMutationDetection(t *testing.T) {
 	if !requiresLivingDocUpdate("complete the writeup as you go in Connected.md") {
 		t.Fatal("expected writeup prompt to require doc mutation")
+	}
+	if !requiresLivingDocUpdate("fix the bug and update docs as you go") {
+		t.Fatal("expected explicit docs update to require doc mutation")
+	}
+	for _, prompt := range []string{
+		"Inspect notes.txt once and summarize it.",
+		"Read config.json and report the service name.",
+		"Explain what README.md contains without editing it.",
+	} {
+		if requiresLivingDocUpdate(prompt) {
+			t.Fatalf("read-only prompt incorrectly required documentation mutation: %q", prompt)
+		}
 	}
 	run := startTaskRun("complete writeup", "Builder", "profile", "model")
 	if runHasFileMutation(run) {
@@ -1349,6 +1486,35 @@ func TestToolDefsOmittedForConversationalTurn(t *testing.T) {
 	defs, choice = toolDefsAndChoiceForTurn(registry, settings.DefaultSettings().Tools, "fix bug", 0, 0)
 	if choice != "auto" || len(defs) == 0 {
 		t.Fatalf("task turn should expose tools, choice=%q defs=%d", choice, len(defs))
+	}
+}
+
+func TestExplicitNoToolInstructionPersistsAcrossContinuationTurns(t *testing.T) {
+	prompt := "This is an explanation-only question. Do not execute any tool or start a scan."
+	for _, turn := range []struct {
+		auto, tools int
+	}{{0, 0}, {1, 0}, {2, 3}} {
+		if got := toolChoiceFor(prompt, turn.auto, turn.tools); got != "none" {
+			t.Fatalf("toolChoiceFor explicit no-tool turn (%d,%d) = %q, want none", turn.auto, turn.tools, got)
+		}
+	}
+	registry := tools.New()
+	defs, choice := toolDefsAndChoiceForTurn(registry, settings.DefaultSettings().Tools, prompt, 2, 3)
+	if choice != "none" || len(defs) != 0 {
+		t.Fatalf("explicit no-tool continuation exposed tools: choice=%q defs=%d", choice, len(defs))
+	}
+}
+
+func TestExplicitNoToolResponseBudgetCapsRunawayExplanation(t *testing.T) {
+	req := llm.Request{MaxTokens: 8192}
+	if !applyExplicitNoToolResponseBudget(&req, "Explanation only; do not use tools.") {
+		t.Fatal("expected explanation-only response cap")
+	}
+	if req.MaxTokens != explicitNoToolMaxTokens {
+		t.Fatalf("MaxTokens = %d, want %d", req.MaxTokens, explicitNoToolMaxTokens)
+	}
+	if applyExplicitNoToolResponseBudget(&req, "Fix the code using tools.") {
+		t.Fatal("action task should not receive explanation-only response cap")
 	}
 }
 
@@ -1864,6 +2030,9 @@ func TestShouldRequestRecoveryReport(t *testing.T) {
 	if shouldRequestRecoveryReport(TaskRun{}, false) {
 		t.Fatal("missing stop reason should not trigger recovery")
 	}
+	if !shouldRequestRecoveryReport(TaskRun{StopReason: "loop_circuit_breaker"}, false) {
+		t.Fatal("loop circuit-breaker should get a final plain-language recovery turn")
+	}
 }
 
 func TestRecoveryReportPromptIncludesRecentToolEvidence(t *testing.T) {
@@ -1877,6 +2046,31 @@ func TestRecoveryReportPromptIncludesRecentToolEvidence(t *testing.T) {
 	for _, want := range []string{"Recovery mode", "Do not call tools", "repeated_same_tool_result", "curl -s", "~da43a~", "Safest next action"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("recovery prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestLoopCircuitBreakerFallbackHidesInternalDiagnosticWall(t *testing.T) {
+	run := TaskRun{
+		Prompt:     "find this PoC for CVE-2026-50522",
+		StopReason: "loop_circuit_breaker",
+		StopDetail: "stability_score=43 repeated_identical_outcomes=4",
+		Tools: []TaskToolEvent{{
+			Name:   "skill",
+			Status: "done",
+			Result: "Master skill excerpts and a very long attack map",
+		}},
+	}
+
+	got := fallbackStoppedRunSummary(run)
+	for _, want := range []string{"got stuck repeating", "No verified web-research answer was produced", "Logs/Brain"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("friendly fallback missing %q:\n%s", want, got)
+		}
+	}
+	for _, notWant := range []string{"stability_score", "repeated_identical_outcomes", "Master skill", "Last tool:"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("friendly fallback leaked %q:\n%s", notWant, got)
 		}
 	}
 }
@@ -3091,6 +3285,69 @@ func TestClassifyAgentModeKeepsOperationalAttackWorkGeneric(t *testing.T) {
 	}
 }
 
+func TestClassifyAgentModeUsesBugBountyHunterOnlyForHighConfidenceAssessmentTasks(t *testing.T) {
+	for _, input := range []string{
+		"review these Burp requests for my bug bounty manual testing plan",
+		"this is post-recon web application pentest triage",
+		"analyse these JavaScript endpoints for a bug bounty target",
+	} {
+		if got := classifyAgentMode(input).Name; got != "Bug Bounty Hunter" {
+			t.Fatalf("classifyAgentMode(%q) = %q, want Bug Bounty Hunter", input, got)
+		}
+	}
+	for _, input := range []string{
+		"fix this JavaScript bug",
+		"review this Go code for security bugs",
+		"implement a bug report form",
+	} {
+		if got := classifyAgentMode(input).Name; got == "Bug Bounty Hunter" {
+			t.Fatalf("ordinary software task %q was incorrectly routed to Bug Bounty Hunter", input)
+		}
+	}
+}
+
+func TestBugBountyHunterPromptSeparatesEvidenceHypothesesAndPriority(t *testing.T) {
+	mode := baseMode("bug-bounty-hunter")
+	if mode.Name != "Bug Bounty Hunter" {
+		t.Fatalf("baseMode returned %#v", mode)
+	}
+	for _, want := range []string{
+		"Never invent vulnerabilities",
+		"Observation",
+		"Hypothesis",
+		"testing priority",
+		"OWASP",
+		"Authentication required",
+		"untrusted data",
+	} {
+		if !strings.Contains(mode.Instructions, want) {
+			t.Fatalf("Bug Bounty Hunter prompt missing %q", want)
+		}
+	}
+}
+
+func TestListAgentDefinitionsIncludesBugBountyHunterInStableOrder(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	app := &App{cfg: &cfg}
+	definitions := app.ListAgentDefinitions()
+	if len(definitions) < 2 || definitions[0].Name != "Auto" {
+		t.Fatalf("unexpected definition order: %#v", definitions)
+	}
+	found := false
+	for _, definition := range definitions {
+		if definition.ID != "bug-bounty-hunter" {
+			continue
+		}
+		found = true
+		if definition.Name != "Bug Bounty Hunter" || definition.DefaultToolset != "bug-bounty-review" || !definition.PlanningOnly {
+			t.Fatalf("unexpected Bug Bounty Hunter definition: %#v", definition)
+		}
+	}
+	if !found {
+		t.Fatalf("Bug Bounty Hunter definition missing: %#v", definitions)
+	}
+}
+
 func TestSelectAgentModeDoesNotAutoPromoteHTBWorkspaceToOps(t *testing.T) {
 	cfg := settings.DefaultSettings()
 	cfg.Agents.ModeOverride = "Auto"
@@ -3232,6 +3489,51 @@ func TestApplyAgentPresetOfflineDisablesExternalTools(t *testing.T) {
 	}
 	if cfg.Tools.ActiveToolset != "web-research" {
 		t.Fatalf("researcher preset should select web-research toolset, got %q", cfg.Tools.ActiveToolset)
+	}
+}
+
+func TestApplyBugBountyHunterPresetSelectsReviewToolset(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	profiles := settings.DefaultProfiles()
+	profile := activeProfile(&cfg, &profiles)
+	autonomous := true
+
+	applyAgentPreset(&cfg, &profiles, AgentMode{Name: "Bug Bounty Hunter"}, &profile, &autonomous)
+
+	if autonomous {
+		t.Fatal("Bug Bounty Hunter should default to ask autonomy")
+	}
+	if cfg.Tools.ActiveToolset != "bug-bounty-review" {
+		t.Fatalf("toolset = %q, want bug-bounty-review", cfg.Tools.ActiveToolset)
+	}
+	effective := settings.EffectiveEnabledTools(cfg.Tools)
+	for _, name := range []string{"write", "edit", "shell", "terminal_send", "start_listener"} {
+		if effective[name] {
+			t.Fatalf("%s should be unavailable in Bug Bounty Hunter default policy: %#v", name, effective)
+		}
+	}
+}
+
+func TestBugBountyHunterBlocksStatefulBrowserActions(t *testing.T) {
+	mode := AgentMode{Name: "Bug Bounty Hunter"}
+	for _, action := range []string{"click", "type", "agent"} {
+		call := llm.ToolCallDef{Function: llm.FunctionCall{Name: "browser", Arguments: json.RawMessage(fmt.Sprintf(`{"action":%q}`, action))}}
+		if err := enforceAgentModeToolPolicy(mode, "bug-bounty-review", call); err == nil || !strings.Contains(err.Error(), "planning-only") {
+			t.Fatalf("browser %s policy error = %v, want planning-only block", action, err)
+		}
+	}
+	for _, action := range []string{"open", "snapshot", "extract", "screenshot", "close"} {
+		call := llm.ToolCallDef{Function: llm.FunctionCall{Name: "browser", Arguments: json.RawMessage(fmt.Sprintf(`{"action":%q}`, action))}}
+		if err := enforceAgentModeToolPolicy(mode, "bug-bounty-review", call); err != nil {
+			t.Fatalf("browser %s should be allowed: %v", action, err)
+		}
+	}
+	call := llm.ToolCallDef{Function: llm.FunctionCall{Name: "browser", Arguments: json.RawMessage(`{"action":"click"}`)}}
+	if err := enforceAgentModeToolPolicy(AgentMode{Name: "Reviewer"}, "safe", call); err != nil {
+		t.Fatalf("other agents should retain their existing browser policy: %v", err)
+	}
+	if err := enforceAgentModeToolPolicy(mode, "unrestricted", call); err != nil {
+		t.Fatalf("explicit unrestricted access should retain user authority: %v", err)
 	}
 }
 

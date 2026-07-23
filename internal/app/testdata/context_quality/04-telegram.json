@@ -1,0 +1,20 @@
+{
+  "id": "telegram-final-delivery",
+  "category": "Telegram remote task",
+  "prompts": [
+    "Fix Telegram /run so it delivers the actual final assistant answer instead of only a completion status.",
+    "Fix the channel bus handoff that loses Mauler final messages before Telegram receives them.",
+    "Fix the Telegram queued-work result path so the actual final assistant answer survives busy-run draining."
+  ],
+  "expected_policy": "relevant_workspace",
+  "expected_class": "relevant",
+  "expected_routes": ["channels-and-media"],
+  "expected_modes": ["Fixer"],
+  "required_sources": ["AGENTS.md", "current-state.md", "troubleshooting.md"],
+  "forbidden_sources": ["MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["read", "grep", "edit", "shell"],
+  "forbidden_tools": [],
+  "required_prompt_text": ["actual final assistant answer"],
+  "forbidden_prompt_text": [],
+  "max_project_tokens": 4000
+}

@@ -45,6 +45,9 @@ func (a *App) buildExecutionStatePrompt(firstUserText, toolChoice string, toolDe
 		}
 		sb.WriteString("\n")
 	}
+	if engagementPacket := a.buildEngagementPromptPacket(); engagementPacket != "" {
+		sb.WriteString(engagementPacket)
+	}
 	sb.WriteString("- discipline: use the recommended live path. If terminal is connected, use terminal_send/terminal_read only for commands inside that live session; use http_probe or shell for independent HTTP/webshell/curl/wget checks. If terminal is listener, trigger callbacks through http_probe/shell/webshell and watch with terminal_read. If terminal is running/busy, read or recover; do not start another terminal command.\n")
 	return sb.String()
 }

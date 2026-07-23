@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, type Dispatch, type RefObject, type SetStateAction } from 'react'
+import { useEffect, useRef, useState, useCallback, type CSSProperties, type Dispatch, type RefObject, type SetStateAction } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -49,14 +49,24 @@ const TERM_THEME = {
   selectionBackground: 'rgba(255,255,255,0.18)',
 }
 
+const AI_COMMANDS_DEFAULT_WIDTH = 420
+const AI_COMMANDS_DEFAULT_HEIGHT = 120
+const AI_COMMANDS_MIN_WIDTH = 300
+const AI_COMMANDS_MIN_HEIGHT = 64
+const TERMINAL_MIN_WIDTH = 320
+const TERMINAL_MIN_HEIGHT = 80
+const AI_COMMANDS_SPLITTER_SIZE = 10
+
 export function TerminalPane({ visible }: Props) {
 	const [tabs, setTabs] = useState<TerminalTab[]>(() => [newTab(1)])
 	const [activeId, setActiveId] = useState(tabs[0].localId)
 	const [aiCommands, setAICommands] = useState<AICommandEvent[]>([])
 	const [showAICommands, setShowAICommands] = useState(() => loadAICommandsVisible())
 	const [aiCommandsWidth, setAICommandsWidth] = useState(() => loadAICommandsWidth())
+	const [aiCommandsHeight, setAICommandsHeight] = useState(() => loadAICommandsHeight())
 	const seq = useRef(1)
 	const stackRef = useRef<HTMLDivElement>(null)
+	const aiCommandsExpanded = showAICommands
 
 	const setAICommandsVisible = useCallback((visible: boolean | ((value: boolean) => boolean)) => {
 		setShowAICommands(prev => {
@@ -105,6 +115,7 @@ export function TerminalPane({ visible }: Props) {
         status: 'running',
         startedAt: new Date().toISOString(),
       }
+			setAICommandsVisible(true)
       setAICommands(prev => [
         event,
         ...prev.filter(item => item.id !== id),
@@ -113,6 +124,7 @@ export function TerminalPane({ visible }: Props) {
     const offDone = EventsOn('mauler:terminal_command_done', (...args: unknown[]) => {
       const msg = args[0] as { id?: string; session?: string; exit_code?: string; duration_ms?: string; tool?: string; result?: string }
       const id = msg.id || `cmd-${Date.now()}`
+			setAICommandsVisible(true)
       setAICommands(prev => {
         const existing = prev.find(item => item.id === id)
         const exitCode = msg.exit_code || ''
@@ -134,7 +146,7 @@ export function TerminalPane({ visible }: Props) {
       })
     })
     return () => { offStart(); offDone() }
-  }, [])
+  }, [setAICommandsVisible])
 
   useEffect(() => {
     const offToolCall = EventsOn('mauler:tool_call', (...args: unknown[]) => {
@@ -150,6 +162,7 @@ export function TerminalPane({ visible }: Props) {
         status: 'running',
         startedAt: new Date().toISOString(),
       }
+			setAICommandsVisible(true)
       setAICommands(prev => [event, ...prev.filter(item => item.id !== id)].slice(0, 80))
     })
     const offToolResult = EventsOn('mauler:tool_result', (...args: unknown[]) => {
@@ -157,6 +170,7 @@ export function TerminalPane({ visible }: Props) {
       if (!isCommandLikeTool(msg.name)) return
       if (isTerminalTool(msg.name)) return
       const id = msg.id || `tool-${Date.now()}`
+			setAICommandsVisible(true)
       setAICommands(prev => {
         const existing = prev.find(item => item.id === id)
         const exitCode = exitCodeFromToolResult(msg.result || '')
@@ -177,7 +191,7 @@ export function TerminalPane({ visible }: Props) {
       })
     })
     return () => { offToolCall(); offToolResult() }
-  }, [])
+  }, [setAICommandsVisible])
 
   return (
     <div className="terminal-pane" style={{ display: visible ? 'flex' : 'none' }}>
@@ -213,7 +227,7 @@ export function TerminalPane({ visible }: Props) {
         <span className="terminal-agent-hint">Term 1 is the agent/shared terminal</span>
       </div>
 
-			<div ref={stackRef} className={`terminal-stack ${showAICommands ? 'with-ai-commands' : ''}`}>
+			<div ref={stackRef} className={`terminal-stack ${aiCommandsExpanded ? 'with-ai-commands' : 'with-ai-command-rail'}`}>
         {tabs.map((tab, index) => (
           <TerminalSession
             key={tab.localId}
@@ -221,29 +235,53 @@ export function TerminalPane({ visible }: Props) {
             visible={visible && tab.localId === activeId}
             isAgentTerminal={index === 0}
             onUpdate={patch => updateTab(tab.localId, patch)}
-            showAICommands={showAICommands}
+							showAICommands={aiCommandsExpanded}
             onToggleAICommands={() => setAICommandsVisible(v => !v)}
           />
         ))}
-				{showAICommands && (
-					<>
-						<AICommandResizeHandle
-							stackRef={stackRef}
-							width={aiCommandsWidth}
-							onResize={setAICommandsWidth}
-						/>
-							<AICommandHistory
+				<AICommandResizeHandle
+					stackRef={stackRef}
+					expanded={aiCommandsExpanded}
+					width={aiCommandsWidth}
+					height={aiCommandsHeight}
+					onExpand={() => setAICommandsVisible(true)}
+					onResizeWidth={setAICommandsWidth}
+					onResizeHeight={setAICommandsHeight}
+				/>
+				{aiCommandsExpanded ? (
+						<AICommandHistory
 							commands={aiCommands}
 							width={aiCommandsWidth}
+							height={aiCommandsHeight}
 							onClear={() => setAICommands([])}
 							onCollapse={() => setAICommandsVisible(false)}
 							onRecover={() => void recoverSharedTerminalFromHistory(setAICommands)}
 						/>
-					</>
+				) : (
+					<AICommandRail commands={aiCommands} onExpand={() => setAICommandsVisible(true)} />
 				)}
 			</div>
     </div>
   )
+}
+
+function AICommandRail({ commands, onExpand }: { commands: AICommandEvent[]; onExpand: () => void }) {
+	const errors = commands.filter(command => command.status === 'error').length
+	const running = commands.filter(command => command.status === 'running' || command.status === 'live').length
+	return (
+		<button
+			type="button"
+			className={`terminal-ai-rail${errors ? ' has-error' : running ? ' is-running' : ''}`}
+			onClick={onExpand}
+			title={commands.length ? 'Show AI command history' : 'AI command history is empty'}
+		>
+			<strong>AI Commands</strong>
+			<span>{commands.length}</span>
+			{errors > 0 && <small>{errors} error{errors === 1 ? '' : 's'}</small>}
+			{errors === 0 && running > 0 && <small>{running} running</small>}
+			{commands.length === 0 && <small>idle</small>}
+		</button>
+	)
 }
 
 function TerminalSession({
@@ -516,19 +554,25 @@ function TerminalSession({
 function AICommandHistory({
 	commands,
 	width,
+	height,
 	onClear,
 	onCollapse,
 	onRecover,
 }: {
 	commands: AICommandEvent[]
 	width: number
+	height: number
 	onClear: () => void
 	onCollapse: () => void
 	onRecover: () => void
 }) {
 	const groupedCommands = groupAICommands(commands)
+	const splitStyle = {
+		'--ai-commands-width': `${width}px`,
+		'--ai-commands-height': `${height}px`,
+	} as CSSProperties
 	return (
-		<aside className="terminal-ai-history" style={{ width }}>
+		<aside className="terminal-ai-history" style={splitStyle}>
       <div className="terminal-ai-history-head">
         <div>
           <strong>AI Commands</strong>
@@ -679,46 +723,149 @@ function formatTerminalRecoveryResult(res: TerminalRecoveryResult) {
 
 function AICommandResizeHandle({
 	stackRef,
+	expanded,
 	width,
-	onResize,
+	height,
+	onExpand,
+	onResizeWidth,
+	onResizeHeight,
 }: {
 	stackRef: RefObject<HTMLDivElement | null>
+	expanded: boolean
 	width: number
-	onResize: (width: number) => void
+	height: number
+	onExpand: () => void
+	onResizeWidth: (width: number) => void
+	onResizeHeight: (height: number) => void
 }) {
 	const widthRef = useRef(width)
+	const heightRef = useRef(height)
 	useEffect(() => { widthRef.current = width }, [width])
+	useEffect(() => { heightRef.current = height }, [height])
+
+	const persistSize = useCallback((vertical: boolean) => {
+		if (vertical) {
+			localStorage.setItem('mauler.aiCommandsHeight', String(heightRef.current))
+			return
+		}
+		localStorage.setItem('mauler.aiCommandsWidth', String(widthRef.current))
+	}, [])
+
+	const resizeFromPointer = useCallback((stack: HTMLDivElement, rect: DOMRect, move: PointerEvent) => {
+		const vertical = getComputedStyle(stack).flexDirection === 'column'
+		if (vertical) {
+			const max = Math.max(AI_COMMANDS_MIN_HEIGHT, Math.floor(rect.height - TERMINAL_MIN_HEIGHT - AI_COMMANDS_SPLITTER_SIZE))
+			const next = Math.min(max, Math.max(AI_COMMANDS_MIN_HEIGHT, rect.bottom - move.clientY))
+			heightRef.current = next
+			onResizeHeight(next)
+			return vertical
+		}
+		const max = Math.max(AI_COMMANDS_MIN_WIDTH, Math.floor(rect.width - TERMINAL_MIN_WIDTH))
+		const next = Math.min(max, Math.max(AI_COMMANDS_MIN_WIDTH, rect.right - move.clientX))
+		widthRef.current = next
+		onResizeWidth(next)
+		return vertical
+	}, [onResizeHeight, onResizeWidth])
+
 	const startResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
 		event.preventDefault()
 		const stack = stackRef.current
 		if (!stack) return
+		if (!expanded) onExpand()
 		const rect = stack.getBoundingClientRect()
+		const vertical = getComputedStyle(stack).flexDirection === 'column'
+		const resizingClass = vertical ? 'terminal-ai-resizing-row' : 'terminal-ai-resizing-col'
 		const pointerId = event.pointerId
 		const target = event.currentTarget
 		target.setPointerCapture(pointerId)
+		document.documentElement.classList.add(resizingClass)
 		const onMove = (move: PointerEvent) => {
-			const raw = rect.right - move.clientX
-			const max = Math.max(260, Math.floor(rect.width * 0.65))
-			const next = Math.min(max, Math.max(220, raw))
-			widthRef.current = next
-			onResize(next)
+			resizeFromPointer(stack, rect, move)
 		}
 		const onUp = () => {
-			localStorage.setItem('mauler.aiCommandsWidth', String(widthRef.current))
-			target.releasePointerCapture(pointerId)
+			persistSize(vertical)
+			document.documentElement.classList.remove(resizingClass)
+			if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId)
 			window.removeEventListener('pointermove', onMove)
 			window.removeEventListener('pointerup', onUp)
+			window.removeEventListener('pointercancel', onUp)
 		}
 		window.addEventListener('pointermove', onMove)
 		window.addEventListener('pointerup', onUp)
-	}, [onResize, stackRef])
-	return <div className="terminal-ai-resize" onPointerDown={startResize} title="Drag to resize AI Commands" />
+		window.addEventListener('pointercancel', onUp)
+	}, [expanded, onExpand, persistSize, resizeFromPointer, stackRef])
+
+	const resizeFromKeyboard = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+		const stack = stackRef.current
+		if (!stack) return
+		const vertical = getComputedStyle(stack).flexDirection === 'column'
+		const amount = event.shiftKey ? 48 : 16
+		if (event.key === 'Home') {
+			event.preventDefault()
+			onExpand()
+			widthRef.current = AI_COMMANDS_DEFAULT_WIDTH
+			heightRef.current = AI_COMMANDS_DEFAULT_HEIGHT
+			onResizeWidth(AI_COMMANDS_DEFAULT_WIDTH)
+			onResizeHeight(AI_COMMANDS_DEFAULT_HEIGHT)
+			persistSize(vertical)
+			return
+		}
+		if (vertical && event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+		if (!vertical && event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+		event.preventDefault()
+		onExpand()
+		const rect = stack.getBoundingClientRect()
+		if (vertical) {
+			const delta = event.key === 'ArrowUp' ? amount : -amount
+			const max = Math.max(AI_COMMANDS_MIN_HEIGHT, Math.floor(rect.height - TERMINAL_MIN_HEIGHT - AI_COMMANDS_SPLITTER_SIZE))
+			const next = Math.min(max, Math.max(AI_COMMANDS_MIN_HEIGHT, heightRef.current + delta))
+			heightRef.current = next
+			onResizeHeight(next)
+			persistSize(true)
+			return
+		}
+		const delta = event.key === 'ArrowLeft' ? amount : -amount
+		const max = Math.max(AI_COMMANDS_MIN_WIDTH, Math.floor(rect.width - TERMINAL_MIN_WIDTH))
+		const next = Math.min(max, Math.max(AI_COMMANDS_MIN_WIDTH, widthRef.current + delta))
+		widthRef.current = next
+		onResizeWidth(next)
+		persistSize(false)
+	}, [onExpand, onResizeHeight, onResizeWidth, persistSize, stackRef])
+
+	const resetSize = useCallback(() => {
+		onExpand()
+		widthRef.current = AI_COMMANDS_DEFAULT_WIDTH
+		heightRef.current = AI_COMMANDS_DEFAULT_HEIGHT
+		onResizeWidth(AI_COMMANDS_DEFAULT_WIDTH)
+		onResizeHeight(AI_COMMANDS_DEFAULT_HEIGHT)
+		localStorage.setItem('mauler.aiCommandsWidth', String(AI_COMMANDS_DEFAULT_WIDTH))
+		localStorage.setItem('mauler.aiCommandsHeight', String(AI_COMMANDS_DEFAULT_HEIGHT))
+	}, [onExpand, onResizeHeight, onResizeWidth])
+
+	return (
+		<div
+			className={`terminal-ai-resize${expanded ? '' : ' collapsed'}`}
+			role="separator"
+			tabIndex={0}
+			aria-label="Resize Terminal and AI Commands"
+			onPointerDown={startResize}
+			onKeyDown={resizeFromKeyboard}
+			onDoubleClick={resetSize}
+			title={expanded ? 'Drag to resize AI Commands; arrow keys resize; double-click resets' : 'Drag or click to reopen AI Commands'}
+		/>
+	)
 }
 
 function loadAICommandsWidth() {
 	const raw = Number(localStorage.getItem('mauler.aiCommandsWidth') || '')
-	if (Number.isFinite(raw) && raw >= 220 && raw <= 900) return raw
-	return 420
+	if (Number.isFinite(raw) && raw >= AI_COMMANDS_MIN_WIDTH && raw <= 1400) return raw
+	return AI_COMMANDS_DEFAULT_WIDTH
+}
+
+function loadAICommandsHeight() {
+	const raw = Number(localStorage.getItem('mauler.aiCommandsHeight') || '')
+	if (Number.isFinite(raw) && raw >= AI_COMMANDS_MIN_HEIGHT && raw <= 600) return raw
+	return AI_COMMANDS_DEFAULT_HEIGHT
 }
 
 function loadAICommandsVisible() {

@@ -1,0 +1,20 @@
+{
+  "id": "react-ui-splitter",
+  "category": "React/UI splitter modification",
+  "prompts": [
+    "Fix the React workbench splitter so the Explorer remains draggable and collapsed rails still reopen.",
+    "Fix the broken frontend resize handle between Terminal and AI Commands without removing keyboard resizing.",
+    "Fix the UI Inspector splitter and preserve its saved width and narrow-layout behavior."
+  ],
+  "expected_policy": "relevant_workspace",
+  "expected_class": "relevant",
+  "expected_routes": ["ui-workbench"],
+  "expected_modes": ["Fixer"],
+  "required_sources": ["AGENTS.md", "non-negotiables.md", "feature-catalog.md"],
+  "forbidden_sources": ["MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["read", "grep", "edit", "shell"],
+  "forbidden_tools": [],
+  "required_prompt_text": ["visible drag", "collapsed rails"],
+  "forbidden_prompt_text": [],
+  "max_project_tokens": 4000
+}

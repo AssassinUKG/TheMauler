@@ -720,6 +720,19 @@
   color: var(--text);
 }
 
+.attachment-chip-openable {
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.attachment-chip-openable:hover,
+.attachment-chip-openable:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--c-card) 86%, var(--accent));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  outline: none;
+}
+
 .msg-user .attachment-chip {
   background: rgba(255, 255, 255, 0.05);
 }
@@ -757,6 +770,10 @@
   font-size: 11px;
 }
 
+.attachment-open-hint {
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-dim));
+}
+
 .attachment-remove {
   width: 22px;
   height: 22px;
@@ -773,6 +790,112 @@
   border-color: var(--red);
   color: #fff;
   background: var(--red);
+}
+
+.attachment-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(0, 0, 0, 0.78);
+}
+
+.attachment-dialog {
+  width: min(940px, 94vw);
+  max-height: 86vh;
+  display: grid;
+  grid-template-rows: auto minmax(280px, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: var(--bg1);
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.72);
+}
+
+.attachment-dialog-header,
+.attachment-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+
+.attachment-dialog-header > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.attachment-dialog-header strong {
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-dialog-header span,
+.attachment-dialog-actions > span {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.attachment-dialog-editor {
+  width: 100%;
+  min-height: 280px;
+  padding: 16px;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg0);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow: auto;
+}
+
+.attachment-dialog-editor:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.attachment-dialog-editor[readonly] {
+  color: var(--text-dim);
+}
+
+.attachment-dialog-actions {
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.attachment-dialog-actions > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 680px) {
+  .attachment-dialog-backdrop {
+    padding: 12px;
+  }
+
+  .attachment-dialog-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .attachment-dialog-actions > div {
+    width: 100%;
+  }
 }
 
 /* ── Empty state ────────────────────────────────────── */
@@ -1393,8 +1516,248 @@
 }
 
 .chat-run-footer {
-  grid-template-columns: repeat(2, minmax(92px, auto)) minmax(220px, 1.3fr) auto repeat(4, minmax(120px, .85fr));
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
+  grid-auto-columns: minmax(120px, 1fr);
   gap: 8px;
+}
+
+.run-profile-once {
+  grid-column: span 2;
+  min-width: 0;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--c-card);
+}
+
+.run-workspace-wrap,
+.run-agent-wrap {
+  min-width: 0;
+}
+
+.composer-popover.composer-workspace-popover,
+.composer-popover.composer-agent-popover {
+  width: min(560px, 88vw);
+}
+
+.workspace-switch-warning {
+  margin: 10px 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(245, 158, 11, .46);
+  border-radius: 7px;
+  background: rgba(245, 158, 11, .09);
+  color: #fbbf24;
+  font-size: 11px;
+}
+
+.workspace-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px;
+}
+
+.workspace-action-grid button,
+.workspace-popover-row,
+.agent-popover-row,
+.workspace-manage-button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--c-card);
+  color: var(--text);
+  text-align: left;
+}
+
+.workspace-action-grid button {
+  display: grid;
+  gap: 3px;
+  padding: 10px 11px;
+}
+
+.workspace-action-grid button:hover:not(:disabled),
+.workspace-popover-row:hover:not(:disabled),
+.agent-popover-row:hover:not(:disabled),
+.workspace-manage-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--c-card));
+}
+
+.workspace-action-grid strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.workspace-action-grid span {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.workspace-popover-list,
+.agent-popover-list {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 12px;
+}
+
+.workspace-popover-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 2px 9px;
+  padding: 8px 10px;
+}
+
+.workspace-popover-row > span {
+  grid-row: span 2;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workspace-popover-row strong,
+.workspace-popover-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-popover-row strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.workspace-popover-row small {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.workspace-popover-row.active,
+.agent-popover-row.active {
+  border-color: rgba(74, 222, 128, .55);
+  background: rgba(74, 222, 128, .08);
+}
+
+.workspace-manage-button {
+  width: calc(100% - 24px);
+  margin: 0 12px 12px;
+  padding: 8px 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: center;
+}
+
+.agent-popover-row {
+  display: grid;
+  grid-template-columns: minmax(205px, .95fr) minmax(140px, 1.2fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+}
+
+.agent-popover-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.agent-popover-title strong {
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-popover-title small {
+  padding: 2px 5px;
+  border: 1px solid rgba(56, 189, 248, .38);
+  border-radius: 999px;
+  color: #7dd3fc;
+  font-size: 8px;
+  font-weight: 850;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.agent-popover-description,
+.agent-popover-policy {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.agent-popover-policy {
+  white-space: nowrap;
+}
+
+@media (max-width: 1260px) {
+  .chat-run-footer {
+    grid-template-columns: repeat(3, minmax(110px, 1fr));
+  }
+}
+
+@media (max-width: 860px) {
+  .chat-run-footer {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-profile-once {
+    grid-column: span 2;
+  }
+
+  .workspace-action-grid,
+  .agent-popover-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.run-profile-once > span {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.run-profile-once select {
+  min-width: 0;
+  width: 100%;
+  height: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--text-bright);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.run-profile-once.cloud {
+  border-color: rgba(56, 189, 248, .58);
+  background: rgba(14, 116, 144, .14);
+}
+
+.run-profile-once.cloud > span,
+.run-profile-once.cloud select {
+  color: #7dd3fc;
+}
+
+.run-cloud-setup {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px dashed rgba(56, 189, 248, .45);
+  border-radius: 8px;
+  background: rgba(14, 116, 144, .08);
+  color: #7dd3fc;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .run-popover-wrap {
@@ -1449,6 +1812,22 @@
   border-radius: 10px;
   background: var(--c-panel);
   box-shadow: 0 18px 48px rgba(0,0,0,.45);
+}
+
+.composer-popover-portal {
+  position: fixed;
+  z-index: 1000;
+  overflow: auto;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0,0,0,.48);
+}
+
+.composer-popover-portal > .composer-popover {
+  position: static;
+  width: 100%;
+  max-height: none;
+  overflow: visible;
+  box-shadow: none;
 }
 
 .composer-popover-head {

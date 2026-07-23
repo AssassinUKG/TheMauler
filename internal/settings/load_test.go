@@ -222,6 +222,51 @@ func TestDefaultToolsetsKeepBashAliasOutOfModelSurface(t *testing.T) {
 	}
 }
 
+func TestBugBountyReviewDefaultsAreReadOriented(t *testing.T) {
+	cfg := DefaultSettings()
+	preset, ok := cfg.Agents.Presets["Bug Bounty Hunter"]
+	if !ok || !preset.Enabled {
+		t.Fatalf("Bug Bounty Hunter preset missing or disabled: %#v", preset)
+	}
+	if preset.Toolset != "bug-bounty-review" || preset.Autonomy != "ask" {
+		t.Fatalf("Bug Bounty Hunter defaults = %#v, want ask/bug-bounty-review", preset)
+	}
+
+	allowed := map[string]bool{}
+	for _, name := range cfg.Tools.Toolsets["bug-bounty-review"] {
+		allowed[name] = true
+	}
+	for _, name := range []string{"read", "glob", "grep", "session_search", "todo_write", "engagement", "evidence_bundle", "http_probe", "web_search", "fetch_url", "browser", "task"} {
+		if !allowed[name] {
+			t.Fatalf("bug-bounty-review should include %q: %#v", name, cfg.Tools.Toolsets["bug-bounty-review"])
+		}
+	}
+	for _, name := range []string{"write", "edit", "shell", "terminal_send", "start_listener", "run_script"} {
+		if allowed[name] || preset.ToolPermissions[name] {
+			t.Fatalf("bug-bounty-review should block mutating/active tool %q", name)
+		}
+	}
+}
+
+func TestNormaliseSettingsBackfillsBugBountyAgentWithoutOverwritingCustomPresets(t *testing.T) {
+	cfg := DefaultSettings()
+	delete(cfg.Agents.Presets, "Bug Bounty Hunter")
+	cfg.Agents.Presets["Reviewer"] = AgentModePreset{Enabled: true, Instructions: "keep my custom reviewer"}
+	delete(cfg.Tools.Toolsets, "bug-bounty-review")
+
+	normaliseSettings(&cfg)
+
+	if _, ok := cfg.Agents.Presets["Bug Bounty Hunter"]; !ok {
+		t.Fatal("Bug Bounty Hunter preset was not backfilled")
+	}
+	if got := cfg.Agents.Presets["Reviewer"].Instructions; got != "keep my custom reviewer" {
+		t.Fatalf("custom preset was overwritten: %q", got)
+	}
+	if len(cfg.Tools.Toolsets["bug-bounty-review"]) == 0 {
+		t.Fatal("bug-bounty-review toolset was not backfilled")
+	}
+}
+
 func TestEffectiveEnabledToolsHonoursPerToolDisableInsideToolset(t *testing.T) {
 	cfg := DefaultSettings().Tools
 	cfg.ActiveToolset = "unrestricted"
@@ -282,8 +327,13 @@ func TestNormaliseSettingsCanonicalizesAgentPresetToolPermissions(t *testing.T) 
 
 func TestDefaultProfilesIncludeModernLocalProviderPresets(t *testing.T) {
 	pf := DefaultProfiles()
+	inferenceBridge, ok := pf.Providers["inference-bridge"]
+	if !ok || inferenceBridge.Backend != "llamacpp" || inferenceBridge.BaseURL != "http://127.0.0.1:8800/v1" {
+		t.Fatalf("inference-bridge provider = %#v, want the primary local endpoint", inferenceBridge)
+	}
 
 	for name, wantURL := range map[string]string{
+		"openrouter":   "https://openrouter.ai/api/v1",
 		"sglang-local": "http://localhost:30000/v1",
 		"vllm-local":   "http://localhost:8000/v1",
 	} {
@@ -295,8 +345,14 @@ func TestDefaultProfilesIncludeModernLocalProviderPresets(t *testing.T) {
 			t.Fatalf("%s provider = %#v", name, provider)
 		}
 	}
+	if pf.Providers["openrouter"].APIKeyEnv != "OPENROUTER_API_KEY" {
+		t.Fatalf("openrouter provider = %#v", pf.Providers["openrouter"])
+	}
 
 	qwen := pf.Profiles["qwen3.6-think"]
+	if qwen.Provider != "inference-bridge" || qwen.ModelID != "Qwen3.6-27B-UD-Q4_K_XL.gguf" || qwen.CtxTokens != 35000 {
+		t.Fatalf("Qwen default = %#v, want the verified UD-Q4_K_XL winner at 35K", qwen)
+	}
 	if qwen.ThinkGeneral.PresencePenalty != 0.0 {
 		t.Fatalf("thinking general presence_penalty = %v, want 0.0", qwen.ThinkGeneral.PresencePenalty)
 	}
@@ -308,6 +364,9 @@ func TestDefaultProfilesIncludeModernLocalProviderPresets(t *testing.T) {
 	}
 	if chat := pf.Profiles["qwen3.6-chat"]; chat.Thinking || chat.PreserveThink {
 		t.Fatalf("qwen3.6-chat should default to no-thinking for snappy chat/tool reliability: %#v", chat)
+	}
+	if noThink := pf.Profiles["qwen3.6-nothink"]; noThink.Provider != "inference-bridge" || noThink.ModelID != "Qwen3.6-27B-UD-Q4_K_XL.gguf" || noThink.CtxTokens != 35000 {
+		t.Fatalf("qwen3.6-nothink default = %#v, want the verified local winner", noThink)
 	}
 
 	gemmaQAT, ok := pf.Profiles["gemma4-26b-a4b-qat"]
@@ -365,5 +424,31 @@ func TestMigrateProvidersRepairsBadGemma426BQATDefaults(t *testing.T) {
 	got := pf.Profiles["gemma4-26b-a4b-qat"]
 	if got.ModelID != "gemma-4-26B-A4B-it-QAT-Q4_0.gguf" || got.CtxTokens != 49152 {
 		t.Fatalf("repaired profile = %#v, want live InferenceBridge model id and context", got)
+	}
+}
+
+func TestMigrateProvidersBackfillsFamilyRepeatPenalty(t *testing.T) {
+	pf := &ProfilesFile{
+		Providers: map[string]Provider{"inference-bridge": {Name: "inference-bridge", Backend: "llamacpp", BaseURL: "http://127.0.0.1:8800/v1"}},
+		Profiles: map[string]Profile{
+			"qwen": {
+				Name:     "qwen",
+				Provider: "inference-bridge",
+				ModelID:  "Qwen3.6-27B-Fable-Fus-Q4_K_M.gguf",
+			},
+			"gemma": {
+				Name:     "gemma",
+				Provider: "inference-bridge",
+				ModelID:  "Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+			},
+		},
+	}
+
+	migrateProviders(pf)
+	if got := pf.Profiles["qwen"].NoThink.RepeatPenalty; got != 1.05 {
+		t.Fatalf("Qwen repeat_penalty = %v, want 1.05", got)
+	}
+	if got := pf.Profiles["gemma"].NoThink.RepeatPenalty; got != 1.1 {
+		t.Fatalf("HauhauCS Gemma repeat_penalty = %v, want 1.1", got)
 	}
 }

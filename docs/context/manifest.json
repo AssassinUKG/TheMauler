@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "status": "active",
+  "note": "Validated by Go for documentation retrieval only; never an authorization or scope source.",
+  "default_packet": "relevant_workspace",
+  "packets": {
+    "minimal_external_research": {
+      "max_project_tokens": 500,
+      "documents": []
+    },
+    "relevant_workspace": {
+      "max_project_tokens": 4000,
+      "documents": [
+        "../../AGENTS.md",
+        "non-negotiables.md",
+        "current-state.md"
+      ]
+    },
+    "expanded_workspace": {
+      "max_project_tokens": 8000,
+      "explicit_only": true,
+      "documents": [
+        "../../AGENTS.md",
+        "architecture.md",
+        "feature-catalog.md"
+      ]
+    }
+  },
+  "routes": [
+    {
+      "id": "external-public-research",
+      "priority": 100,
+      "signals": ["current", "latest", "CVE-", "PoC", "advisory", "in the wild"],
+      "packet": "minimal_external_research",
+      "documents": []
+    },
+    {
+      "id": "provider-and-models",
+      "priority": 20,
+      "signals": ["provider", "InferenceBridge", "OpenRouter", "profile", "context tokens", "model"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "non-negotiables.md", "troubleshooting.md"]
+    },
+    {
+      "id": "ui-workbench",
+      "priority": 20,
+      "signals": ["frontend", "React", "workbench", "splitter", "resize", "Explorer", "Inspector", "Terminal"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "non-negotiables.md", "feature-catalog.md"]
+    },
+    {
+      "id": "reliability-control-plane",
+      "priority": 20,
+      "signals": ["control plane", "state machine", "evidence", "recovery", "circuit breaker", "RunLedger"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "architecture.md", "non-negotiables.md"]
+    },
+    {
+      "id": "channels-and-media",
+      "priority": 20,
+      "signals": ["Telegram", "channel", "voice", "audio", "TTS", "STT"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "current-state.md", "troubleshooting.md"]
+    },
+    {
+      "id": "bug-bounty-assessment",
+      "priority": 30,
+      "signals": ["bug bounty", "bug-bounty", "post-recon", "post recon", "manual assessment", "Burp request", "Burp response"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "non-negotiables.md", "feature-catalog.md"]
+    },
+    {
+      "id": "terminal-and-wsl",
+      "priority": 30,
+      "signals": ["WSL", "CreateProcessCommon", "chdir(", "shared terminal", "terminal startup"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "non-negotiables.md", "troubleshooting.md"]
+    },
+    {
+      "id": "files-and-intelligence",
+      "priority": 20,
+      "signals": ["large file", "extractor", "PDF", "OCR", "index", "LSP", "repository intelligence"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "non-negotiables.md", "roadmap.md"]
+    },
+    {
+      "id": "workspace-implementation",
+      "priority": 1,
+      "signals": ["repository", "workspace", "implement", "fix", "repair", "restore", "patch", "update", "edit", "change", "test", "frontend", "backend", "Mauler"],
+      "packet": "relevant_workspace",
+      "documents": ["../../AGENTS.md", "architecture.md", "verification.md"]
+    }
+  ]
+}

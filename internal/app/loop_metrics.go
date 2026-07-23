@@ -223,18 +223,21 @@ func normaliseToolResult(result string) string {
 }
 
 func detectToolCycle(tools []TaskToolEvent) (bool, int) {
-	names := make([]string, 0, len(tools))
+	signatures := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		name := strings.ToLower(strings.TrimSpace(tool.Name))
-		if name != "" {
-			names = append(names, name)
+		signature := normaliseLoopToolInput(tool)
+		if signature == "" {
+			signature = strings.ToLower(strings.TrimSpace(tool.Name))
+		}
+		if signature != "" {
+			signatures = append(signatures, signature)
 		}
 	}
 	for _, period := range []int{3, 2} {
-		if len(names) < period*2 {
+		if len(signatures) < period*2 {
 			continue
 		}
-		tail := names[len(names)-period*2:]
+		tail := signatures[len(signatures)-period*2:]
 		if !allDistinct(tail[:period]) {
 			continue
 		}
@@ -356,7 +359,7 @@ const (
 	loopCircuitBreakerReset  loopCircuitBreakerAction = "reset"
 )
 
-func decideLoopCircuitBreaker(metrics LoopMetrics, armed bool, toolCountAtTrip, currentToolCount int) loopCircuitBreakerAction {
+func decideLoopCircuitBreaker(metrics LoopMetrics, armed bool, tripMetrics LoopMetrics, toolCountAtTrip, currentToolCount int) loopCircuitBreakerAction {
 	if !metrics.LoopStalled() {
 		if armed && metrics.StabilityScore >= 45 {
 			return loopCircuitBreakerReset
@@ -364,6 +367,9 @@ func decideLoopCircuitBreaker(metrics LoopMetrics, armed bool, toolCountAtTrip, 
 		return loopCircuitBreakerNone
 	}
 	if armed && currentToolCount > toolCountAtTrip {
+		if !loopSignalsWorsened(metrics, tripMetrics) {
+			return loopCircuitBreakerReset
+		}
 		return loopCircuitBreakerPause
 	}
 	if !armed {
@@ -372,8 +378,16 @@ func decideLoopCircuitBreaker(metrics LoopMetrics, armed bool, toolCountAtTrip, 
 	return loopCircuitBreakerNone
 }
 
+func loopSignalsWorsened(current, trip LoopMetrics) bool {
+	return current.RepeatedToolInputs > trip.RepeatedToolInputs ||
+		current.RepeatedIdenticalOutcomes > trip.RepeatedIdenticalOutcomes ||
+		current.RepeatedSkips > trip.RepeatedSkips ||
+		current.ToolErrors > trip.ToolErrors ||
+		(current.ToolCycleDetected && current.ToolCyclePeriod == trip.ToolCyclePeriod)
+}
+
 func loopCircuitBreakerPrompt(metrics LoopMetrics) string {
-	return fmt.Sprintf("Loop-health is critical: stability_score=%d, repeated_tool_inputs=%d, repeated_identical_outcomes=%d, repeated_skips=%d, tool_errors=%d, tool_cycle_detected=%t, tool_cycle_period=%d. Your last actions repeated or failed without producing new evidence. Stop repeating. State the single blocking fact, then take one DIFFERENT action only: follow redirects with -L or the Location URL, switch back to the confirmed target IP, inspect an existing artifact/result_id once, or change the hypothesis/input. Do not rerun the same command with only head/tail/timeout/count changes.",
+	return fmt.Sprintf("Loop-health is critical: stability_score=%d, repeated_tool_inputs=%d, repeated_identical_outcomes=%d, repeated_skips=%d, tool_errors=%d, tool_cycle_detected=%t, tool_cycle_period=%d. Your last actions repeated or failed without producing new evidence. Stop repeating. State the single blocking fact, then take one DIFFERENT action only: for public research use web_search/fetch_url because skill and memory excerpts are methodology, not current evidence; for target work follow redirects with -L or the Location URL, switch back to the confirmed target IP, inspect an existing artifact/result_id once, or change the hypothesis/input. Do not rerun the same command with only head/tail/timeout/count changes.",
 		metrics.StabilityScore, metrics.RepeatedToolInputs, metrics.RepeatedIdenticalOutcomes, metrics.RepeatedSkips, metrics.ToolErrors, metrics.ToolCycleDetected, metrics.ToolCyclePeriod)
 }
 

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -81,10 +80,7 @@ func NewOpenAICompatible(p settings.Profile) llm.Client {
 	if baseURL == "" {
 		baseURL = "http://localhost:8000/v1"
 	}
-	apiKey := ""
-	if p.APIKeyEnv != "" {
-		apiKey = os.Getenv(p.APIKeyEnv)
-	}
+	apiKey := settings.ResolveProviderAPIKey(p.Provider, p.APIKeyEnv)
 	return newOpenAICompat("openai-compatible", baseURL, p.ModelID, p.CtxTokens, apiKey, false)
 }
 
@@ -555,11 +551,14 @@ func (c *OpenAICompat) Ping(ctx context.Context) error {
 	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		// Fall back to GET if HEAD is not supported
+	if err != nil || (resp != nil && resp.StatusCode >= 400) {
+		// Cloud gateways commonly reject HEAD even though GET /models is healthy.
+		if resp != nil {
+			resp.Body.Close()
+		}
 		req2, err2 := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/models", nil)
 		if err2 != nil {
-			return err
+			return err2
 		}
 		c.setHeaders(req2)
 		resp, err = c.httpClient.Do(req2)
@@ -574,8 +573,11 @@ func (c *OpenAICompat) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Models returns the list of model IDs reported by the backend.
-func (c *OpenAICompat) Models(ctx context.Context) ([]string, error) {
+// ModelMetadata returns model IDs plus any provider-owned catalogue limits.
+// OpenRouter supplies both a model-level context length and, when routing has
+// selected a provider, a top-provider limit. Use the smaller non-zero value so
+// Mauler never advertises a window larger than the active route supports.
+func (c *OpenAICompat) ModelMetadata(ctx context.Context) ([]llm.ModelMetadata, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -590,18 +592,59 @@ func (c *OpenAICompat) Models(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("list models HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	var result struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID                  string   `json:"id"`
+			ContextLength       int      `json:"context_length"`
+			MaxCompletionTokens int      `json:"max_completion_tokens"`
+			SupportedParameters []string `json:"supported_parameters"`
+			TopProvider         struct {
+				ContextLength       int `json:"context_length"`
+				MaxCompletionTokens int `json:"max_completion_tokens"`
+			} `json:"top_provider"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode models: %w", err)
 	}
-	ids := make([]string, len(result.Data))
+	models := make([]llm.ModelMetadata, len(result.Data))
 	for i, m := range result.Data {
-		ids[i] = m.ID
+		contextLength := smallerNonZero(m.ContextLength, m.TopProvider.ContextLength)
+		maxCompletionTokens := smallerNonZero(m.MaxCompletionTokens, m.TopProvider.MaxCompletionTokens)
+		models[i] = llm.ModelMetadata{
+			ID:                  m.ID,
+			ContextLength:       contextLength,
+			MaxCompletionTokens: maxCompletionTokens,
+			SupportedParameters: m.SupportedParameters,
+		}
+	}
+	return models, nil
+}
+
+func smallerNonZero(a, b int) int {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
+}
+
+// Models returns the list of model IDs reported by the backend.
+func (c *OpenAICompat) Models(ctx context.Context) ([]string, error) {
+	metadata, err := c.ModelMetadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(metadata))
+	for i, model := range metadata {
+		ids[i] = model.ID
 	}
 	return ids, nil
 }
@@ -684,6 +727,7 @@ type chatReqBody struct {
 	TopK            int           `json:"top_k,omitempty"`
 	MinP            float64       `json:"min_p,omitempty"`
 	PresencePenalty float64       `json:"presence_penalty,omitempty"`
+	RepeatPenalty   float64       `json:"repeat_penalty,omitempty"`
 	Seed            *int64        `json:"seed,omitempty"`
 	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 	Tools           []llm.ToolDef `json:"tools,omitempty"`
@@ -752,6 +796,7 @@ func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
 		Temperature:     req.Temperature,
 		TopP:            req.TopP,
 		PresencePenalty: req.PresencePenalty,
+		RepeatPenalty:   req.RepeatPenalty,
 		ReasoningEffort: req.ReasoningEffort,
 	}
 

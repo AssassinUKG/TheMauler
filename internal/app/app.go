@@ -17,9 +17,12 @@ import (
 	"mauler/internal/agent"
 	"mauler/internal/audio"
 	"mauler/internal/channelbus"
+	"mauler/internal/controlplane"
+	"mauler/internal/engagement"
 	"mauler/internal/ledger"
 	"mauler/internal/llm"
 	"mauler/internal/llm/backends"
+	"mauler/internal/packlibrary"
 	"mauler/internal/runtimeprofile"
 	"mauler/internal/sessionstore"
 	"mauler/internal/settings"
@@ -52,11 +55,13 @@ type App struct {
 	cfg      *settings.Settings
 	profiles *settings.ProfilesFile
 
-	history  *agent.History
-	rollback *agent.Rollback
-	registry *tools.Registry
-	ledger   *ledger.Ledger
-	db       *sql.DB
+	history     *agent.History
+	rollback    *agent.Rollback
+	registry    *tools.Registry
+	ledger      *ledger.Ledger
+	db          *sql.DB
+	engagements *engagement.Service
+	packs       *packlibrary.Library
 
 	// contextWindow is the model's full loaded context (tokens). history.Budget()
 	// is this minus the output reserve; we keep the window so the status bar can
@@ -82,6 +87,9 @@ type App struct {
 	currentMode    string
 	autoAgents     bool
 	modeOverride   string
+	// nextContextPacketClass is an ephemeral UI-selected override consumed by
+	// the next accepted desktop task. It is never persisted or applied to remote lanes.
+	nextContextPacketClass string
 
 	// cached loaded-context length; keyed by model load key so it auto-invalidates
 	// on model change. Avoids an HTTP /props (or LM Studio) query every agent turn.
@@ -186,6 +194,21 @@ func New() *App {
 		bgJobs:        make(map[string]*bgJob),
 		channelQueue:  channelbus.NewPersistentQueue(db),
 	}
+	if db != nil {
+		catalog, catalogErr := engagement.LoadEmbeddedCatalog()
+		if configDir, err := settings.ConfigDir(); err == nil {
+			if library, err := packlibrary.New(filepath.Join(configDir, "engagement-packs")); err == nil {
+				app.packs = library
+				if merged, err := library.Catalog(""); err == nil {
+					catalog = merged
+					catalogErr = nil
+				}
+			}
+		}
+		if catalogErr == nil {
+			app.engagements = engagement.NewService(db, catalog, runLedger)
+		}
+	}
 	app.registerAppTools()
 	tools.SetConfigSnapshot(cfg.Tools)
 	if db != nil {
@@ -253,9 +276,13 @@ func (a *App) OnStartup(ctx context.Context) {
 	cfg := *a.cfg
 	a.mu.Unlock()
 	configureWorkingDir(&cfg)
+	_ = a.refreshEngagementCatalog()
 	a.restartTelegramRuntime(cfg.Telegram)
+	if cfg.Audio.Enabled && audioUsesKokoro(cfg.Audio.TTSEngine) {
+		audio.WarmKokoro(os.Getenv("MAULER_KOKORO_PYTHON"), cfg.Audio.Voice)
+	}
 	if cfg.Audio.Enabled && strings.EqualFold(firstNonEmpty(cfg.Audio.STTEngine, "whisper"), "whisper") {
-		audio.WarmWhisper(audio.ResolveWhisperPython())
+		audio.WarmWhisper("")
 	}
 }
 
@@ -307,8 +334,11 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		a.mu.Unlock()
 		return fmt.Errorf("cannot update settings while Agent Eval is running")
 	}
+	profiles := *a.profiles
+	previousModeOverride := a.cfg.Agents.ModeOverride
 	a.mu.Unlock()
 	var workspaceChanged bool
+	oldWD, _ := os.Getwd()
 	requestedWorkspace := strings.TrimSpace(cfg.Context.WorkspaceDir)
 	if requestedWorkspace != "" {
 		abs, err := filepath.Abs(tools.NormalizeHostPath(requestedWorkspace))
@@ -322,7 +352,6 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		if !info.IsDir() {
 			return fmt.Errorf("workspace_dir: %s is not a directory", abs)
 		}
-		oldWD, _ := os.Getwd()
 		if !sameFilesystemPath(oldWD, abs) {
 			a.mu.Lock()
 			if a.agentRunning || a.evalRunning {
@@ -337,6 +366,14 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		}
 		cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
 	}
+	if workspaceChanged {
+		cfg.Context.WorkspacePreferences = upsertWorkspaceAgentPreference(
+			cfg.Context.WorkspacePreferences,
+			oldWD,
+			previousModeOverride,
+		)
+		cfg.Agents.ModeOverride = modeForActivatedWorkspace(cfg.Context.WorkspacePreferences, cfg.Context.WorkspaceDir)
+	}
 	cfg.Context.OpenFolders = normaliseAppWorkspaceFolders(cfg.Context.OpenFolders, cfg.Context.WorkspaceDir)
 	cfg.Environment = normaliseAppEnvironment(cfg.Environment)
 	cfg.Context.Lab = normaliseAppLabContext(cfg.Context.Lab)
@@ -344,6 +381,7 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	if strings.TrimSpace(cfg.Context.ActiveLabProfile) == "" {
 		cfg.Context.ActiveLabProfile = cfg.Context.Lab.ID
 	}
+	ensureActiveProfile(&cfg, &profiles)
 	if err := settings.Save(&cfg); err != nil {
 		return err
 	}
@@ -356,19 +394,35 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	if workspaceChanged {
 		a.history.Clear()
 		a.rollback.Clear()
+		a.currentMode = cfg.Agents.ModeOverride
 	}
 	if modelLoadKey(active) != previousKey {
 		a.loadedModelKey = ""
 	}
 	a.mu.Unlock()
-	if workspaceChanged && a.ctx != nil {
-		a.emit("mauler:workspace_changed", cfg.Context.WorkspaceDir)
+	if workspaceChanged {
+		_ = a.ClearTodos()
+		if a.ctx != nil {
+			a.emit("mauler:workspace_changed", cfg.Context.WorkspaceDir)
+			a.emit("mauler:agent_mode", cfg.Agents.ModeOverride)
+		}
+		_ = a.refreshEngagementCatalog()
 	}
-	a.restartTelegramRuntime(cfg.Telegram)
-	if cfg.Audio.Enabled && strings.EqualFold(firstNonEmpty(cfg.Audio.STTEngine, "whisper"), "whisper") {
-		audio.WarmWhisper(audio.ResolveWhisperPython())
-	} else {
-		audio.StopWhisper()
+	// Runtime workers are owned by the started Wails app. Headless App values
+	// used by tests and binding generation may update settings, but must not
+	// launch an asynchronous worker that inherits a temporary process cwd.
+	if a.ctx != nil {
+		a.restartTelegramRuntime(cfg.Telegram)
+		if cfg.Audio.Enabled && audioUsesKokoro(cfg.Audio.TTSEngine) {
+			audio.WarmKokoro(os.Getenv("MAULER_KOKORO_PYTHON"), cfg.Audio.Voice)
+		} else {
+			audio.RestartWorker()
+		}
+		if cfg.Audio.Enabled && strings.EqualFold(firstNonEmpty(cfg.Audio.STTEngine, "whisper"), "whisper") {
+			audio.WarmWhisper("")
+		} else {
+			audio.StopWhisper()
+		}
 	}
 	return nil
 }
@@ -405,6 +459,10 @@ func (a *App) SwitchProfile(name string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("profile %q not found", name)
 	}
+	if isOneTaskCloudProfile(p, a.profiles) {
+		a.mu.Unlock()
+		return fmt.Errorf("cloud profile %q is available from Chat as a one-task boost; the default remains local", name)
+	}
 	a.cfg.ActiveProfile = name
 	a.history.SetBudget(p.CtxTokens)
 	active := applyProvider(p, a.profiles)
@@ -428,10 +486,11 @@ func (a *App) GetProfileNames() []string {
 	defer a.mu.Unlock()
 	names := make([]string, 0, len(a.profiles.Profiles))
 	for k, profile := range a.profiles.Profiles {
-		if strings.TrimSpace(profile.ModelID) != "" {
+		if strings.TrimSpace(profile.ModelID) != "" && !isOneTaskCloudProfile(profile, a.profiles) {
 			names = append(names, k)
 		}
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -443,6 +502,9 @@ func (a *App) UseProfile(name string, cfg settings.Settings, pf settings.Profile
 	}
 	if _, ok := pf.Providers[profile.Provider]; !ok {
 		return fmt.Errorf("provider %q not found", profile.Provider)
+	}
+	if isOneTaskCloudProfile(profile, &pf) {
+		return fmt.Errorf("cloud profile %q is saved for one-task boosts; choose it beside the Chat composer", name)
 	}
 	removeRemoteProfiles(&pf)
 	cfg.ActiveProfile = name
@@ -540,9 +602,10 @@ func (a *App) ClearHistory() {
 
 // SessionChatMessage is the UI-safe representation returned when loading sessions.
 type SessionChatMessage struct {
-	Role    string   `json:"role"`
-	Content string   `json:"content"`
-	Images  []string `json:"images,omitempty"`
+	Role        string           `json:"role"`
+	Content     string           `json:"content"`
+	Images      []string         `json:"images,omitempty"`
+	Attachments []ChatAttachment `json:"attachments,omitempty"`
 }
 
 // ChatAttachment is a user-provided text/file attachment from the chat composer.
@@ -744,6 +807,21 @@ func (a *App) ClearTodos() error {
 // Images is a slice of base64-encoded data URIs (e.g. "data:image/png;base64,...").
 // Attachments are text/file payloads from pasted text or dropped files.
 func (a *App) SendMessage(text string, images []string, attachments []ChatAttachment) error {
+	return a.sendMessageWithClaimantAndProfile(text, images, attachments, "", "", "desktop", "")
+}
+
+// SendMessageWithProfile runs exactly one desktop task with profileName without
+// changing the persisted local default. The next task therefore returns to the
+// active local profile automatically.
+func (a *App) SendMessageWithProfile(text string, images []string, attachments []ChatAttachment, profileName string) error {
+	return a.sendMessageWithClaimantAndProfile(text, images, attachments, "", "", "desktop", profileName)
+}
+
+func (a *App) sendMessageWithClaimant(text string, images []string, attachments []ChatAttachment, claimantID, claimantAlias, origin string) error {
+	return a.sendMessageWithClaimantAndProfile(text, images, attachments, claimantID, claimantAlias, origin, "")
+}
+
+func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, attachments []ChatAttachment, claimantID, claimantAlias, origin, profileOverride string) error {
 	a.mu.Lock()
 	if a.evalRunning {
 		a.mu.Unlock()
@@ -762,12 +840,27 @@ func (a *App) SendMessage(text string, images []string, attachments []ChatAttach
 	a.mu.Unlock()
 
 	profile := activeProfile(&cfg, &profiles)
+	runProfileName := cfg.ActiveProfile
 	messageText := composeUserTextWithAttachments(text, attachments)
 	mode := selectAgentMode(messageText, cfg)
 	if !autoAgents {
 		mode = manualAgentMode()
 	}
 	applyAgentPreset(&cfg, &profiles, mode, &profile, &autonomous)
+	if requested := strings.TrimSpace(profileOverride); requested != "" {
+		override, ok := profiles.Profiles[requested]
+		if !ok || strings.TrimSpace(override.ModelID) == "" {
+			a.mu.Lock()
+			a.agentRunning = false
+			a.mu.Unlock()
+			return fmt.Errorf("one-task profile %q not found", requested)
+		}
+		profile = applyProvider(override, &profiles)
+		runProfileName = requested
+	}
+	// This is a run-local copy. It keeps logs, prompt metadata and review passes
+	// truthful without persisting the temporary profile as the app default.
+	cfg.ActiveProfile = runProfileName
 	a.mu.Lock()
 	a.currentMode = mode.Name
 	a.mu.Unlock()
@@ -795,6 +888,8 @@ func (a *App) SendMessage(text string, images []string, attachments []ChatAttach
 	} else {
 		userMsg = llm.NewTextMessage(llm.RoleUser, messageText)
 	}
+	userMsg.DisplayContent = strings.TrimSpace(text)
+	userMsg.Attachments = toLLMMessageAttachments(attachments)
 
 	agentCtx, cancel := context.WithCancel(context.Background())
 	a.mu.Lock()
@@ -812,7 +907,11 @@ func (a *App) SendMessage(text string, images []string, attachments []ChatAttach
 	}
 	memories := memorySelection.Entries
 	skills := relevantSkillsForSettings(cfg.Skills, cfg, messageText)
-	run := startTaskRun(messageText, mode.Name, cfg.ActiveProfile, profile.ModelID)
+	run := startTaskRun(messageText, mode.Name, runProfileName, profile.ModelID)
+	run.ContextPacketClass = a.consumeNextContextPacketClass(origin)
+	run.ClaimantID = firstNonEmpty(strings.TrimSpace(claimantID), run.ID)
+	run.ClaimantAlias = firstNonEmpty(strings.TrimSpace(claimantAlias), mode.Name)
+	run.Origin = firstNonEmpty(strings.TrimSpace(origin), "desktop")
 	run.attachLedger(a.ledger)
 	if len(memorySelection.Withheld) > 0 {
 		run.addMemoryConflictEvent(fmt.Sprintf("Withheld %d conflicting memor%s from prompt injection", len(memorySelection.Withheld), plural(len(memorySelection.Withheld), "y", "ies")), memoryConflictSummary(memorySelection.Conflicts))
@@ -1114,6 +1213,9 @@ func (a *App) SetAgentModeOverride(mode string) error {
 	}
 	a.mu.Lock()
 	a.cfg.Agents.ModeOverride = mode
+	if wd, err := os.Getwd(); err == nil {
+		a.cfg.Context.WorkspacePreferences = upsertWorkspaceAgentPreference(a.cfg.Context.WorkspacePreferences, wd, mode)
+	}
 	a.currentMode = mode
 	cfg := *a.cfg
 	a.mu.Unlock()
@@ -1479,6 +1581,11 @@ func (a *App) SetWorkingDir(dir string) error {
 	}
 	changed := !sameFilesystemPath(oldWD, abs)
 	a.mu.Lock()
+	a.cfg.Context.WorkspacePreferences = upsertWorkspaceAgentPreference(
+		a.cfg.Context.WorkspacePreferences,
+		oldWD,
+		a.cfg.Agents.ModeOverride,
+	)
 	a.cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
 	a.cfg.Context.OpenFolders = mergeWorkspaceFolders(a.cfg.Context.OpenFolders, settings.WorkspaceFolder{
 		Path: filepath.ToSlash(abs),
@@ -1487,13 +1594,22 @@ func (a *App) SetWorkingDir(dir string) error {
 	})
 	cfg := *a.cfg
 	if changed {
+		nextMode := modeForActivatedWorkspace(a.cfg.Context.WorkspacePreferences, abs)
+		a.cfg.Agents.ModeOverride = nextMode
+		a.currentMode = nextMode
+		cfg = *a.cfg
 		a.history.Clear()
 		a.rollback.Clear()
 	}
 	a.mu.Unlock()
 	_ = settings.Save(&cfg)
-	if changed && a.ctx != nil {
-		a.emit("mauler:workspace_changed", filepath.ToSlash(abs))
+	if changed {
+		_ = a.ClearTodos()
+		if a.ctx != nil {
+			a.emit("mauler:workspace_changed", filepath.ToSlash(abs))
+			a.emit("mauler:agent_mode", cfg.Agents.ModeOverride)
+		}
+		_ = a.refreshEngagementCatalog()
 	}
 	return nil
 }
@@ -2209,6 +2325,7 @@ func (a *App) ListModels() ([]string, error) {
 // PingProvider tests connectivity to a provider currently being edited.
 func (a *App) PingProvider(provider settings.Provider) string {
 	client, err := buildClient(settings.Profile{
+		Provider:  provider.Name,
 		Backend:   provider.Backend,
 		BaseURL:   provider.BaseURL,
 		APIKeyEnv: provider.APIKeyEnv,
@@ -2243,6 +2360,7 @@ func (a *App) PingProvider(provider settings.Provider) string {
 // ListModelsForProvider lists models from a provider currently being edited.
 func (a *App) ListModelsForProvider(provider settings.Provider) ([]string, error) {
 	client, err := buildClient(settings.Profile{
+		Provider:  provider.Name,
 		Backend:   provider.Backend,
 		BaseURL:   provider.BaseURL,
 		APIKeyEnv: provider.APIKeyEnv,
@@ -2268,6 +2386,72 @@ func (a *App) ListModelsForProvider(provider settings.Provider) ([]string, error
 		Metadata: map[string]string{"base_url": provider.BaseURL},
 	})
 	return models, err
+}
+
+// ListModelMetadataForProvider returns provider-owned model limits for sensible
+// profile defaults. Backends that only expose IDs remain supported.
+func (a *App) ListModelMetadataForProvider(provider settings.Provider) ([]llm.ModelMetadata, error) {
+	client, err := buildClient(settings.Profile{
+		Provider:  provider.Name,
+		Backend:   provider.Backend,
+		BaseURL:   provider.BaseURL,
+		APIKeyEnv: provider.APIKeyEnv,
+	})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var models []llm.ModelMetadata
+	if catalog, ok := client.(llm.ModelCatalogClient); ok {
+		models, err = catalog.ModelMetadata(ctx)
+	} else {
+		var ids []string
+		ids, err = client.Models(ctx)
+		models = make([]llm.ModelMetadata, len(ids))
+		for i, id := range ids {
+			models[i] = llm.ModelMetadata{ID: id}
+		}
+	}
+	status := "ok"
+	detail := fmt.Sprintf("models=%d", len(models))
+	if err != nil {
+		status = "error"
+		detail = err.Error()
+	}
+	a.recordLedger(ledger.Event{
+		Kind:     "provider_model_metadata",
+		Source:   "provider",
+		Status:   status,
+		Message:  provider.Backend,
+		Detail:   detail,
+		Metadata: map[string]string{"base_url": provider.BaseURL},
+	})
+	return models, err
+}
+
+// GetProviderAPIKeyStatus exposes presence flags without returning secret material.
+func (a *App) GetProviderAPIKeyStatus(provider settings.Provider) settings.ProviderAPIKeyStatus {
+	return settings.GetProviderAPIKeyStatus(provider.Name, provider.APIKeyEnv)
+}
+
+// SetProviderAPIKey stores a provider key in Mauler's local secret file. It is
+// intentionally separate from profiles.toml and is never returned by GetProfiles.
+func (a *App) SetProviderAPIKey(providerName, apiKey string) error {
+	a.mu.Lock()
+	_, exists := a.profiles.Providers[providerName]
+	a.mu.Unlock()
+	if !exists {
+		return fmt.Errorf("provider %q not found", providerName)
+	}
+	return settings.SaveProviderAPIKey(providerName, apiKey)
+}
+
+// ClearProviderAPIKey removes only the UI-managed secret. Environment variables
+// remain untouched and continue to take precedence.
+func (a *App) ClearProviderAPIKey(providerName string) error {
+	return settings.ClearProviderAPIKey(providerName)
 }
 
 // ListWSLDistros returns installed WSL distribution names.
@@ -2387,7 +2571,7 @@ func parseWSLDistros(text string) []string {
 func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile settings.Profile, cfg *settings.Settings, autonomous bool, mode AgentMode, memories []MemoryEntry, skills []Skill, run TaskRun) (finalRun TaskRun) {
 	var finalSummary string
 	var finalStatus = "done"
-	run.addEvent("start", "Run started", fmt.Sprintf("mode=%s profile=%s model=%s autonomous=%t", mode.Name, cfg.ActiveProfile, profile.ModelID, autonomous))
+	run.addEvent("start", "Run started", fmt.Sprintf("mode=%s profile=%s model=%s autonomous=%t claimant=%s origin=%s", mode.Name, cfg.ActiveProfile, profile.ModelID, autonomous, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.Origin, "desktop")))
 	a.setRunState(&run, "planning", "Initial prompt accepted and run context created.")
 	defer func() {
 		if ctx.Err() != nil {
@@ -2421,14 +2605,36 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 				finalSummary = ""
 			}
 		}
+		if run.Control != nil && !run.Control.Terminal() {
+			switch {
+			case finalStatus == "done":
+				finalStatus = "stopped"
+				detail := fmt.Sprintf("The run attempted to finish while the authoritative control phase was %s, not complete.", run.Control.Phase)
+				run.stopTerminal("control_phase_incomplete", detail)
+				run.addEvent("blocked", "Control plane rejected terminal completion", detail)
+				_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventBlocked, Detail: detail})
+			case ctx.Err() != nil:
+				_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventCancelled, Detail: firstNonEmpty(run.StopDetail, "run context cancelled")})
+			case finalStatus == "error":
+				_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventFailed, Detail: firstNonEmpty(run.StopDetail, "run failed")})
+			default:
+				_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventBlocked, Detail: firstNonEmpty(run.StopDetail, "run stopped before completion")})
+			}
+		}
 		if finalStatus == "done" {
-			a.setRunState(&run, "done", "Run completed successfully.")
+			a.setRunState(&run, "done", telegramRunCompletionDetail(run, finalSummary))
 			run.addEvent("finish", "Run completed", "")
 		} else if finalStatus == "error" && run.StopReason != "" {
 			a.setRunState(&run, "failed", run.StopDetail)
 			run.addEvent("finish", "Run ended with error", run.StopDetail)
 		} else if finalStatus == "stopped" {
-			a.setRunState(&run, finalStoppedRunState(run.StopReason), run.StopDetail)
+			terminalState := finalStoppedRunState(run.StopReason)
+			a.setRunState(&run, terminalState, run.StopDetail)
+			// "blocked" is also used as a recoverable live phase inside the loop.
+			// Mark it terminal for Telegram only when the run really finishes.
+			if terminalState == "blocked" {
+				a.telegramNotifyRunTerminalState(terminalState, run.StopDetail)
+			}
 		}
 		if finalStatus == "stopped" && strings.TrimSpace(finalSummary) == "" {
 			finalSummary = fallbackStoppedRunSummary(run)
@@ -2441,6 +2647,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		run.addEvent("loop_metrics", "Loop-health metrics", buildLoopMetrics(run).Detail())
 		run.finish(finalStatus, finalSummary)
+		a.persistControlRun(run)
 		a.appendProgressUpdate(context.Background(), &run, "Run Finish", progressContentForRunFinish(run))
 		if ctx.Err() == nil {
 			a.deleteRunCheckpoint(run.ID)
@@ -2477,18 +2684,34 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		finalRun = run
 		a.drainChannelQueueAsync()
 	}()
+	if err := a.initializeRunControlPlane(&run, cfg, mode, autonomous); err != nil {
+		finalStatus = "error"
+		run.stopTerminal("control_plane_invalid", err.Error())
+		run.addEvent("control_error", "Could not initialize authoritative run control", err.Error())
+		return
+	}
+	stopEngagementHeartbeat := a.startEngagementClaimHeartbeat(
+		ctx, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.ClaimantAlias, mode.Name), firstNonEmpty(run.Origin, "desktop"),
+	)
+	defer stopEngagementHeartbeat()
+	firstUserText := initialRunPromptText(firstMsg, run) // for context/tool routing and research budgets
+	projectPacket := buildProjectInstructionPacketForClass(cfg.Context, firstUserText, run.ContextPacketClass)
+	run.addEvent("context_packet", "Selected task-aware project context", projectPacket.ledgerDetail())
 
-	// Append system prompt on first turn
+	// Refresh the primary system prompt for every accepted task so the logged
+	// context packet is the exact packet the model receives, even in a continued chat.
 	a.mu.Lock()
-	if a.history.TokenCount() == 0 {
-		a.history.Append(llm.NewTextMessage(llm.RoleSystem, buildSystemPrompt(*cfg, mode, memories, skills)))
+	primarySystemPrompt := buildSystemPromptForTaskWithProjectInstructions(*cfg, mode, memories, skills, firstUserText, projectPacket.Prompt)
+	a.history.Replace(messagesWithPrimarySystemPrompt(a.history.Messages(), primarySystemPrompt))
+	if packet := controlPlanePrompt(run); packet != "" {
+		a.history.Append(llm.NewTextMessage(llm.RoleSystem, packet))
 	}
 	if firstMsg.Role != "" {
 		a.history.Append(firstMsg)
 	}
 	a.mu.Unlock()
 
-	a.emit("mauler:stream_start")
+	a.emit("mauler:stream_start", cfg.ActiveProfile)
 
 	client, err := buildClientForAgent(profile)
 	if err != nil {
@@ -2531,7 +2754,6 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		effectiveBudget := effectiveWorkingContextBudget(mode.ContextBudget, profile.CtxTokens)
 		run.addEvent("context_budget", "Applied agent working context budget", fmt.Sprintf("budget=%d preset=%d profile_ctx=%d", effectiveBudget, mode.ContextBudget, profile.CtxTokens))
 	}
-	firstUserText := initialRunPromptText(firstMsg, run) // for toolChoiceFor heuristic and research budgets
 	budget := newTaskBudget(cfg.Tools, firstUserText)
 	startedAt := time.Now()
 	autoContinues := 0
@@ -2575,6 +2797,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	listenerNudgeSent := false // one-time reminder to start the listener before a reverse-shell payload
 	loopBreakerArmed := false
 	loopBreakerToolCount := 0
+	loopBreakerTripMetrics := LoopMetrics{}
 	const maxAutoContinues = 8
 	const maxMalformedToolContinues = 2
 	logCfg := cfg.Logging
@@ -2589,10 +2812,11 @@ agentLoop:
 			return
 		}
 		loopMetrics := buildLoopMetrics(run)
-		switch decideLoopCircuitBreaker(loopMetrics, loopBreakerArmed, loopBreakerToolCount, len(run.Tools)) {
+		switch decideLoopCircuitBreaker(loopMetrics, loopBreakerArmed, loopBreakerTripMetrics, loopBreakerToolCount, len(run.Tools)) {
 		case loopCircuitBreakerInject:
 			loopBreakerArmed = true
 			loopBreakerToolCount = len(run.Tools)
+			loopBreakerTripMetrics = loopMetrics
 			prompt := loopCircuitBreakerPrompt(loopMetrics)
 			if currentEffort != "high" {
 				currentEffort = "high"
@@ -2608,11 +2832,13 @@ agentLoop:
 			run.stopTerminal("loop_circuit_breaker", detail)
 			run.addEvent("loop_circuit_breaker", "Auto-paused stalled run", detail)
 			a.setRunState(&run, "blocked", detail)
-			finalStatus = "stopped"
-			break agentLoop
+			// Keep this iteration alive long enough for the normal no-tool recovery
+			// report path below. Breaking here exposed raw circuit-breaker metrics to
+			// the user and skipped the plain-language final assistant turn entirely.
 		case loopCircuitBreakerReset:
 			loopBreakerArmed = false
 			loopBreakerToolCount = 0
+			loopBreakerTripMetrics = LoopMetrics{}
 			run.addEvent("loop_circuit_breaker", "Loop-health recovered", loopMetrics.Detail())
 		}
 
@@ -2620,6 +2846,10 @@ agentLoop:
 		timeBudgetExhausted := agentTimeBudgetExhausted(cfg.Agents, startedAt, time.Now())
 		terminalState := a.GetSharedTerminalState()
 		toolDefs, toolChoice := toolDefsAndChoiceForTurnWithState(a.registry, cfg.Tools, firstUserText, autoContinues, totalToolCallsMade, terminalState)
+		if constrainedDefs, constrainedChoice, changed := constrainControlPlanningTools(run, toolDefs, toolChoice); changed {
+			toolDefs, toolChoice = constrainedDefs, constrainedChoice
+			run.addEvent("control_tool_scope", "Planning phase restricted tools", fmt.Sprintf("tool_choice=%s tools=%s", toolChoice, toolProtocolToolNames(toolDefs)))
+		}
 		if a.recordToolRoutingState(run.ID, firstUserText, toolChoice, toolDefs, autoContinues, totalToolCallsMade, terminalState) {
 			run.addEvent("tool_routing", "Tool routing state", fmt.Sprintf("phase=%s\ntool_choice=%s\ntool_count=%d\nterminal_state=%s\ntools=%s", opsPhaseForTaskWithState(firstUserText, terminalState), toolChoice, len(toolDefs), terminalState.State, toolProtocolToolNames(toolDefs)))
 		}
@@ -2822,6 +3052,9 @@ agentLoop:
 		toolTurn := len(toolDefs) > 0 && !strings.EqualFold(strings.TrimSpace(toolChoice), "none")
 		forceNoThink := profile.Thinking && (toolTurn || totalToolCallsMade >= noThinkThreshold || noToolContinues > 0)
 		req := buildChatRequest(profile, msgs, toolDefs, toolChoice, forceNoThink, shouldUseCodingParams(firstUserText, mode), currentEffort)
+		if applyExplicitNoToolResponseBudget(&req, firstUserText) {
+			run.addEvent("response_budget", "Applied explanation-only output cap", fmt.Sprintf("max_tokens=%d", req.MaxTokens))
+		}
 		// Experimental: for non-native local models, constrain output to a valid
 		// tool-call envelope via GBNF. Off unless explicitly enabled, never when an
 		// arg-schema grammar is already in play, and only when a tool call is allowed.
@@ -3082,6 +3315,11 @@ agentLoop:
 
 		if len(toolCalls) == 0 {
 			text := strings.TrimSpace(textBuf.String())
+			explicitNoToolTurn := explicitlyForbidsToolUse(firstUserText)
+			if wasTruncated && explicitNoToolTurn && text != "" {
+				wasTruncated = false
+				run.addEvent("response_budget", "Accepted bounded explanation response at output cap", "No action or tool continuation was permitted by the user instruction.")
+			}
 
 			if recoveryReportRequested {
 				finalStatus = "stopped"
@@ -3105,6 +3343,22 @@ agentLoop:
 					}
 				}
 				return
+			}
+			if toolBudgetExhausted {
+				if !controlCanVerifyAtToolBudget(run) {
+					finalStatus = "stopped"
+					detail := fmt.Sprintf("Agent tool-call budget was exhausted after %d calls.", cfg.Agents.MaxToolCalls)
+					run.stop("tool_budget_exhausted", detail)
+					run.addEvent("stop", "Tool budget exhausted", detail)
+					if text == "" {
+						finalSummary = fallbackStoppedRunSummary(run)
+						if strings.TrimSpace(run.Response) == "" {
+							run.Response = finalSummary
+						}
+					}
+					return
+				}
+				run.addEvent("control_budget", "Tool budget closed further actions; controller verification remains available", fmt.Sprintf("tool_calls=%d", len(run.Tools)))
 			}
 
 			if protocolFailure && autoContinues < maxAutoContinues && malformedToolContinues < maxMalformedToolContinues {
@@ -3249,8 +3503,9 @@ agentLoop:
 
 			// Auto-continue if the model looks like it stopped mid-task naturally
 			// or if it narrated an immediate tool action without making one.
-			aboutToAct := looksAboutToAct(text)
-			if autoContinues < maxAutoContinues && (looksIncomplete(text) || aboutToAct) {
+			aboutToAct := !explicitNoToolTurn && looksAboutToAct(text)
+			incomplete := !explicitNoToolTurn && looksIncomplete(text)
+			if autoContinues < maxAutoContinues && (incomplete || aboutToAct) {
 				a.setRunState(&run, "recovering", "Model appeared incomplete or narrated a tool action without making one.")
 				autoContinues++
 				noToolContinues++
@@ -3284,7 +3539,7 @@ agentLoop:
 				a.mu.Unlock()
 				continue
 			}
-			if autoContinues >= maxAutoContinues && (wasTruncated || looksIncomplete(text) || aboutToAct) {
+			if autoContinues >= maxAutoContinues && (wasTruncated || incomplete || aboutToAct) {
 				if wasTruncated {
 					detail := "The model still appeared truncated after the auto-continue limit."
 					if attempt, ok := a.tryEscalation(ctx, cfg, profile, &run, "auto_continue_exhausted", detail, toolDefs, shouldUseCodingParams(firstUserText, mode), &escalationsUsed); ok {
@@ -3313,10 +3568,30 @@ agentLoop:
 				run.addEvent("stop", "Empty model response", detail)
 			}
 			if finalStatus != "stopped" {
+				if err := a.requestControlVerification(&run); errors.Is(err, errControlPlanRequired) && autoContinues < maxAutoContinues {
+					autoContinues++
+					noToolContinues++
+					prompt := "The control plane rejected completion because this workspace-changing task still has no accepted plan. Call todo_write now with action=replace and a short non-empty list of concrete execution and verification steps. Do not restate the answer and do not claim completion."
+					run.addEvent("continue", fmt.Sprintf("Control-plan recovery %d/%d", autoContinues, maxAutoContinues), prompt)
+					a.setRunState(&run, "planning", "Completion proposal returned to planning.")
+					a.mu.Lock()
+					a.history.Append(llm.NewTextMessage(llm.RoleSystem, prompt))
+					a.mu.Unlock()
+					continue
+				} else if err != nil {
+					finalStatus = "stopped"
+					detail := "Completion proposal rejected by the control plane: " + err.Error()
+					run.stop("control_verification_illegal", detail)
+					a.setRunState(&run, "blocked", detail)
+					run.addEvent("blocked", "Control plane rejected verification transition", detail)
+					return
+				}
 				decision := a.runReviewPhase(ctx, &run, profile, cfg, mode, autonomous, &reviewCyclesUsed, toolBudgetExhausted || timeBudgetExhausted)
+				decision.Verdicts = a.ensureControlVerification(ctx, &run, cfg, decision.Verdicts)
 				if decision.StopReason != "" {
 					finalStatus = "stopped"
 					run.stop(decision.StopReason, decision.StopDetail)
+					_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventBlocked, Detail: decision.StopDetail})
 					a.setRunState(&run, "blocked", decision.StopDetail)
 					run.addEvent("stop", "Review gate incomplete", decision.StopDetail)
 					if strings.TrimSpace(decision.SummaryNote) != "" {
@@ -3325,14 +3600,74 @@ agentLoop:
 							run.Response = trimRunText(strings.TrimSpace(run.Response + "\n\n" + decision.SummaryNote))
 						}
 					}
+					return
 				}
 				if !decision.Proceed {
+					_ = a.failControlVerification(&run, decision.Verdicts, "blocking review gate requested a repair cycle")
 					a.setRunState(&run, "recovering", "Review gate requested another fix cycle.")
 					run.addEvent("continue", fmt.Sprintf("Review gate retry %d/%d", reviewCyclesUsed, cfg.Agents.ReviewLoop.MaxReviewCycles), decision.InjectedPrompt)
 					a.mu.Lock()
 					a.history.Append(llm.NewTextMessage(llm.RoleSystem, decision.InjectedPrompt))
 					a.mu.Unlock()
 					continue
+				}
+				if blockers := blockingReviewVerdicts(decision.Verdicts); len(blockers) > 0 {
+					maxCycles := max(1, cfg.Agents.ReviewLoop.MaxReviewCycles)
+					if reviewCyclesUsed < maxCycles {
+						reviewCyclesUsed++
+						_ = a.failControlVerification(&run, decision.Verdicts, "controller-owned deterministic verification failed")
+						prompt := buildReviewGateFailurePrompt(blockers, reviewCyclesUsed, maxCycles)
+						run.addEvent("continue", fmt.Sprintf("Control verification repair %d/%d", reviewCyclesUsed, maxCycles), prompt)
+						a.setRunState(&run, "recovering", "Control verification requested a targeted repair.")
+						a.mu.Lock()
+						a.history.Append(llm.NewTextMessage(llm.RoleSystem, prompt))
+						a.mu.Unlock()
+						continue
+					}
+					finalStatus = "stopped"
+					detail := "Controller-owned verification remained unsuccessful: " + reviewBlockingSummary(blockers)
+					run.stop("control_verification_failed", detail)
+					_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventBlocked, Detail: detail})
+					a.setRunState(&run, "blocked", detail)
+					return
+				}
+				if reason := invalidDoneReason(run, finalSummary); reason != "" {
+					verdict := VerifyVerdict{Gate: "control", Status: "fail", Blocking: true, Summary: reason, Improvements: []string{"Perform and verify the missing action before proposing completion again."}}
+					_ = a.failControlVerification(&run, []VerifyVerdict{verdict}, reason)
+					maxCycles := max(1, cfg.Agents.ReviewLoop.MaxReviewCycles)
+					if reviewCyclesUsed < maxCycles {
+						reviewCyclesUsed++
+						prompt := buildReviewGateFailurePrompt([]VerifyVerdict{verdict}, reviewCyclesUsed, maxCycles)
+						run.addEvent("continue", fmt.Sprintf("Control completion repair %d/%d", reviewCyclesUsed, maxCycles), prompt)
+						a.mu.Lock()
+						a.history.Append(llm.NewTextMessage(llm.RoleSystem, prompt))
+						a.mu.Unlock()
+						continue
+					}
+					finalStatus = "stopped"
+					run.stop("completion_invalid", reason)
+					a.setRunState(&run, "blocked", reason)
+					return
+				}
+				if err := a.passControlVerification(&run, decision.Verdicts); err != nil {
+					verdict := VerifyVerdict{Gate: "control", Status: "fail", Blocking: true, Summary: err.Error(), Improvements: []string{"Produce immutable evidence for every blocking contract check."}}
+					maxCycles := max(1, cfg.Agents.ReviewLoop.MaxReviewCycles)
+					if reviewCyclesUsed < maxCycles {
+						reviewCyclesUsed++
+						_ = a.failControlVerification(&run, []VerifyVerdict{verdict}, err.Error())
+						prompt := buildReviewGateFailurePrompt([]VerifyVerdict{verdict}, reviewCyclesUsed, maxCycles)
+						run.addEvent("continue", fmt.Sprintf("Control evidence repair %d/%d", reviewCyclesUsed, maxCycles), prompt)
+						a.mu.Lock()
+						a.history.Append(llm.NewTextMessage(llm.RoleSystem, prompt))
+						a.mu.Unlock()
+						continue
+					}
+					finalStatus = "stopped"
+					detail := "Blocking task-contract evidence remained incomplete: " + err.Error()
+					run.stop("control_verification_incomplete", detail)
+					_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventBlocked, Detail: detail})
+					a.setRunState(&run, "blocked", detail)
+					return
 				}
 			}
 			return
@@ -3437,8 +3772,42 @@ agentLoop:
 				})
 				continue
 			}
+			if policyErr := enforceAgentModeToolPolicy(mode, cfg.Tools.ActiveToolset, tc); policyErr != nil {
+				result := "agent policy blocked this tool call: " + policyErr.Error()
+				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "blocked", 0)
+				a.setRunState(&run, "blocked", result)
+				run.addEvent("policy_block", "Agent action-level policy blocked tool call", result)
+				a.emit("mauler:tool_result", map[string]string{
+					"id": tc.ID, "name": tc.Function.Name, "result": result,
+				})
+				continue
+			}
+			controlled, controlBlock := a.prepareControlledTool(&run, tc)
+			if controlBlock != "" {
+				result := "control plane blocked this tool call: " + controlBlock
+				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "blocked", 0)
+				a.setRunState(&run, "planning", controlBlock)
+				a.emit("mauler:tool_result", map[string]string{
+					"id": tc.ID, "name": tc.Function.Name, "result": result,
+				})
+				continue
+			}
 			if isKnown && shouldConfirmTool(tool, cfg, tc) && !autonomous {
+				if err := a.enterControlApproval(&run, tc.Function.Name); err != nil {
+					result := "control plane could not enter approval state: " + err.Error()
+					toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
+					run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "blocked", 0)
+					run.stop("control_transition_denied", result)
+					a.setRunState(&run, "blocked", result)
+					continue
+				}
 				confirmed := a.awaitConfirm(ctx, tc)
+				if err := a.leaveControlApproval(&run, confirmed, tc.Function.Name); err != nil {
+					confirmed = false
+					run.addEvent("control_transition_denied", "Could not leave approval state", err.Error())
+				}
 				if !confirmed {
 					result := "user denied this operation"
 					toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
@@ -3563,10 +3932,10 @@ agentLoop:
 				result, runErr = a.runSharedTerminalShell(ctx, tc.Function.Name, tc.Function.Arguments, cfg.Tools.BashTimeout)
 				if errors.Is(runErr, errSharedTerminalUnsupported) || errors.Is(runErr, errSharedTerminalBusy) {
 					sharedFallback = sharedTerminalFallbackNote(runErr, a.GetSharedTerminalState())
-					result, runErr = a.registry.Run(ctx, tc)
+					result, runErr = a.registry.Run(withEngagementClaimant(ctx, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.ClaimantAlias, mode.Name)), tc)
 				}
 			} else {
-				result, runErr = a.registry.Run(ctx, tc)
+				result, runErr = a.registry.Run(withEngagementClaimant(ctx, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.ClaimantAlias, mode.Name)), tc)
 			}
 			if sharedFallback != "" {
 				result = sharedFallback + result
@@ -3620,6 +3989,7 @@ agentLoop:
 				}
 			}
 			run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), status, toolDurMs)
+			a.recordControlledToolOutcome(&run, controlled, tc, runErr)
 			a.recordCategorizedToolLedger(run.ID, tc, status, result, toolDurMs)
 			if status == "done" {
 				a.recordPinnedEvidenceLedger(run.ID, tc, result)
@@ -3643,7 +4013,6 @@ agentLoop:
 		finalSummary = textBuf.String()
 		a.maybeCheckpoint(run, *cfg, 4)
 	}
-	return
 }
 
 // awaitConfirm blocks until the user responds or context is cancelled.
@@ -3713,6 +4082,17 @@ func finalStoppedRunState(reason string) string {
 
 func fallbackStoppedRunSummary(run TaskRun) string {
 	reason := firstNonEmpty(run.StopReason, "stopped")
+	if reason == "loop_circuit_breaker" {
+		var sb strings.Builder
+		sb.WriteString("I'm sorry - this run got stuck repeating the same action, so I stopped it rather than inventing an answer.")
+		if explicitWebResearchIntent(run.Prompt) && !runHasSuccessfulWebResearch(run) {
+			sb.WriteString("\n\nNo verified web-research answer was produced. The run should have used web search and source fetching instead of rereading local guidance.")
+		} else {
+			sb.WriteString("\n\nThe requested result was not completed.")
+		}
+		sb.WriteString("\n\nPlease retry the request. Technical loop details remain available in Logs/Brain without being dumped into the chat.")
+		return sb.String()
+	}
 	detail := strings.TrimSpace(run.StopDetail)
 	if detail == "" {
 		for i := len(run.Events) - 1; i >= 0; i-- {
@@ -3796,8 +4176,17 @@ func recoveryReportPrompt(run TaskRun) string {
 	}
 	sb.WriteString("\nWrite a concise recovery report with these headings only:\n")
 	sb.WriteString("What failed\nEvidence gathered\nLikely cause\nSafest next action\n")
-	sb.WriteString("\nDo not say you will run a command. Do not ask for another tool call. If the next step needs user approval/input, state the exact input needed.")
+	sb.WriteString("\nUse plain language. Do not expose internal stability scores, repeated-outcome counters, raw tool arguments, or long tool output. Do not say you will run a command. Do not ask for another tool call. If the next step needs user approval/input, state the exact input needed.")
 	return strings.TrimSpace(sb.String())
+}
+
+func runHasSuccessfulWebResearch(run TaskRun) bool {
+	for _, tool := range run.Tools {
+		if isWebTool(tool.Name) && strings.EqualFold(strings.TrimSpace(tool.Status), "done") && strings.TrimSpace(tool.Result) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 type compactionResult struct {
@@ -4301,7 +4690,13 @@ func (a *App) setRunState(run *TaskRun, state, detail string) {
 	}
 	prev := run.State
 	run.setState(state, detail)
-	if run.State == prev || a.ctx == nil {
+	if a.ctx == nil {
+		return
+	}
+	// Repeated phases can still carry a new current action (for example several
+	// shell or read calls in a row). Keep the descriptive state timeline compact,
+	// but refresh live UI/Telegram status with the latest useful detail.
+	if run.State == prev && strings.TrimSpace(detail) == "" {
 		return
 	}
 	a.emit("mauler:run_state", map[string]string{
@@ -5544,7 +5939,8 @@ func isBlockingStopReason(reason string) bool {
 		"tool_disabled",
 		"repeated_tool_failure",
 		"repeated_empty_tool_output",
-		"repeated_same_tool_result":
+		"repeated_same_tool_result",
+		"loop_circuit_breaker":
 		return true
 	default:
 		return false
@@ -5553,17 +5949,32 @@ func isBlockingStopReason(reason string) bool {
 
 func requiresLivingDocUpdate(prompt string) bool {
 	lower := strings.ToLower(prompt)
+	if promptLooksReadOnly(prompt) {
+		return false
+	}
 	for _, marker := range []string{
 		"update the doc",
 		"update doc",
+		"update the docs",
+		"update docs",
 		"update documentation",
-		"document",
-		"writeup",
-		"write up",
-		"readme",
-		"notes",
-		"report",
-		".md",
+		"write the documentation",
+		"write documentation",
+		"write the docs",
+		"create the docs",
+		"document the changes",
+		"document this change",
+		"complete the writeup",
+		"create a writeup",
+		"update the writeup",
+		"write the readme",
+		"create a readme",
+		"update the readme",
+		"update readme",
+		"write the notes",
+		"update the notes",
+		"create a report file",
+		"write the report file",
 	} {
 		if strings.Contains(lower, marker) {
 			return true
@@ -5826,6 +6237,8 @@ func ledgerKindForTool(name string) string {
 		return "planner_event"
 	case name == "task" || strings.HasPrefix(name, "subagent_"):
 		return "subagent_result"
+	case name == "engagement":
+		return "engagement_action"
 	default:
 		return ""
 	}
@@ -5842,6 +6255,8 @@ func stateForTool(name string) string {
 	case name == "shell":
 		return "testing"
 	case name == "todo_write" || strings.HasPrefix(name, "todo_"):
+		return "planning"
+	case name == "engagement":
 		return "planning"
 	default:
 		return "using_tools"
@@ -5948,11 +6363,19 @@ type AgentMode struct {
 func classifyAgentMode(text string) AgentMode {
 	lower := strings.ToLower(text)
 	switch {
+	case looksBugBountyAssessmentTask(lower):
+		return baseMode("Bug Bounty Hunter")
 	case looksShellCentricTask(lower):
 		return AgentMode{
 			Name:         "Auto",
 			Description:  "General agent with terminal-first execution.",
 			Instructions: "Use the terminal and tools directly when the task needs them. Prefer live evidence over stale notes, keep artifacts/current facts updated, and continue autonomously unless blocked by missing external state.",
+		}
+	case hasAny(lower, "fix", "repair", "restore", "broken", "doesn't work", "does not work", "failing", "error", "crash"):
+		return AgentMode{
+			Name:         "Fixer",
+			Description:  "Diagnose failures and patch them.",
+			Instructions: "Reproduce or inspect the failure first, identify the smallest likely cause, patch narrowly, and run focused verification.",
 		}
 	case hasAny(lower, "review", "audit", "risks", "regression", "security", "code quality"):
 		return AgentMode{
@@ -5966,13 +6389,13 @@ func classifyAgentMode(text string) AgentMode {
 			Description:  "Search, fetch, compare sources, and synthesize.",
 			Instructions: "Use web_search and fetch_url when current or external information matters. Cite source URLs in tool-backed summaries and avoid unnecessary file writes.",
 		}
-	case hasAny(lower, "bug", "fix", "error", "failing", "broken", "doesn't work", "does not work", "issue", "crash"):
+	case hasAny(lower, "bug", "issue"):
 		return AgentMode{
 			Name:         "Fixer",
 			Description:  "Diagnose failures and patch them.",
 			Instructions: "Reproduce or inspect the failure first, identify the smallest likely cause, patch narrowly, and run focused verification.",
 		}
-	case hasAny(lower, "build", "add", "implement", "create", "make", "wire", "continue", "carry on", "write", "edit", "patch", "change", "update"):
+	case hasAny(lower, "build", "add", "implement", "create", "make", "wire", "continue", "carry on", "write", "edit", "patch", "change", "update", "modify"):
 		return AgentMode{
 			Name:         "Builder",
 			Description:  "Implement features and verify them.",
@@ -5993,6 +6416,20 @@ func classifyAgentMode(text string) AgentMode {
 	}
 }
 
+func looksBugBountyAssessmentTask(text string) bool {
+	if hasAny(text,
+		"bug bounty", "bug-bounty", "post-recon", "post recon",
+		"web application pentest", "web app pentest", "web application penetration test",
+		"burp request", "burp response", "burp suite",
+	) {
+		return hasAny(text,
+			"review", "analyse", "analyze", "triage", "plan", "manual", "endpoint",
+			"javascript", "http", "header", "api", "target", "pentest", "bug bounty",
+		)
+	}
+	return false
+}
+
 func manualAgentMode() AgentMode {
 	return AgentMode{
 		Name:         "Manual",
@@ -6005,7 +6442,7 @@ func shouldUseCodingParams(text string, mode AgentMode) bool {
 	switch strings.ToLower(strings.TrimSpace(mode.Name)) {
 	case "builder", "fixer", "reviewer":
 		return true
-	case "ops":
+	case "ops", "bug bounty hunter":
 		return false
 	}
 	lower := strings.ToLower(text)
@@ -6027,6 +6464,33 @@ func hasAny(text string, needles ...string) bool {
 	return false
 }
 
+func hasWholeWord(text, word string) bool {
+	text = strings.ToLower(text)
+	word = strings.ToLower(strings.TrimSpace(word))
+	if word == "" {
+		return false
+	}
+	for offset := 0; offset < len(text); {
+		index := strings.Index(text[offset:], word)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		leftOK := index == 0 || !isASCIIWordByte(text[index-1])
+		right := index + len(word)
+		rightOK := right == len(text) || !isASCIIWordByte(text[right])
+		if leftOK && rightOK {
+			return true
+		}
+		offset = index + 1
+	}
+	return false
+}
+
+func isASCIIWordByte(value byte) bool {
+	return value == '_' || value >= '0' && value <= '9' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
+}
+
 func activeProfile(cfg *settings.Settings, pf *settings.ProfilesFile) settings.Profile {
 	if p, ok := pf.Profiles[cfg.ActiveProfile]; ok {
 		return applyProvider(p, pf)
@@ -6038,17 +6502,45 @@ func activeProfile(cfg *settings.Settings, pf *settings.ProfilesFile) settings.P
 }
 
 func ensureActiveProfile(cfg *settings.Settings, pf *settings.ProfilesFile) {
-	if profile, ok := pf.Profiles[cfg.ActiveProfile]; ok && strings.TrimSpace(profile.ModelID) != "" {
+	if profile, ok := pf.Profiles[cfg.ActiveProfile]; ok && strings.TrimSpace(profile.ModelID) != "" && !isOneTaskCloudProfile(profile, pf) {
 		return
 	}
-	for name, profile := range pf.Profiles {
+	names := make([]string, 0, len(pf.Profiles))
+	for name := range pf.Profiles {
+		names = append(names, name)
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		iPreferred := names[i] == "qwen3.6-nothink"
+		jPreferred := names[j] == "qwen3.6-nothink"
+		if iPreferred != jPreferred {
+			return iPreferred
+		}
+		return names[i] < names[j]
+	})
+	for _, name := range names {
+		profile := pf.Profiles[name]
 		if strings.TrimSpace(profile.ModelID) == "" {
+			continue
+		}
+		if isOneTaskCloudProfile(profile, pf) {
 			continue
 		}
 		cfg.ActiveProfile = name
 		_ = settings.Save(cfg)
 		return
 	}
+}
+
+func isOneTaskCloudProfile(profile settings.Profile, pf *settings.ProfilesFile) bool {
+	providerName := strings.ToLower(strings.TrimSpace(profile.Provider))
+	if providerName == "openrouter" {
+		return true
+	}
+	provider, ok := pf.Providers[profile.Provider]
+	if !ok {
+		return strings.Contains(strings.ToLower(profile.BaseURL), "openrouter.ai") || strings.EqualFold(profile.APIKeyEnv, "OPENROUTER_API_KEY")
+	}
+	return strings.Contains(strings.ToLower(provider.BaseURL), "openrouter.ai") || strings.EqualFold(provider.APIKeyEnv, "OPENROUTER_API_KEY")
 }
 
 func applyProvider(profile settings.Profile, pf *settings.ProfilesFile) settings.Profile {
@@ -6401,6 +6893,7 @@ func buildChatRequest(profile settings.Profile, msgs []llm.Message, toolDefs []l
 		TopK:             params.TopK,
 		MinP:             params.MinP,
 		PresencePenalty:  params.PresencePenalty,
+		RepeatPenalty:    params.RepeatPenalty,
 		Seed:             params.Seed,
 		EnableThinking:   enableThinking,
 		PreserveThinking: preserveThinking,
@@ -6453,6 +6946,22 @@ func configureWorkingDir(cfg *settings.Settings) {
 	if root := discoverWorkspaceRoot(); root != "" {
 		_ = os.Chdir(root)
 	}
+}
+
+// existingShellWorkingDir prevents a deleted or moved saved workspace from
+// being passed to wsl.exe --cd. WSL otherwise emits CreateProcessCommon chdir
+// failed and drops the interactive terminal at /.
+func existingShellWorkingDir(preferred, fallback string) string {
+	for _, candidate := range []string{preferred, fallback} {
+		candidate = tools.NormalizeHostPath(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return tools.NormalizeHostPath(strings.TrimSpace(fallback))
 }
 
 func discoverWorkspaceRoot() string {
@@ -6648,10 +7157,8 @@ func (a *App) OpenShell() (string, error) {
 	backend := a.cfg.Tools.ShellBackend
 	distro := strings.TrimSpace(a.cfg.Tools.ShellDistro)
 	user := strings.TrimSpace(a.cfg.Tools.ShellUser)
-	cwd, _ := os.Getwd()
-	if dir := a.cfg.Context.WorkspaceDir; dir != "" {
-		cwd = dir
-	}
+	processCWD, _ := os.Getwd()
+	cwd := existingShellWorkingDir(a.cfg.Context.WorkspaceDir, processCWD)
 	a.mu.Unlock()
 
 	var shellCmd string
@@ -8706,13 +9213,121 @@ func toSessionChatMessages(msgs []llm.Message) []SessionChatMessage {
 		if role == llm.RoleTool {
 			role = "tool_result"
 		}
+		content, attachments := sessionMessageDisplay(msg)
 		out = append(out, SessionChatMessage{
-			Role:    role,
-			Content: messageText(msg),
-			Images:  messageImages(msg),
+			Role:        role,
+			Content:     content,
+			Images:      messageImages(msg),
+			Attachments: attachments,
 		})
 	}
 	return out
+}
+
+func toLLMMessageAttachments(attachments []ChatAttachment) []llm.MessageAttachment {
+	if len(attachments) == 0 {
+		return nil
+	}
+	out := make([]llm.MessageAttachment, 0, len(attachments))
+	for _, att := range attachments {
+		out = append(out, llm.MessageAttachment{
+			ID: att.ID, Name: att.Name, Kind: att.Kind, MIME: att.MIME,
+			Content: att.Content, Path: att.Path, Size: att.Size, Truncated: att.Truncated,
+		})
+	}
+	return out
+}
+
+func fromLLMMessageAttachments(attachments []llm.MessageAttachment) []ChatAttachment {
+	if len(attachments) == 0 {
+		return nil
+	}
+	out := make([]ChatAttachment, 0, len(attachments))
+	for _, att := range attachments {
+		out = append(out, ChatAttachment{
+			ID: att.ID, Name: att.Name, Kind: att.Kind, MIME: att.MIME,
+			Content: att.Content, Path: att.Path, Size: att.Size, Truncated: att.Truncated,
+		})
+	}
+	return out
+}
+
+var legacyAttachmentHeaderRE = regexp.MustCompile(`(?m)^--- Attachment \d+: (.+?) \(([^()]*)\) ---\r?$`)
+
+func sessionMessageDisplay(msg llm.Message) (string, []ChatAttachment) {
+	attachments := fromLLMMessageAttachments(msg.Attachments)
+	if msg.DisplayContent != "" || len(attachments) > 0 {
+		return msg.DisplayContent, attachments
+	}
+	content := messageText(msg)
+	if msg.Role != llm.RoleUser {
+		return content, nil
+	}
+	return parseLegacyChatAttachments(content)
+}
+
+// parseLegacyChatAttachments restores attachment cards for sessions saved
+// before Message.Attachments existed. The old model-facing format is stable and
+// delimited, so it can be decoded without changing what the model saw.
+func parseLegacyChatAttachments(content string) (string, []ChatAttachment) {
+	const marker = "\n\nAttached context from the user:\n"
+	const bareMarker = "Attached context from the user:\n"
+	markerAt := strings.Index(content, marker)
+	bodyAt := markerAt + len(marker)
+	if markerAt < 0 && strings.HasPrefix(content, bareMarker) {
+		markerAt = 0
+		bodyAt = len(bareMarker)
+	}
+	if markerAt < 0 {
+		return content, nil
+	}
+	body := content[bodyAt:]
+	matches := legacyAttachmentHeaderRE.FindAllStringSubmatchIndex(body, -1)
+	if len(matches) == 0 {
+		return content, nil
+	}
+	attachments := make([]ChatAttachment, 0, len(matches))
+	for i, match := range matches {
+		sectionStart := match[1]
+		sectionEnd := len(body)
+		if i+1 < len(matches) {
+			sectionEnd = matches[i+1][0]
+		}
+		section := strings.TrimLeft(body[sectionStart:sectionEnd], "\r\n")
+		att := ChatAttachment{
+			Name: strings.TrimSpace(body[match[2]:match[3]]),
+			Kind: strings.TrimSpace(body[match[4]:match[5]]),
+		}
+		lines := strings.Split(strings.ReplaceAll(section, "\r\n", "\n"), "\n")
+		contentAt := 0
+		for contentAt < len(lines) {
+			line := lines[contentAt]
+			switch {
+			case strings.HasPrefix(line, "Path: "):
+				att.Path = strings.TrimSpace(strings.TrimPrefix(line, "Path: "))
+			case strings.HasPrefix(line, "Source: "):
+				// Source is explanatory metadata, not attachment content.
+			case strings.HasPrefix(line, "MIME: "):
+				att.MIME = strings.TrimSpace(strings.TrimPrefix(line, "MIME: "))
+			case strings.HasPrefix(line, "Size: "):
+				sizeText := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "Size: "), " bytes"))
+				att.Size, _ = strconv.ParseInt(sizeText, 10, 64)
+			default:
+				goto metadataDone
+			}
+			contentAt++
+		}
+	metadataDone:
+		payload := strings.TrimRight(strings.Join(lines[contentAt:], "\n"), "\n")
+		const truncatedMarker = "[attachment truncated by composer]"
+		if strings.HasSuffix(payload, truncatedMarker) {
+			att.Truncated = true
+			payload = strings.TrimRight(strings.TrimSuffix(payload, truncatedMarker), "\n")
+		}
+		att.Content = payload
+		attachments = append(attachments, att)
+	}
+	return content[:markerAt], attachments
 }
 
 func messageText(msg llm.Message) string {
@@ -8793,6 +9408,15 @@ func toSessionStoreMessages(msgs []llm.Message) []sessionstore.Message {
 }
 
 func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryEntry, skills []Skill) string {
+	return buildSystemPromptForTask(cfg, mode, memories, skills, "")
+}
+
+func buildSystemPromptForTask(cfg settings.Settings, mode AgentMode, memories []MemoryEntry, skills []Skill, taskText string) string {
+	projectPacket := buildProjectInstructionPacket(cfg.Context, taskText)
+	return buildSystemPromptForTaskWithProjectInstructions(cfg, mode, memories, skills, taskText, projectPacket.Prompt)
+}
+
+func buildSystemPromptForTaskWithProjectInstructions(cfg settings.Settings, mode AgentMode, memories []MemoryEntry, skills []Skill, taskText, projectInstructions string) string {
 	var sb strings.Builder
 	sb.WriteString("You are TheMauler, an expert AI coding assistant. ")
 	// Core behaviour rules — stated before tool guidance so they have highest priority.
@@ -8837,29 +9461,8 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 		sb.WriteString("The plan should be visible through the todo tools, not only prose in chat. ")
 	}
 	sb.WriteString("Work deliberately, verify important claims with evidence, and prefer targeted edits over rewrites.")
-	if len(skills) > 0 {
-		sb.WriteString("\n\nRelevant procedural skills:\n")
-		for _, s := range skills {
-			sb.WriteString("\n### Skill: " + s.Name + "\n")
-			if s.Description != "" {
-				sb.WriteString("**When to use:** " + s.Description + "\n")
-			}
-			if strings.TrimSpace(s.SourcePath) != "" {
-				sb.WriteString("External source: " + s.SourcePath + "\n")
-				sb.WriteString("Load lazily with skill mode=view. Pass a focused query when only a section is needed.\n")
-			} else if s.Body != "" {
-				body := strings.TrimSpace(s.Body)
-				const maxInlineSkillChars = 6000
-				if len(body) > maxInlineSkillChars {
-					body = body[:maxInlineSkillChars] + "\n\n[Skill truncated in prompt. Use skill mode=view for the full instructions.]"
-				}
-				sb.WriteString(body + "\n")
-			}
-		}
-	}
-	if len(memories) > 0 {
-		writeMemoryPromptPackets(&sb, memories)
-	}
+	sb.WriteString(buildRelevantSkillsPrompt(skills))
+	sb.WriteString(buildSelectedMemoryPrompt(memories))
 	if facts := buildRunFactsPromptFromLedger(); facts != "" {
 		sb.WriteString(facts)
 	}
@@ -8872,12 +9475,52 @@ func buildSystemPrompt(cfg settings.Settings, mode AgentMode, memories []MemoryE
 	if cfg.Memory.Enabled {
 		sb.WriteString("\n\nYou have a memory tool for this workspace. Call memory with action=recall (a short query) before repeating work to check what is already known, and action=remember to save a reusable lesson, working command, user preference, or confirmed target detail. Only the highest-scoring entries are auto-injected above, so recall when you need more; keep remembered entries short and factual and never store secrets. ")
 	}
-	sb.WriteString(buildProjectInstructionsPrompt(cfg.Context))
-	if userProfile := loadUserProfile(); userProfile != "" {
-		sb.WriteString("\n\nUser profile:\n")
-		sb.WriteString(userProfile)
+	sb.WriteString(projectInstructions)
+	sb.WriteString(buildUserProfilePrompt())
+	return sb.String()
+}
+
+func buildRelevantSkillsPrompt(skills []Skill) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\nRelevant procedural skills:\n")
+	for _, s := range skills {
+		sb.WriteString("\n### Skill: " + s.Name + "\n")
+		if s.Description != "" {
+			sb.WriteString("**When to use:** " + s.Description + "\n")
+		}
+		if strings.TrimSpace(s.SourcePath) != "" {
+			sb.WriteString("External source: " + s.SourcePath + "\n")
+			sb.WriteString("Load lazily with skill mode=view. Pass a focused query when only a section is needed.\n")
+		} else if s.Body != "" {
+			body := strings.TrimSpace(s.Body)
+			const maxInlineSkillChars = 6000
+			if len(body) > maxInlineSkillChars {
+				body = body[:maxInlineSkillChars] + "\n\n[Skill truncated in prompt. Use skill mode=view for the full instructions.]"
+			}
+			sb.WriteString(body + "\n")
+		}
 	}
 	return sb.String()
+}
+
+func buildSelectedMemoryPrompt(memories []MemoryEntry) string {
+	if len(memories) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	writeMemoryPromptPackets(&sb, memories)
+	return sb.String()
+}
+
+func buildUserProfilePrompt() string {
+	userProfile := loadUserProfile()
+	if userProfile == "" {
+		return ""
+	}
+	return "\n\nUser profile:\n" + userProfile
 }
 
 func buildProgressArtifactPrompt() string {
@@ -11179,12 +11822,12 @@ func needsOperationalTool(text string) bool {
 }
 
 func isOperationalTargetTask(lower string) bool {
-	return hasAny(lower,
+	return hasWholeWord(lower, "ping") || hasAny(lower,
 		"htb", "hackthebox", "ctf", "kali", "wsl", "pentest", "penetration test",
 		"target ip", "target url", ".htb", "foothold", "privesc", "privilege escalation",
 		"user flag", "root flag", "nmap", "ffuf", "gobuster", "burp", "freepbx",
 		"/etc/hosts", "hosts file", "host header", "resolve", "resolves", "dns",
-		"ping", "http reachability", "webshell", "web shell", "current box ip", "box ip",
+		"http reachability", "webshell", "web shell", "current box ip", "box ip",
 	)
 }
 
@@ -11302,12 +11945,18 @@ func looksConversational(text string) bool {
 // "required" latch after repeated narration-only recovery turns, where the
 // model has already said it needs to act but keeps ending without a tool call.
 func toolChoiceFor(firstUserText string, autoContinues int, totalToolCallsMade int) string {
+	if explicitlyForbidsToolUse(firstUserText) {
+		return "none"
+	}
 	// Mid-task turns: always let the model decide freely.
 	if autoContinues > 0 || totalToolCallsMade > 0 {
 		return "auto"
 	}
 	if looksConversational(firstUserText) {
 		return "none"
+	}
+	if looksPublicExploitLookup(firstUserText) {
+		return "required"
 	}
 	// First turn of a task that clearly needs a tool before anything useful can be
 	// said — repository inspection or an operational/HTB target workflow — force a
@@ -11318,6 +11967,31 @@ func toolChoiceFor(firstUserText string, autoContinues int, totalToolCallsMade i
 		return "required"
 	}
 	return "auto"
+}
+
+const explicitNoToolMaxTokens = 1024
+
+func explicitlyForbidsToolUse(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return hasAny(lower,
+		"explanation-only", "explanation only",
+		"do not execute any tool", "do not execute tools",
+		"do not run any tool", "do not run tools",
+		"do not call any tool", "do not call tools",
+		"do not use any tool", "do not use tools",
+		"without using tools", "answer without tools", "no tool calls",
+	)
+}
+
+func applyExplicitNoToolResponseBudget(req *llm.Request, firstUserText string) bool {
+	if req == nil || !explicitlyForbidsToolUse(firstUserText) {
+		return false
+	}
+	if req.MaxTokens <= 0 || req.MaxTokens > explicitNoToolMaxTokens {
+		req.MaxTokens = explicitNoToolMaxTokens
+		return true
+	}
+	return false
 }
 
 func toolDefsAndChoiceForTurn(registry *tools.Registry, cfg settings.ToolsConfig, firstUserText string, autoContinues int, totalToolCallsMade int) ([]llm.ToolDef, string) {
@@ -11395,11 +12069,11 @@ func cloneToolEnabledMap(in map[string]bool) map[string]bool {
 
 func looksShellCentricTask(text string) bool {
 	lower := strings.ToLower(text)
-	if hasAny(lower,
+	if hasWholeWord(lower, "ping") || hasAny(lower,
 		"htb", "hackthebox", "hack the box",
 		"hack the target", "hacking the target", "target and get user", "get user and root",
 		"pentest", "penetration test", "lab target", "target ip", "target url",
-		"current box ip", "box ip", "/etc/hosts", "hosts file", "resolve", "resolves", "dns", "ping",
+		"current box ip", "box ip", "/etc/hosts", "hosts file", "resolve", "resolves", "dns",
 		"http reachability", "webshell", "web shell",
 		"wsl", "kali", "vpn", "tun0", "sudo", "nmap", "gobuster", "ffuf", "feroxbuster", "dirsearch", "nikto", "searchsploit",
 		"user.txt", "root.txt", "user flag", "root flag", "get user", "get root", "foothold", "privilege escalation", "privesc", "recon", "enumerate", "enumeration",
@@ -11431,7 +12105,8 @@ func looksCodebaseTask(lower string) bool {
 
 func explicitWebResearchIntent(text string) bool {
 	lower := strings.ToLower(text)
-	return strings.Contains(lower, "research online") ||
+	return looksPublicExploitLookup(lower) ||
+		strings.Contains(lower, "research online") ||
 		strings.Contains(lower, "research current") ||
 		strings.Contains(lower, "current cve") ||
 		strings.Contains(lower, "latest cve") ||
@@ -11441,6 +12116,25 @@ func explicitWebResearchIntent(text string) bool {
 		strings.Contains(lower, "search the web") ||
 		strings.Contains(lower, "find writeup") ||
 		strings.Contains(lower, "find documentation")
+}
+
+// looksPublicExploitLookup separates requests to find current public CVE/PoC
+// evidence from requests to operate against a live target. Without this signal,
+// words such as "exploit" routed a simple lookup into the shell-heavy Ops path
+// and hid web_search/fetch_url.
+func looksPublicExploitLookup(text string) bool {
+	lower := strings.ToLower(text)
+	subject := hasAny(lower,
+		"cve-", "proof of concept", "poc", "public exploit", "exploit-db",
+		"packet storm", "security advisory", "vendor advisory", "github exploit",
+	)
+	if !subject {
+		return false
+	}
+	return hasAny(lower,
+		"find", "search", "research", "look up", "lookup", "locate", "available",
+		"latest", "current", "in the wild", "exploited in the wild", "poc", "proof of concept",
+	)
 }
 
 func agentToolBudgetExhausted(cfg settings.AgentsConfig, used int) bool {

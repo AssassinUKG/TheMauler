@@ -26,13 +26,30 @@ type ImageURL struct {
 	Detail string `json:"detail"` // "auto" | "low" | "high"
 }
 
+// MessageAttachment preserves user-facing attachment metadata in conversation
+// history and saved sessions. Inference backends intentionally ignore this
+// field; attachment content is already composed into Message.Content before a
+// request is sent to the model.
+type MessageAttachment struct {
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	MIME      string `json:"mime,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
 // Message is a single conversation turn.
 type Message struct {
-	Role       string        `json:"role"`
-	Content    interface{}   `json:"content"` // string or []ContentBlock
-	ToolCallID string        `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCallDef `json:"tool_calls,omitempty"`
-	Name       string        `json:"name,omitempty"`
+	Role           string              `json:"role"`
+	Content        interface{}         `json:"content"` // string or []ContentBlock
+	DisplayContent string              `json:"display_content,omitempty"`
+	Attachments    []MessageAttachment `json:"attachments,omitempty"`
+	ToolCallID     string              `json:"tool_call_id,omitempty"`
+	ToolCalls      []ToolCallDef       `json:"tool_calls,omitempty"`
+	Name           string              `json:"name,omitempty"`
 }
 
 // NewTextMessage constructs a simple text-only message.
@@ -79,9 +96,30 @@ type Delta struct {
 
 // Usage holds token counts when the backend reports them.
 type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	PromptTokens              int
+	CompletionTokens          int
+	TotalTokens               int
+	CachedPromptTokens        int
+	PromptTokensPerSecond     float64
+	CompletionTokensPerSecond float64
+	PromptMilliseconds        float64
+	CompletionMilliseconds    float64
+}
+
+// ModelMetadata is the provider-owned catalogue information Mauler can use to
+// choose safe profile defaults. ContextLength is the hard provider/model
+// ceiling, not the amount Mauler should fill on every request.
+type ModelMetadata struct {
+	ID                  string   `json:"id"`
+	ContextLength       int      `json:"context_length,omitempty"`
+	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"`
+	SupportedParameters []string `json:"supported_parameters,omitempty"`
+}
+
+// ModelCatalogClient is implemented by backends whose model-list response
+// includes useful limits in addition to model IDs.
+type ModelCatalogClient interface {
+	ModelMetadata(ctx context.Context) ([]ModelMetadata, error)
 }
 
 // Request is the full input to Client.Chat.
@@ -95,6 +133,7 @@ type Request struct {
 	TopK            int
 	MinP            float64
 	PresencePenalty float64
+	RepeatPenalty   float64
 	Seed            int64
 	// ToolChoice controls whether the model may call tools this turn.
 	// ""         → omit from request (backend default, equivalent to "auto")

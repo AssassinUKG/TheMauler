@@ -16,6 +16,7 @@ import (
 type sseChunk struct {
 	Choices []sseChoice `json:"choices"`
 	Usage   *sseUsage   `json:"usage"`
+	Timings *sseTimings `json:"timings"`
 }
 
 type sseChoice struct {
@@ -47,6 +48,19 @@ type sseUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	PromptDetails    struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+type sseTimings struct {
+	CacheN             int     `json:"cache_n"`
+	PromptN            int     `json:"prompt_n"`
+	PromptMS           float64 `json:"prompt_ms"`
+	PromptPerSecond    float64 `json:"prompt_per_second"`
+	PredictedN         int     `json:"predicted_n"`
+	PredictedMS        float64 `json:"predicted_ms"`
+	PredictedPerSecond float64 `json:"predicted_per_second"`
 }
 
 // accumTC accumulates fragmented tool-call arguments across chunks.
@@ -63,6 +77,7 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 	scanner.Buffer(make([]byte, 64*1024), 32*1024*1024)
 
 	accum := make(map[int]*accumTC)
+	var truncated bool
 
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -77,14 +92,6 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
-			// Some backends (notably InferenceBridge's managed llama.cpp proxy)
-			// stream tool-call fragments and then terminate on [DONE] without ever
-			// emitting a finish_reason="tool_calls" chunk. Flush whatever we
-			// accumulated instead of dropping the tool call.
-			if len(accum) > 0 {
-				ch <- flushAccumulatedToolCalls(accum)
-				return
-			}
 			break
 		}
 
@@ -96,16 +103,13 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 			continue
 		}
 
-		// Usage-only chunk (some backends send this as the last event)
-		if chunk.Usage != nil && len(chunk.Choices) == 0 {
-			ch <- Delta{Usage: &Usage{
-				PromptTokens:     chunk.Usage.PromptTokens,
-				CompletionTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:      chunk.Usage.TotalTokens,
-			}}
-			continue
+		// Current llama.cpp sends finish_reason first, followed by a
+		// choices:[] usage/timings chunk, then [DONE]. Do not terminate on the
+		// finish_reason or the authoritative token counts and backend throughput
+		// telemetry are lost.
+		if chunk.Usage != nil || chunk.Timings != nil {
+			ch <- Delta{Usage: usageFromSSEChunk(chunk)}
 		}
-
 		if len(chunk.Choices) == 0 {
 			continue
 		}
@@ -141,17 +145,8 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 			a.args.WriteString(normalizeSSEToolArguments(tc.Function.Arguments))
 		}
 
-		switch choice.FinishReason {
-		case "stop", "eos":
-			ch <- Delta{Done: true}
-			return
-		case "length":
-			ch <- Delta{Done: true, Truncated: true}
-			return
-
-		case "tool_calls":
-			ch <- flushAccumulatedToolCalls(accum)
-			return
+		if choice.FinishReason == "length" {
+			truncated = true
 		}
 	}
 
@@ -160,14 +155,47 @@ func ParseSSE(ctx context.Context, r io.Reader, ch chan<- Delta) {
 		return
 	}
 
-	// Scanner reached EOF without a terminal finish_reason. If tool-call
-	// fragments were accumulated, flush them rather than reporting an empty turn.
+	// Some backends stream tool-call fragments and terminate on [DONE] or EOF
+	// without a finish_reason="tool_calls" chunk. Flush whatever accumulated.
 	if len(accum) > 0 {
-		ch <- flushAccumulatedToolCalls(accum)
+		delta := flushAccumulatedToolCalls(accum)
+		delta.Truncated = delta.Truncated || truncated
+		ch <- delta
 		return
 	}
 
-	ch <- Delta{Done: true}
+	// EOF remains a valid terminal signal for older compatible servers that do
+	// not emit [DONE].
+	ch <- Delta{Done: true, Truncated: truncated}
+}
+
+func usageFromSSEChunk(chunk sseChunk) *Usage {
+	usage := &Usage{}
+	if chunk.Usage != nil {
+		usage.PromptTokens = chunk.Usage.PromptTokens
+		usage.CompletionTokens = chunk.Usage.CompletionTokens
+		usage.TotalTokens = chunk.Usage.TotalTokens
+		usage.CachedPromptTokens = chunk.Usage.PromptDetails.CachedTokens
+	}
+	if chunk.Timings != nil {
+		if usage.PromptTokens == 0 {
+			usage.PromptTokens = chunk.Timings.CacheN + chunk.Timings.PromptN
+		}
+		if usage.CompletionTokens == 0 {
+			usage.CompletionTokens = chunk.Timings.PredictedN
+		}
+		if usage.CachedPromptTokens == 0 {
+			usage.CachedPromptTokens = chunk.Timings.CacheN
+		}
+		usage.PromptTokensPerSecond = chunk.Timings.PromptPerSecond
+		usage.CompletionTokensPerSecond = chunk.Timings.PredictedPerSecond
+		usage.PromptMilliseconds = chunk.Timings.PromptMS
+		usage.CompletionMilliseconds = chunk.Timings.PredictedMS
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	return usage
 }
 
 // flushAccumulatedToolCalls converts the accumulated per-index tool-call

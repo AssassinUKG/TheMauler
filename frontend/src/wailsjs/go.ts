@@ -68,6 +68,7 @@ export interface Settings {
     project_doc_fallback_filenames: string[]
     workspace_dir: string
     open_folders: WorkspaceFolder[]
+    workspace_preferences: WorkspacePreference[]
     lab: LabContext
     active_lab_profile: string
     lab_profiles: LabProfile[]
@@ -241,6 +242,95 @@ export interface WorkspaceFolder {
   role: string
 }
 
+export interface WorkspacePreference {
+  path: string
+  agent_mode: string
+}
+
+export interface ContextInspectionRange {
+  start_line: number
+  end_line: number
+}
+
+export interface ContextInspectionSource {
+  path: string
+  display_path: string
+  sha256: string
+  reason: string
+  trust: string
+  source_bytes: number
+  prompt_bytes: number
+  estimated_tokens: number
+  partial: boolean
+  excerpt_ranges: ContextInspectionRange[]
+}
+
+export interface ContextInspectionExclusion {
+  path: string
+  display_path: string
+  source_bytes: number
+  reason: string
+  large: boolean
+}
+
+export interface ContextInspectionBudget {
+  core_system_tokens: number
+  project_document_tokens: number
+  tool_schema_tokens: number
+  memory_progress_tokens: number
+  skill_tokens: number
+  user_profile_tokens: number
+  conversation_tokens: number
+  user_task_tokens: number
+  total_preflight_tokens: number
+  remaining_working_tokens: number
+  usage_percent: number
+}
+
+export interface ContextInspection {
+  generated_at: string
+  task_text: string
+  requested_class: string
+  effective_class: string
+  pinned_next_class?: string
+  policy: string
+  route_id?: string
+  profile_name: string
+  model_id: string
+  agent_mode: string
+  tool_choice: string
+  tool_count: number
+  tool_names: string[]
+  tool_schema_sha256?: string
+  packet_sha256?: string
+  context_window_tokens: number
+  working_context_tokens: number
+  output_reserve_tokens: number
+  model_max_output_tokens: number
+  packet_limit_tokens: number
+  packet_limit_bytes: number
+  manifest_status: string
+  manifest_path?: string
+  manifest_sha256?: string
+  fallback_reason?: string
+  budget: ContextInspectionBudget
+  sources: ContextInspectionSource[]
+  excluded_sources: ContextInspectionExclusion[]
+  warnings: string[]
+  synopsis: string
+}
+
+export interface AgentDefinition {
+  id: string
+  name: string
+  description: string
+  version: string
+  default_toolset: string
+  default_autonomy: string
+  planning_only: boolean
+  builtin: boolean
+}
+
 export interface LabContext {
   id: string
   name: string
@@ -323,6 +413,7 @@ export interface GenerationParams {
   top_k: number
   min_p: number
   presence_penalty: number
+  repeat_penalty: number
   max_tokens: number
   seed: number
 }
@@ -348,6 +439,33 @@ export interface Provider {
   backend: string
   base_url: string
   api_key_env: string
+}
+
+export interface ProviderAPIKeyStatus {
+  provider: string
+  environment_configured: boolean
+  stored_configured: boolean
+  effective_configured: boolean
+}
+
+export interface ModelMetadata {
+  id: string
+  context_length?: number
+  max_completion_tokens?: number
+  supported_parameters?: string[]
+}
+
+export interface ModelProfileTemplateResult {
+  matched: boolean
+  template_id?: string
+  family?: string
+  adapter?: string
+  tool_protocol?: string
+  chat_template?: string
+  requires_jinja?: boolean
+  huggingface_repo?: string
+  profile: Profile
+  notes: string[]
 }
 
 export interface ProfilesFile {
@@ -376,6 +494,7 @@ export interface SessionChatMessage {
   role: ChatRole
   content: string
   images?: string[]
+  attachments?: ChatAttachment[]
 }
 
 export interface ChatAttachment {
@@ -464,12 +583,64 @@ export interface TaskRunEvent {
   detail?: string
 }
 
+export interface TaskContractCheck {
+  id: string
+  description: string
+  verifier: string
+  blocking: boolean
+  evidence_kinds?: string[]
+}
+
+export interface TaskContract {
+  version: number
+  revision: number
+  parent_digest?: string
+  run_id: string
+  objective: string
+  workspace_root: string
+  deliverables?: Array<{ id: string; description: string; kind?: string }>
+  constraints?: string[]
+  protected_resources?: string[]
+  allowed_mutations?: Array<{ root: string; access: string }>
+  acceptance_checks?: TaskContractCheck[]
+  required_evidence?: string[]
+  risk: 'low' | 'medium' | 'high'
+  instruction_revision: number
+  plan_required: boolean
+  budgets: { max_tool_calls?: number; max_run_seconds?: number }
+  approval_policy: string
+  completion_policy: string
+  created_at: string
+  digest: string
+}
+
+export interface RunControlState {
+  version: number
+  contract_digest: string
+  contract_revision: number
+  phase: 'intake' | 'planning' | 'acting' | 'observing' | 'verifying' | 'repairing' | 'awaiting_approval' | 'complete' | 'blocked' | 'cancelled' | 'failed'
+  resume_phase?: string
+  revision: number
+  plan_required: boolean
+  plan_accepted: boolean
+  blocking_check_ids?: string[]
+  satisfied_checks?: Record<string, string[]>
+  last_event?: string
+  last_detail?: string
+  updated_at: string
+}
+
 export interface TaskRun {
   id: string
   prompt: string
   mode: string
   profile: string
   model?: string
+  claimant_id?: string
+  claimant_alias?: string
+  origin?: string
+  contract?: TaskContract
+  control?: RunControlState
   status: string
   state?: string
   stop_reason?: string
@@ -540,6 +711,7 @@ export interface ChannelWorkItem {
 
 export interface AgentEvalResult {
   name: string
+  attempt?: number
   pass: boolean
   artifact_pass: boolean
   hygiene_pass: boolean
@@ -558,6 +730,10 @@ export interface AgentEvalResult {
   prompt_warnings: number
   stability_score: number
   false_done: boolean
+  policy_violations: number
+  human_interventions: number
+  recovery_events: number
+  recovered: boolean
   duration_ms: number
   fail_reason?: string
   runtime_pass?: boolean
@@ -572,6 +748,8 @@ export interface AgentEvalResult {
   verifier_version?: string
   stop_reason?: string
   tool_trace?: TaskToolEvent[]
+  response_excerpt?: string
+  event_trace?: TaskRunEvent[]
 }
 
 export interface AgentEvalReport {
@@ -581,6 +759,70 @@ export interface AgentEvalReport {
   profile: string
   id?: string
   created_at?: string
+  repeats: number
+  fixture_count: number
+  fixture_pass_count: number
+  pass_power: string
+  full_pass: boolean
+  unsupported_completion_rate: number
+  duplicate_action_rate: number
+  tool_error_rate: number
+  recovery_success_rate: number
+  average_tool_calls: number
+  average_duration_ms: number
+  policy_violations: number
+  human_interventions: number
+}
+
+export interface ContextQualityVariantResult {
+  prompt_index: number
+  pass: boolean
+  passed_repeats: number
+  repeats: number
+  stable: boolean
+  policy: string
+  effective_class: string
+  route_id?: string
+  agent_mode: string
+  project_tokens: number
+  tool_names: string[]
+  packet_sha256?: string
+  tool_schema_sha256?: string
+  failures?: string[]
+}
+
+export interface ContextQualityFixtureResult {
+  id: string
+  category: string
+  pass: boolean
+  pass_power: string
+  passed_repeats: number
+  repeats: number
+  variant_count: number
+  hostile_pass: boolean
+  policy_pass: boolean
+  tool_pass: boolean
+  source_pass: boolean
+  budget_pass: boolean
+  determinism_pass: boolean
+  variants: ContextQualityVariantResult[]
+  failures?: string[]
+}
+
+export interface ContextQualityReport {
+  id: string
+  created_at: string
+  profile: string
+  evaluation_envelope: string
+  repeats: number
+  pass_power: string
+  pass: boolean
+  pass_count: number
+  total: number
+  attempt_pass_count: number
+  attempt_total: number
+  hostile_pass: boolean
+  results: ContextQualityFixtureResult[]
 }
 
 export interface GrammarToolArgsProbeResult {
@@ -653,6 +895,285 @@ export interface LearningCandidate {
   created_at: string
 }
 
+export interface EngagementSummary {
+  id: string
+  name: string
+  workspace: string
+  workflow_id: string
+  workflow_version?: string
+  checklist_id: string
+  checklist_version?: string
+  current_phase: string
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export interface EngagementSetupWorkflow {
+  id: string
+  name: string
+  version: string
+  description: string
+  phase_count: number
+  checklist_name: string
+  checklist_version: string
+  check_count: number
+}
+
+export interface EngagementSetupArtifact {
+  path: string
+  name: string
+  kind: 'scan' | 'screenshot' | 'report' | 'note' | 'artifact'
+  size: number
+  modified_at: string
+}
+
+export interface EngagementSetupCheck {
+  id: string
+  label: string
+  status: 'ready' | 'info' | 'warning' | 'blocked' | 'unchecked'
+  detail: string
+  blocking: boolean
+}
+
+export interface EngagementSetupPreview {
+  project_name: string
+  project_id: string
+  workspace: string
+  target: string
+  hostname: string
+  scope: string[]
+  scope_locked: boolean
+  active_profile: string
+  model_id: string
+  provider: string
+  provider_url: string
+  shell: string
+  vpn: string
+  workflows: EngagementSetupWorkflow[]
+  candidate_artifacts: EngagementSetupArtifact[]
+  checks: EngagementSetupCheck[]
+  can_create: boolean
+  can_start: boolean
+}
+
+export interface EngagementTargetProbe {
+  target: string
+  status: 'ready' | 'warning' | 'blocked'
+  detail: string
+  attempted?: string[]
+  latency_ms?: number
+  http_status?: number
+  scope_match?: string
+  checked_at: string
+}
+
+export interface PackQualityIssue {
+  check_id?: string
+  field: string
+  message: string
+}
+
+export interface PackSummary {
+  key: string
+  id: string
+  version: string
+  name: string
+  description?: string
+  scope: 'builtin' | 'personal' | 'project'
+  trust: 'official' | 'curated' | 'community' | 'local'
+  license: string
+  path?: string
+  built_in: boolean
+  archived: boolean
+  active: boolean
+  valid: boolean
+  validation_error?: string
+  workflow_id: string
+  workflow_version: string
+  checklist_id: string
+  checklist_version: string
+  workflow_digest: string
+  checklist_digest: string
+  phase_count: number
+  check_count: number
+  global_checks: number
+  endpoint_checks: number
+  automated_checks: number
+  quality_score: number
+  quality_ready: boolean
+  quality_issues?: PackQualityIssue[]
+}
+
+export interface PackLibrarySnapshot {
+  packs: PackSummary[]
+  personal_root: string
+  project_root?: string
+  built_in_count: number
+  active_count: number
+  archived_count: number
+  invalid_count: number
+}
+
+export interface PackCloneInput {
+  source_key: string
+  scope: 'personal' | 'project'
+  id: string
+  name: string
+  version?: string
+}
+
+export interface EngagementWorkRef {
+  kind: 'step' | 'global_check' | 'endpoint_check'
+  phase_id?: string
+  endpoint_id?: string
+  id: string
+}
+
+export interface EngagementClaim {
+  claimant: { id: string; alias?: string }
+  claimed_at: string
+  heartbeat_at?: string
+  lease_until: string
+}
+
+export interface EngagementWorkState {
+  ref: EngagementWorkRef
+  title: string
+  status: string
+  observation?: string
+  runs: number | 'indefinite'
+  runs_completed: number
+  finished: boolean
+  claim?: EngagementClaim
+  revision: number
+  updated_at: string
+}
+
+export interface EngagementEndpoint {
+  id: string
+  method: string
+  url: string
+  name?: string
+  feature_group?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface EngagementEvidence {
+  id: string
+  work: EngagementWorkRef
+  finding_id?: string
+  source_kind: 'ledger_event' | 'artifact' | 'screenshot' | 'http_capture' | 'external_file'
+  ledger_event_id?: string
+  path?: string
+  sha256?: string
+  size?: number
+  agent_composed: boolean
+  description: string
+  run: number
+  created_by: { id: string; alias?: string }
+  created_at: string
+}
+
+export interface EngagementFinding {
+  id: string
+  work: EngagementWorkRef
+  title: string
+  severity: 'info' | 'low' | 'medium' | 'high' | 'critical'
+  state: 'draft' | 'confirmed' | 'rejected'
+  description?: string
+  impact?: string
+  recommendation?: string
+  confidence?: string
+  reproduction?: string
+  evidence_ids: string[]
+  operator_waiver?: string
+  created_by: { id: string; alias?: string }
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export interface EngagementEvidenceInput {
+  id?: string
+  engagement_id: string
+  work: EngagementWorkRef
+  claimant?: { id: string; alias?: string }
+  source_kind: EngagementEvidence['source_kind']
+  ledger_event_id?: string
+  path?: string
+  description: string
+  operator_trusted?: boolean
+}
+
+export interface EngagementFindingInput {
+  id?: string
+  engagement_id: string
+  work: EngagementWorkRef
+  claimant?: { id: string; alias?: string }
+  title: string
+  severity: EngagementFinding['severity']
+  description?: string
+  impact?: string
+  recommendation?: string
+  confidence?: string
+  reproduction?: string
+  evidence_ids?: string[]
+  expected_revision?: number
+}
+
+export interface EngagementState {
+  id: string
+  name: string
+  workflow_id: string
+  checklist_id: string
+  current_phase: string
+  scope: string[]
+  scope_locked: boolean
+  notes?: string
+  notes_revision: number
+  notes_updated_at?: string
+  steps: Record<string, EngagementWorkState>
+  global_checks: Record<string, EngagementWorkState>
+  global_check_order: string[]
+  endpoints: Record<string, EngagementEndpoint>
+  endpoint_order: string[]
+  endpoint_checks: Record<string, EngagementWorkState>
+  endpoint_check_order: string[]
+  evidence: Record<string, EngagementEvidence>
+  evidence_order: string[]
+  findings: Record<string, EngagementFinding>
+  finding_order: string[]
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export interface EngagementRecord {
+  workspace: string
+  workflow: { id: string; version?: string; name: string; checklist?: string; phases: unknown[]; digest?: string }
+  checklist: { id: string; version?: string; name: string; items: Array<{ id: string; title: string; scope: string; category?: string; category_name?: string; verified?: boolean }>; digest?: string }
+  state: EngagementState
+}
+
+export interface EngagementNextAction {
+  action: string
+  phase_id?: string
+  phase_name?: string
+  work?: EngagementWorkState
+  phase_complete: boolean
+  workflow_done: boolean
+}
+
+export interface EngagementAvailableWork {
+  phase_id: string
+  phase_name: string
+  parallel: boolean
+  items: EngagementWorkState[]
+  blocker?: string
+}
+
 export type ChatRole = 'user' | 'assistant' | 'tool_call' | 'tool_result' | 'system'
 
 // --- Bindings ---
@@ -692,6 +1213,18 @@ export const GetAutoAgents = (): Promise<boolean> =>
 
 export const SetAgentModeOverride = (mode: string): Promise<void> =>
   call('app.App.SetAgentModeOverride', mode)
+
+export const ListAgentDefinitions = (): Promise<AgentDefinition[]> =>
+  call('app.App.ListAgentDefinitions')
+
+export const PreviewContext = (taskText: string, requestedClass: string): Promise<ContextInspection> =>
+  call('app.App.PreviewContext', taskText, requestedClass)
+
+export const SetNextContextPacketClass = (requestedClass: string): Promise<string> =>
+  call('app.App.SetNextContextPacketClass', requestedClass)
+
+export const GetNextContextPacketClass = (): Promise<string> =>
+  call('app.App.GetNextContextPacketClass')
 
 // Auto-speculative (MTP) decoding plan for the active model.
 export interface SpecPlan {
@@ -799,6 +1332,72 @@ export const ListTodos = (): Promise<TodoItem[]> =>
 export const ClearTodos = (): Promise<void> =>
   call('app.App.ClearTodos')
 
+export const GetEngagementSetupPreview = (): Promise<EngagementSetupPreview> =>
+  call('app.App.GetEngagementSetupPreview')
+
+export const CheckEngagementTarget = (): Promise<EngagementTargetProbe> =>
+  call('app.App.CheckEngagementTarget')
+
+export const ListPackLibrary = (): Promise<PackLibrarySnapshot> =>
+  call('app.App.ListPackLibrary')
+
+export const ClonePack = (input: PackCloneInput): Promise<PackSummary> =>
+  call('app.App.ClonePack', input)
+
+export const ImportPackJSON = (scope: 'personal' | 'project', raw: string): Promise<PackSummary> =>
+  call('app.App.ImportPackJSON', scope, raw)
+
+export const ExportPackJSON = (key: string): Promise<string> =>
+  call('app.App.ExportPackJSON', key)
+
+export const SetPackArchived = (key: string, archived: boolean): Promise<PackSummary> =>
+  call('app.App.SetPackArchived', key, archived)
+
+export const ListEngagements = (): Promise<EngagementSummary[]> =>
+  call('app.App.ListEngagements')
+
+export const GetEngagement = (id: string): Promise<EngagementRecord> =>
+  call('app.App.GetEngagement', id)
+
+export const GetEngagementNext = (id: string): Promise<EngagementNextAction> =>
+  call('app.App.GetEngagementNext', id)
+
+export const GetEngagementAvailable = (id: string, limit = 8): Promise<EngagementAvailableWork> =>
+  call('app.App.GetEngagementAvailable', id, limit)
+
+export const CreateEngagement = (name: string, workflowID: string, scope: string[]): Promise<EngagementRecord> =>
+  call('app.App.CreateEngagement', name, workflowID, scope)
+
+export const ExportEngagementJSON = (id: string): Promise<string> =>
+  call('app.App.ExportEngagementJSON', id)
+
+export const ImportEngagementJSON = (raw: string): Promise<EngagementRecord> =>
+  call('app.App.ImportEngagementJSON', raw)
+
+export const AddEngagementEndpoint = (id: string, input: Pick<EngagementEndpoint, 'id' | 'method' | 'url' | 'name' | 'feature_group'>): Promise<EngagementEndpoint> =>
+  call('app.App.AddEngagementEndpoint', id, input)
+
+export const SetEngagementEndpointGroup = (id: string, endpointID: string, group: string): Promise<EngagementEndpoint> =>
+  call('app.App.SetEngagementEndpointGroup', id, endpointID, group)
+
+export const SetEngagementNotes = (id: string, notes: string, expectedNotesRevision: number): Promise<number> =>
+  call('app.App.SetEngagementNotes', id, notes, expectedNotesRevision)
+
+export const AddEngagementEvidence = (id: string, input: Omit<EngagementEvidenceInput, 'engagement_id' | 'claimant' | 'operator_trusted'>): Promise<EngagementEvidence> =>
+  call('app.App.AddEngagementEvidence', id, input)
+
+export const UpsertEngagementFinding = (id: string, input: Omit<EngagementFindingInput, 'engagement_id' | 'claimant'>): Promise<EngagementFinding> =>
+  call('app.App.UpsertEngagementFinding', id, input)
+
+export const ConfirmEngagementFinding = (id: string, findingID: string, expectedRevision: number, operatorWaiver: string): Promise<EngagementFinding> =>
+  call('app.App.ConfirmEngagementFinding', id, findingID, expectedRevision, operatorWaiver)
+
+export const ReleaseEngagementClaim = (id: string, claimantID: string): Promise<EngagementWorkState> =>
+  call('app.App.ReleaseEngagementClaim', id, claimantID)
+
+export const DeleteEngagement = (id: string): Promise<void> =>
+  call('app.App.DeleteEngagement', id)
+
 export const ListTaskRuns = (): Promise<TaskRun[]> =>
   call('app.App.ListTaskRuns')
 
@@ -846,6 +1445,9 @@ export const RecordLearningDecision = (candidate: LearningCandidate, decision: s
 
 export const SendMessage = (text: string, images: string[], attachments: ChatAttachment[] = []): Promise<void> =>
   call('app.App.SendMessage', text, images, attachments)
+
+export const SendMessageWithProfile = (text: string, images: string[], attachments: ChatAttachment[] = [], profileName: string): Promise<void> =>
+  call('app.App.SendMessageWithProfile', text, images, attachments, profileName)
 
 export const StopAgent = (): Promise<void> =>
   call('app.App.StopAgent')
@@ -987,6 +1589,18 @@ export const PingProvider = (provider: Provider): Promise<string> =>
 export const ListModelsForProvider = (provider: Provider): Promise<string[]> =>
   call('app.App.ListModelsForProvider', provider)
 
+export const ListModelMetadataForProvider = (provider: Provider): Promise<ModelMetadata[]> =>
+  call('app.App.ListModelMetadataForProvider', provider)
+
+export const GetProviderAPIKeyStatus = (provider: Provider): Promise<ProviderAPIKeyStatus> =>
+  call('app.App.GetProviderAPIKeyStatus', provider)
+
+export const SetProviderAPIKey = (providerName: string, apiKey: string): Promise<void> =>
+  call('app.App.SetProviderAPIKey', providerName, apiKey)
+
+export const ClearProviderAPIKey = (providerName: string): Promise<void> =>
+  call('app.App.ClearProviderAPIKey', providerName)
+
 export const ListWSLDistros = (): Promise<string[]> =>
   call('app.App.ListWSLDistros')
 
@@ -1034,6 +1648,17 @@ export interface ProfileBenchmarkResult {
   completion_tokens?: number
   ttf_ms?: number
   total_ms?: number
+  load_ms?: number
+  warmup?: BenchmarkCase
+  measured_text_runs?: number
+  text_ttf_ms?: number
+  text_tokens_per_second?: number
+  decode_tokens_per_second?: number
+  end_to_end_tokens_per_second?: number
+  prompt_tokens_per_second?: number
+  prompt_ms?: number
+  decode_ms?: number
+  timing_source?: string
   tokens_per_second?: number
 }
 
@@ -1043,8 +1668,15 @@ export interface BenchmarkCase {
   summary: string
   prompt_tokens?: number
   completion_tokens?: number
+  iteration?: number
   ttf_ms?: number
   total_ms?: number
+  prompt_ms?: number
+  decode_ms?: number
+  prompt_tokens_per_second?: number
+  decode_tokens_per_second?: number
+  end_to_end_tokens_per_second?: number
+  timing_source?: string
   tokens_per_second?: number
   structured_tools?: number
   repaired_tools?: number
@@ -1073,6 +1705,9 @@ export interface BenchmarkSpecInput {
 
 export const BenchmarkProfile = (profile: Profile, provider: Provider): Promise<ProfileBenchmarkResult> =>
   call('app.App.BenchmarkProfile', profile, provider)
+
+export const RecommendModelProfileTemplate = (profile: Profile): Promise<ModelProfileTemplateResult> =>
+  call('app.App.RecommendModelProfileTemplate', profile)
 
 export const BenchmarkProfileWithCases = (profile: Profile, provider: Provider, cases: BenchmarkSpecInput[]): Promise<ProfileBenchmarkResult> =>
   call('app.App.BenchmarkProfileWithCases', profile, provider, cases)
@@ -1110,6 +1745,15 @@ export const RunDoctor = (): Promise<DoctorResult> =>
 
 export const RunAgentEval = (profileName: string): Promise<AgentEvalReport> =>
   call('app.App.RunAgentEval', profileName)
+
+export const RunAgentEvalRepeated = (profileName: string, repeats: number): Promise<AgentEvalReport> =>
+  call('app.App.RunAgentEvalRepeated', profileName, repeats)
+
+export const RunContextQualityEval = (profileName: string, repeats: number): Promise<ContextQualityReport> =>
+  call('app.App.RunContextQualityEval', profileName, repeats)
+
+export const RunEngagementAgentEval = (): Promise<AgentEvalReport> =>
+  call('app.App.RunEngagementAgentEval')
 
 export const RunJHUTAgentEval = (profileName: string): Promise<AgentEvalReport> =>
   call('app.App.RunJHUTAgentEval', profileName)

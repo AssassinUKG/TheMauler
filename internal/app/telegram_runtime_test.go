@@ -91,12 +91,14 @@ func newTelegramRuntimeForTest(t *testing.T, cfg settings.TelegramConfig, fake *
 		channelQueue:   channelbus.NewQueue(),
 	}
 	return &telegramRuntime{
-		app:           app,
-		client:        fake,
-		cfg:           cfg,
-		lastProgress:  map[int64]time.Time{},
-		progressIDs:   map[int64]int64{},
-		progressChats: map[int64]bool{},
+		app:            app,
+		client:         fake,
+		cfg:            cfg,
+		lastProgress:   map[int64]time.Time{},
+		progressIDs:    map[int64]int64{},
+		progressChats:  map[int64]bool{},
+		progressTasks:  map[int64]string{},
+		progressStarts: map[int64]time.Time{},
 	}
 }
 
@@ -484,9 +486,8 @@ func TestTelegramRunProgressMessageFormatsModelLoad(t *testing.T) {
 
 	got := formatTelegramRunProgressMessage("model_loading", detail)
 	for _, want := range []string{
-		"Working - in progress",
-		"Agent - Mauler",
-		"Now - loading the model",
+		"\u23f3 Mauler is working",
+		"Stage: Loading the model",
 		"Backend: llamacpp",
 		"Model: Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
 		"Context: 45000 tokens",
@@ -504,14 +505,80 @@ func TestTelegramRunProgressMessageFormatsModelLoad(t *testing.T) {
 func TestTelegramRunProgressMessageFormatsLoopGuard(t *testing.T) {
 	got := formatTelegramRunProgressMessage("blocked", "Loop circuit-breaker paused the run after a corrective prompt because loop-health stayed critical: stability_score=14 repeated_tool_inputs=1 repeated_identical_outcomes=0 repeated_skips=0 tool_errors=6 tool_cycle_detected=false tool_cycle_period=0.")
 	for _, want := range []string{
-		"Working - blocked",
-		"Now - blocked by loop guard",
+		"\u26d4 Mauler needs attention",
+		"Stage: Blocked by the loop guard",
 		"stability score: 14",
 		"repeated tool inputs: 1",
 		"tool errors: 6",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("blocked message missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestTelegramRunCompletionSendsWhoamiResult(t *testing.T) {
+	run := TaskRun{
+		Prompt: "whoami",
+		Tools: []TaskToolEvent{{
+			Name:   "shell",
+			Status: "done",
+			Result: "root",
+		}},
+	}
+	detail := telegramRunCompletionDetail(run, "Command completed successfully.")
+	got := formatTelegramRunProgressMessageForTask("done", detail, run.Prompt, 2*time.Second)
+	for _, want := range []string{
+		"\u2705 Mauler finished",
+		"Task: whoami",
+		"Result:\nroot",
+		"Finished in: 2s",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("completion message missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Latest - Run completed successfully") {
+		t.Fatalf("completion message repeated generic status instead of the result: %q", got)
+	}
+}
+
+func TestTelegramRunCompletionPrefersMeaningfulFinalAnswer(t *testing.T) {
+	run := TaskRun{
+		Prompt: "whoami",
+		Tools: []TaskToolEvent{{
+			Name:   "shell",
+			Status: "done",
+			Result: "root",
+		}},
+	}
+	detail := telegramRunCompletionDetail(run, "The command reports that the current user is root.")
+	if detail != "The command reports that the current user is root." {
+		t.Fatalf("meaningful final answer should win over raw tool fallback, got %q", detail)
+	}
+}
+
+func TestTelegramRunCompletionPreservesMultilineUIAnswer(t *testing.T) {
+	uiAnswer := "Current user: root\n\nDirectory contents:\n- AGENTS.md\n- docs/\n- scripts/"
+	run := TaskRun{Prompt: "whoami and list the directory"}
+	detail := telegramRunCompletionDetail(run, uiAnswer)
+	got := formatTelegramRunProgressMessageForTask("done", detail, run.Prompt, 4*time.Second)
+	if !strings.Contains(got, "Result:\n"+uiAnswer) {
+		t.Fatalf("multiline UI answer was not preserved in Telegram completion:\n%s", got)
+	}
+}
+
+func TestTelegramRunProgressShowsTaskAndCurrentAction(t *testing.T) {
+	got := formatTelegramRunProgressMessageForTask("testing", "shell", "whoami", 3*time.Second)
+	for _, want := range []string{
+		"\u23f3 Mauler is working",
+		"Task: whoami",
+		"Stage: Verifying",
+		"Current: Running a shell command",
+		"Elapsed: 3s",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("working message missing %q:\n%s", want, got)
 		}
 	}
 }
@@ -528,5 +595,39 @@ func TestTelegramProgressUpdateEditsExistingMessage(t *testing.T) {
 	}
 	if len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "42:1:second") {
 		t.Fatalf("progress should edit first status message, got edits: %#v", fake.edits)
+	}
+}
+
+func TestTelegramCompletionIsSentWhenProgressUpdatesAreDisabled(t *testing.T) {
+	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: false}, fake)
+	rt.trackProgressChat(42, "whoami")
+
+	rt.notifyRunState(context.Background(), "done", "root")
+
+	if len(fake.sent) != 1 {
+		t.Fatalf("final result should be sent even with progress disabled, got %#v", fake.sent)
+	}
+	for _, want := range []string{"\u2705 Mauler finished", "Task: whoami", "Result:\nroot"} {
+		if !strings.Contains(fake.sent[0], want) {
+			t.Fatalf("final result missing %q: %q", want, fake.sent[0])
+		}
+	}
+}
+
+func TestTelegramRecoverableBlockedStateDoesNotLoseFinalResult(t *testing.T) {
+	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: true, ProgressIntervalS: 1}, fake)
+	rt.trackProgressChat(42, "whoami")
+	rt.lastProgress[42] = time.Now().Add(-2 * time.Second)
+
+	rt.notifyRunState(context.Background(), "blocked", "Waiting for a corrective final pass.")
+	rt.notifyRunState(context.Background(), "done", "root")
+
+	if len(fake.sent) != 1 {
+		t.Fatalf("recoverable blocked state should keep one editable status message, sends=%#v", fake.sent)
+	}
+	if len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "Result:\nroot") {
+		t.Fatalf("final result was lost after recoverable blocked state, edits=%#v", fake.edits)
 	}
 }

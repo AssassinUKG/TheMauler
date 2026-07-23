@@ -9,6 +9,6 @@
   },
   "mode": "Builder",
   "max_tool_calls": 3,
-  "expect_status": "stopped",
+  "expect_status": "done",
   "max_auto_continues": 3
 }

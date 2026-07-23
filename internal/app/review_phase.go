@@ -15,6 +15,7 @@ type reviewPhaseDecision struct {
 	StopReason     string
 	StopDetail     string
 	SummaryNote    string
+	Verdicts       []VerifyVerdict
 }
 
 func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings, mode AgentMode, autonomous bool, reviewCyclesUsed *int, budgetExhausted bool) reviewPhaseDecision {
@@ -39,7 +40,7 @@ func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings
 	recordReviewGateEvent(run, *reviewCyclesUsed, verdicts)
 	blocking := blockingReviewVerdicts(verdicts)
 	if len(blocking) == 0 {
-		return reviewPhaseDecision{Proceed: true}
+		return reviewPhaseDecision{Proceed: true, Verdicts: verdicts}
 	}
 	if inconclusive := inconclusiveReviewVerdicts(blocking); len(inconclusive) > 0 {
 		detail := reviewBlockingSummary(inconclusive)
@@ -48,6 +49,7 @@ func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings
 			StopReason:  "review_incomplete",
 			StopDetail:  fmt.Sprintf("Completion verification could not complete: %s", detail),
 			SummaryNote: fmt.Sprintf("Completion remains unverified because a gate was inconclusive: %s", detail),
+			Verdicts:    verdicts,
 		}
 	}
 
@@ -62,6 +64,7 @@ func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings
 			StopReason:  "review_incomplete",
 			StopDetail:  fmt.Sprintf("Review loop reached its cap with unresolved blocking gate failures: %s", detail),
 			SummaryNote: fmt.Sprintf("Completed with unresolved review gates: %s", detail),
+			Verdicts:    verdicts,
 		}
 	}
 
@@ -69,6 +72,7 @@ func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings
 	return reviewPhaseDecision{
 		Proceed:        false,
 		InjectedPrompt: buildReviewGateFailurePrompt(blocking, *reviewCyclesUsed, maxCycles),
+		Verdicts:       verdicts,
 	}
 }
 

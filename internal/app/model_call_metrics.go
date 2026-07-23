@@ -121,7 +121,11 @@ func hashToolDefs(toolDefs []llm.ToolDef) string {
 	if len(toolDefs) == 0 {
 		return ""
 	}
-	data, err := json.Marshal(toolDefs)
+	canonical := append([]llm.ToolDef(nil), toolDefs...)
+	sort.SliceStable(canonical, func(i, j int) bool {
+		return strings.TrimSpace(canonical[i].Function.Name) < strings.TrimSpace(canonical[j].Function.Name)
+	})
+	data, err := json.Marshal(canonical)
 	if err != nil {
 		return ""
 	}
@@ -299,7 +303,9 @@ func (o modelCallObserver) record(run *TaskRun, usage *llm.Usage, status string,
 		if totalTokens <= 0 {
 			totalTokens = promptTokens + completionTokens
 		}
-		if completionTokens > 0 && duration.Seconds() > 0 {
+		if usage.CompletionTokensPerSecond > 0 {
+			tokensPerSecond = usage.CompletionTokensPerSecond
+		} else if completionTokens > 0 && duration.Seconds() > 0 {
 			tokensPerSecond = float64(completionTokens) / duration.Seconds()
 		}
 	}
@@ -313,7 +319,12 @@ func (o modelCallObserver) record(run *TaskRun, usage *llm.Usage, status string,
 		message = "Model call failed"
 		errorText = err.Error()
 	}
-	detail := fmt.Sprintf("turn=%d\nclient=%s\nmodel=%s\nstatus=%s\nmodel_load=%s\ntool_choice=%s\ntools=%d\nselected_tools=%s\nttft_ms=%d\nduration_ms=%d\navg_inter_delta_ms=%d\ndeltas=%d\ncontent_deltas=%d\nprompt_tokens=%d\ncompletion_tokens=%d\ntotal_tokens=%d\ntokens_per_second=%.2f\nsystem_prompt_hash=%s\nprompt_hash=%s\ntool_schema_hash=%s",
+	backendPromptTPS, cachedPromptTokens := 0.0, 0
+	if usage != nil {
+		backendPromptTPS = usage.PromptTokensPerSecond
+		cachedPromptTokens = usage.CachedPromptTokens
+	}
+	detail := fmt.Sprintf("turn=%d\nclient=%s\nmodel=%s\nstatus=%s\nmodel_load=%s\ntool_choice=%s\ntools=%d\nselected_tools=%s\nttft_ms=%d\nduration_ms=%d\navg_inter_delta_ms=%d\ndeltas=%d\ncontent_deltas=%d\nprompt_tokens=%d\ncached_prompt_tokens=%d\ncompletion_tokens=%d\ntotal_tokens=%d\nprompt_tokens_per_second=%.2f\ntokens_per_second=%.2f\nsystem_prompt_hash=%s\nprompt_hash=%s\ntool_schema_hash=%s",
 		o.turn,
 		o.clientName,
 		o.modelID,
@@ -328,8 +339,10 @@ func (o modelCallObserver) record(run *TaskRun, usage *llm.Usage, status string,
 		o.deltaCount,
 		o.contentDeltas,
 		promptTokens,
+		cachedPromptTokens,
 		completionTokens,
 		totalTokens,
+		backendPromptTPS,
 		tokensPerSecond,
 		o.promptBudget.SystemHash,
 		o.promptBudget.PromptHash,
@@ -345,27 +358,29 @@ func (o modelCallObserver) record(run *TaskRun, usage *llm.Usage, status string,
 		Error:      errorText,
 		DurationMs: duration.Milliseconds(),
 		Metadata: map[string]string{
-			"turn":                strconv.Itoa(o.turn),
-			"client":              o.clientName,
-			"model":               o.modelID,
-			"model_load":          o.modelLoadFlag,
-			"tool_choice":         o.toolChoice,
-			"tool_count":          strconv.Itoa(o.toolCount),
-			"selected_tools":      strings.Join(o.selectedTools, ","),
-			"ttft_ms":             strconv.FormatInt(ttftMs, 10),
-			"duration_ms":         strconv.FormatInt(duration.Milliseconds(), 10),
-			"avg_inter_delta_ms":  strconv.FormatInt(avgGapMs, 10),
-			"deltas":              strconv.Itoa(o.deltaCount),
-			"content_deltas":      strconv.Itoa(o.contentDeltas),
-			"prompt_tokens":       strconv.Itoa(promptTokens),
-			"completion_tokens":   strconv.Itoa(completionTokens),
-			"total_tokens":        strconv.Itoa(totalTokens),
-			"tokens_per_second":   fmt.Sprintf("%.2f", tokensPerSecond),
-			"system_prompt_hash":  o.promptBudget.SystemHash,
-			"prompt_hash":         o.promptBudget.PromptHash,
-			"tool_schema_hash":    o.promptBudget.ToolSchemaHash,
-			"prompt_budget_total": strconv.Itoa(o.promptBudget.TotalTokens),
-			"system_pct":          fmt.Sprintf("%.3f", o.promptBudget.SystemPct),
+			"turn":                     strconv.Itoa(o.turn),
+			"client":                   o.clientName,
+			"model":                    o.modelID,
+			"model_load":               o.modelLoadFlag,
+			"tool_choice":              o.toolChoice,
+			"tool_count":               strconv.Itoa(o.toolCount),
+			"selected_tools":           strings.Join(o.selectedTools, ","),
+			"ttft_ms":                  strconv.FormatInt(ttftMs, 10),
+			"duration_ms":              strconv.FormatInt(duration.Milliseconds(), 10),
+			"avg_inter_delta_ms":       strconv.FormatInt(avgGapMs, 10),
+			"deltas":                   strconv.Itoa(o.deltaCount),
+			"content_deltas":           strconv.Itoa(o.contentDeltas),
+			"prompt_tokens":            strconv.Itoa(promptTokens),
+			"cached_prompt_tokens":     strconv.Itoa(cachedPromptTokens),
+			"completion_tokens":        strconv.Itoa(completionTokens),
+			"total_tokens":             strconv.Itoa(totalTokens),
+			"prompt_tokens_per_second": fmt.Sprintf("%.2f", backendPromptTPS),
+			"tokens_per_second":        fmt.Sprintf("%.2f", tokensPerSecond),
+			"system_prompt_hash":       o.promptBudget.SystemHash,
+			"prompt_hash":              o.promptBudget.PromptHash,
+			"tool_schema_hash":         o.promptBudget.ToolSchemaHash,
+			"prompt_budget_total":      strconv.Itoa(o.promptBudget.TotalTokens),
+			"system_pct":               fmt.Sprintf("%.3f", o.promptBudget.SystemPct),
 		},
 	})
 }

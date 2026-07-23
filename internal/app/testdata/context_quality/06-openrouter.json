@@ -1,0 +1,20 @@
+{
+  "id": "openrouter-one-task-boost",
+  "category": "OpenRouter one-task cloud boost",
+  "prompts": [
+    "Implement updated Mauler OpenRouter one-task cloud boost defaults while keeping local InferenceBridge as the persistent default.",
+    "Implement the provider change so an OpenRouter model applies to one task and then resets to the local profile.",
+    "Fix the cloud context defaults for OpenRouter without changing the normal local inference path."
+  ],
+  "expected_policy": "relevant_workspace",
+  "expected_class": "relevant",
+  "expected_routes": ["provider-and-models"],
+  "expected_modes": ["Builder", "Fixer"],
+  "required_sources": ["AGENTS.md", "non-negotiables.md", "troubleshooting.md"],
+  "forbidden_sources": ["MAULER.md", "agents-handoff-snapshot-2026-07-21.md"],
+  "required_tools": ["read", "grep", "edit", "shell"],
+  "forbidden_tools": [],
+  "required_prompt_text": ["InferenceBridge", "one-task"],
+  "forbidden_prompt_text": [],
+  "max_project_tokens": 4000
+}

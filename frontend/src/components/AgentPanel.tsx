@@ -9,6 +9,7 @@ import {
   DeleteSkill,
   GetProjectInstructionsSummary,
   GetSettings,
+  ListAgentDefinitions,
   GetUserProfile,
   KillLocalInferenceServers,
   ListMemory,
@@ -33,6 +34,7 @@ import {
   UpdateSettings,
   UseProjectInstructionFile,
   type DoctorResult,
+  type AgentDefinition,
   type MemoryEntry,
   type SessionSearchResult,
   type Settings,
@@ -120,6 +122,7 @@ const toolRisk: Record<string, ToolRisk> = {
   terminal_send: 'high',
   terminal_read: 'low',
   todo_write: 'low',
+  engagement: 'medium',
   skill: 'low',
   task: 'medium',
 }
@@ -173,9 +176,10 @@ export function AgentPanel({
   const [panelStatus, setPanelStatus] = useState('')
   const [specPlan, setSpecPlan] = useState<SpecPlan | null>(null)
   const [calibrating, setCalibrating] = useState(false)
+  const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([])
 
   const load = async () => {
-    const [s, mem, taskRuns, todoItems, skillItems, profileText, instructionSummary] = await Promise.all([
+    const [s, mem, taskRuns, todoItems, skillItems, profileText, instructionSummary, definitions] = await Promise.all([
       GetSettings().catch(() => null),
       ListMemory().catch(() => [] as MemoryEntry[]),
       ListTaskRuns().catch(() => [] as TaskRun[]),
@@ -183,6 +187,7 @@ export function AgentPanel({
       ListSkills().catch(() => [] as Skill[]),
       GetUserProfile().catch(() => ''),
       GetProjectInstructionsSummary().catch(() => ''),
+      ListAgentDefinitions().catch(() => [] as AgentDefinition[]),
     ])
     setSettings(s)
     setProjectSkillPath('')
@@ -192,6 +197,7 @@ export function AgentPanel({
     setTodos(Array.isArray(todoItems) ? todoItems : [])
     setSkills(Array.isArray(skillItems) ? skillItems : [])
     setUserProfile(profileText)
+    setAgentDefinitions(definitions)
     void GetSpecPlan().then(setSpecPlan).catch(() => {})
   }
 
@@ -466,6 +472,9 @@ export function AgentPanel({
   const names = Object.keys(toolLabels)
   const toolsetNames = Object.keys(settings?.tools.toolsets ?? {}).sort()
   const modeOverride = settings?.agents.mode_override || 'Auto'
+  const agentModeNames = agentDefinitions.length > 0
+    ? agentDefinitions.map(definition => definition.name)
+    : ['Auto', 'Manual', 'Bug Bounty Hunter', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner']
   const filteredMemory = memory.filter(item => {
     const filter = memoryFilter.trim().toLowerCase()
     if (!filter) return true
@@ -600,7 +609,7 @@ export function AgentPanel({
 
             <div className="agent-section-head">Mode override</div>
             <div className="mode-pills" title={!autoAgents ? 'Enable Auto Agents to use mode override' : undefined}>
-              {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+              {agentModeNames.map(mode => (
                 <button
                   key={mode}
                   className={`mode-pill${modeOverride === mode ? ' active' : ''}`}

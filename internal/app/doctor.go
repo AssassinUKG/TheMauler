@@ -665,24 +665,49 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-// checkLlamacppVersion probes /health or /props to guess the server version.
+// checkLlamacppVersion reports an exact managed llama.cpp build when
+// InferenceBridge exposes it, then falls back to standard llama.cpp probes.
 func checkLlamacppVersion(baseURL string) (status, message, detail string) {
-	base := strings.TrimSuffix(baseURL, "/v1")
-	client := &http.Client{Timeout: 4 * time.Second}
-	// Try /props endpoint (newer llama.cpp servers expose build info here)
-	resp, err := client.Get(base + "/props")
-	if err != nil {
-		// Fallback: just check /health
-		resp2, err2 := client.Get(base + "/health")
-		if err2 != nil {
-			return "warn", "Cannot reach llama.cpp /health - is the server running?", err2.Error()
+	return checkLlamacppVersionWithClient(baseURL, &http.Client{Timeout: 4 * time.Second})
+}
+
+func checkLlamacppVersionWithClient(baseURL string, client *http.Client) (status, message, detail string) {
+	base := strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/v1")
+
+	// InferenceBridge owns the runtime binary and can report its exact build even
+	// while no model is loaded (when llama.cpp /props is unavailable).
+	if resp, err := client.Get(base + "/v1/runtime/status"); err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			var runtimeStatus struct {
+				ServerVersion string `json:"server_version"`
+				ServerPath    string `json:"server_path"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&runtimeStatus) == nil && strings.TrimSpace(runtimeStatus.ServerVersion) != "" {
+				version := strings.TrimSpace(runtimeStatus.ServerVersion)
+				return "ok", "llama.cpp " + version + " via InferenceBridge", strings.TrimSpace(runtimeStatus.ServerPath)
+			}
 		}
-		defer resp2.Body.Close()
-		return "info", "llama.cpp is running (version unknown - /props not available)", ""
+	}
+
+	// Direct llama.cpp servers expose /props, but do not consistently expose a
+	// machine-readable build number there across releases.
+	if resp, err := client.Get(base + "/props"); err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return "ok", "llama.cpp is running (/props available; exact build unavailable)", ""
+		}
+	}
+
+	resp, err := client.Get(base + "/health")
+	if err != nil {
+		return "warn", "Cannot reach llama.cpp /health - is the server running?", err.Error()
 	}
 	defer resp.Body.Close()
-	// We can't parse the full response without JSON parsing, but getting a 200 is enough.
-	return "ok", "llama.cpp is running (/props available - likely b9180+ for MTP support)", ""
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "warn", fmt.Sprintf("llama.cpp /health returned HTTP %d", resp.StatusCode), ""
+	}
+	return "info", "llama.cpp is running (exact build unavailable)", ""
 }
 
 func severeContextUndersize(requested, actual int) bool {
@@ -1172,11 +1197,7 @@ func isLikelyInferenceBridgeBaseURL(rawURL string) bool {
 }
 
 func providerAPIKey(provider settings.Provider) string {
-	envName := strings.TrimSpace(provider.APIKeyEnv)
-	if envName == "" {
-		return ""
-	}
-	return strings.TrimSpace(os.Getenv(envName))
+	return settings.ResolveProviderAPIKey(provider.Name, provider.APIKeyEnv)
 }
 
 func firstJSONTextKey(value any, keys ...string) string {

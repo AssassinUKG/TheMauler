@@ -1,13 +1,18 @@
 import { useState, useEffect } from 'react'
 import {
   GetSettings,
+  ListAgentDefinitions,
   UpdateSettings,
   GetProfiles,
   UpdateProfiles,
   PingProvider,
-  ListModelsForProvider,
+  ListModelMetadataForProvider,
+  GetProviderAPIKeyStatus,
+  SetProviderAPIKey,
+  ClearProviderAPIKey,
   ListWSLDistros,
   BenchmarkProfile,
+  RecommendModelProfileTemplate,
   ClearStorageItem,
   ListStorageItems,
   UseProfile,
@@ -21,11 +26,14 @@ import {
   type ProfilesFile,
   type Profile,
   type Provider,
+  type ProviderAPIKeyStatus,
+  type ModelMetadata,
   type GenerationParams,
   type ProfileBenchmarkResult,
   type StorageItem,
   type ChannelWorkItem,
   type AudioHealth,
+  type AgentDefinition,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
 import './SettingsModal.css'
@@ -41,7 +49,7 @@ type ToolRisk = 'low' | 'medium' | 'high'
 
 const settingsTabs: Array<{ id: Tab; label: string; description: string }> = [
   { id: 'general', label: 'General', description: 'Active profile and logging' },
-  { id: 'providers', label: 'Providers', description: 'Local API endpoints' },
+  { id: 'providers', label: 'Providers', description: 'Local and cloud API endpoints' },
   { id: 'profiles', label: 'Profiles', description: 'Models and generation' },
   { id: 'agents', label: 'Agents', description: 'Modes and autonomy' },
   { id: 'environment', label: 'Environment', description: 'VPN, listener, shell paths' },
@@ -63,6 +71,7 @@ const toolRisk: Record<string, ToolRisk> = {
   file_changes: 'low',
   sqlite: 'low',
   todo_write: 'low',
+  engagement: 'medium',
   skill: 'low',
   http_probe: 'medium',
   evidence_bundle: 'medium',
@@ -136,6 +145,65 @@ function contrastText(hex: string): string {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55 ? '#111111' : '#ffffff'
 }
 
+function isOneTaskCloudProfile(name: string, profilesFile: ProfilesFile): boolean {
+  const profile = profilesFile.profiles?.[name]
+  if (!profile) return false
+  return isCloudProvider(profile.provider, profilesFile)
+}
+
+const STANDARD_CLOUD_CONTEXT_TOKENS = 131072
+const FALLBACK_CONTEXT_TOKENS = 32768
+const STANDARD_MAX_OUTPUT_TOKENS = 8192
+
+function isCloudProvider(providerName: string, profilesFile: ProfilesFile): boolean {
+  const normalizedName = String(providerName || '').toLowerCase()
+  const provider = profilesFile.providers?.[providerName]
+  const baseURL = String(provider?.base_url || '').toLowerCase()
+  return normalizedName === 'openrouter' || baseURL.includes('openrouter.ai')
+}
+
+function recommendedCloudContext(model: ModelMetadata): number {
+  const hardLimit = Number(model.context_length || 0)
+  return hardLimit > 0
+    ? Math.min(hardLimit, STANDARD_CLOUD_CONTEXT_TOKENS)
+    : FALLBACK_CONTEXT_TOKENS
+}
+
+function recommendedMaxOutput(model: ModelMetadata, contextTokens: number): number {
+  const providerLimit = Number(model.max_completion_tokens || 0)
+  return Math.max(256, Math.min(
+    STANDARD_MAX_OUTPUT_TOKENS,
+    providerLimit > 0 ? providerLimit : STANDARD_MAX_OUTPUT_TOKENS,
+    Math.max(256, Math.floor(contextTokens / 2)),
+  ))
+}
+
+function withCloudModelDefaults(profile: Profile, model: ModelMetadata): Profile {
+  const ctxTokens = recommendedCloudContext(model)
+  const maxTokens = recommendedMaxOutput(model, ctxTokens)
+  return {
+    ...profile,
+    model_id: model.id,
+    ctx_tokens: ctxTokens,
+    thinking_general: { ...profile.thinking_general, max_tokens: maxTokens },
+    thinking_coding: { ...profile.thinking_coding, max_tokens: maxTokens },
+    nothinking: { ...profile.nothinking, max_tokens: maxTokens },
+  }
+}
+
+function compactTokenCount(tokens: number): string {
+  if (tokens >= 1048576) return `${(tokens / 1048576).toFixed(tokens % 1048576 === 0 ? 0 : 1)}M`
+  if (tokens >= 1024) return `${Math.round(tokens / 1024)}K`
+  return String(tokens)
+}
+
+function modelCatalogueLabel(model: ModelMetadata, cloud: boolean): string {
+  if (!model.context_length) return model.id
+  const maximum = `${compactTokenCount(model.context_length)} maximum`
+  if (!cloud) return `${model.id} - ${maximum}`
+  return `${model.id} - ${maximum} - ${compactTokenCount(recommendedCloudContext(model))} standard`
+}
+
 export function SettingsModal({ onClose, onSaved }: Props) {
   const [tab, setTab] = useState<Tab>('providers')
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -144,10 +212,15 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
   const [pingResult, setPingResult] = useState('')
-  const [models, setModels] = useState<string[]>([])
-  const [profileModels, setProfileModels] = useState<string[]>([])
+  const [models, setModels] = useState<ModelMetadata[]>([])
+  const [profileModels, setProfileModels] = useState<ModelMetadata[]>([])
+  const [selectedModelMetadata, setSelectedModelMetadata] = useState<ModelMetadata | null>(null)
   const [wslDistros, setWslDistros] = useState<string[]>([])
   const [selectedProvider, setSelectedProvider] = useState('')
+  const [providerAPIKey, setProviderAPIKey] = useState('')
+  const [providerAPIKeyStatus, setProviderAPIKeyStatus] = useState<ProviderAPIKeyStatus | null>(null)
+  const [providerAPIKeySaving, setProviderAPIKeySaving] = useState(false)
+  const [showProviderAPIKey, setShowProviderAPIKey] = useState(false)
   const [selectedProfile, setSelectedProfile] = useState('')
   const [deleteProfileConfirm, setDeleteProfileConfirm] = useState<string | null>(null)
   const [benchmarking, setBenchmarking] = useState(false)
@@ -159,11 +232,13 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [audioHealth, setAudioHealth] = useState<AudioHealth | null>(null)
   const [audioTesting, setAudioTesting] = useState(false)
   const [kokoroVoices, setKokoroVoices] = useState<string[]>([])
+  const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([])
 
   useEffect(() => {
-    void Promise.all([GetSettings(), GetProfiles()]).then(([s, pf]) => {
+    void Promise.all([GetSettings(), GetProfiles(), ListAgentDefinitions().catch(() => [] as AgentDefinition[])]).then(([s, pf, definitions]) => {
       setSettings(s)
       setProfilesFile(pf)
+      setAgentDefinitions(definitions)
       const providerNames = Object.keys(pf.providers ?? {})
       const profileNames = Object.keys(pf.profiles ?? {}).filter(name => Boolean(pf.profiles[name]?.model_id?.trim()))
       if (profileNames.length > 0) {
@@ -186,6 +261,19 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     const id = window.setInterval(() => { void refreshChannelBus() }, 3000)
     return () => window.clearInterval(id)
   }, [tab])
+
+  useEffect(() => {
+    const provider = profilesFile?.providers?.[selectedProvider]
+    setProviderAPIKey('')
+    setShowProviderAPIKey(false)
+    if (!provider) {
+      setProviderAPIKeyStatus(null)
+      return
+    }
+    void GetProviderAPIKeyStatus(provider)
+      .then(setProviderAPIKeyStatus)
+      .catch(() => setProviderAPIKeyStatus(null))
+  }, [selectedProvider, profilesFile?.providers?.[selectedProvider]?.api_key_env])
 
   useEffect(() => {
     if (tab !== 'audio') return
@@ -232,7 +320,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     setAudioTesting(true)
     try {
       setAudioHealth(await RestartAudioWorker())
-      setSaveStatus('Voice worker stopped; it will start cleanly on the next spoken reply.')
+      setSaveStatus('Voice workers are restarting and warming in the background.')
     } finally {
       setAudioTesting(false)
     }
@@ -555,13 +643,13 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       name,
       provider: firstProvider,
       model_id: '',
-      ctx_tokens: 32768,
+      ctx_tokens: FALLBACK_CONTEXT_TOKENS,
       thinking: false,
       preserve_thinking: false,
       mmproj: '',
-      thinking_general: { temperature: 0.6, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, max_tokens: 8192, seed: -1 },
-      thinking_coding: { temperature: 0.6, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, max_tokens: 8192, seed: -1 },
-      nothinking: { temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, max_tokens: 4096, seed: -1 },
+      thinking_general: { temperature: 0.6, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 8192, seed: -1 },
+      thinking_coding: { temperature: 0.6, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 8192, seed: -1 },
+      nothinking: { temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 4096, seed: -1 },
       spec_type: '',
       spec_draft_n_max: 0,
       spec_draft_model: '',
@@ -625,7 +713,15 @@ export function SettingsModal({ onClose, onSaved }: Props) {
 
   const providerNames = Object.keys(profilesFile.providers ?? {})
   const profileNames = Object.keys(profilesFile.profiles ?? {}).filter(name => Boolean(profilesFile.profiles[name]?.model_id?.trim()))
+  const localProfileNames = profileNames.filter(name => !isOneTaskCloudProfile(name, profilesFile))
   const toolsetNames = Object.keys(settings.tools.toolsets ?? {}).sort()
+  const agentModeNames = agentDefinitions.length > 0
+    ? agentDefinitions.map(definition => definition.name)
+    : ['Auto', 'Manual', 'Bug Bounty Hunter', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner']
+  const agentPresetNames = Array.from(new Set([
+    ...agentDefinitions.filter(definition => definition.name !== 'Manual').map(definition => definition.name),
+    ...Object.keys(settings.agents.presets ?? {}),
+  ])).filter(name => Boolean(settings.agents.presets?.[name]))
   const activeToolsetName = settings.tools.active_toolset || 'balanced'
   const activeToolsetTools = settings.tools.toolsets?.[activeToolsetName] ?? []
   const enabledToolNames = effectiveToolNames(settings.tools.enabled_tools, activeToolsetTools)
@@ -641,8 +737,100 @@ export function SettingsModal({ onClose, onSaved }: Props) {
 
   const handleListModels = async () => {
     if (!provider) return
-    const ms = await ListModelsForProvider(provider).catch(() => [] as string[])
+    const ms = await ListModelMetadataForProvider(provider).catch(() => [] as ModelMetadata[])
     setModels(ms)
+  }
+
+  const saveProviderAPIKey = async () => {
+    if (!provider || !providerAPIKey.trim()) return
+    setProviderAPIKeySaving(true)
+    try {
+      await SetProviderAPIKey(selectedProvider, providerAPIKey.trim())
+      setProviderAPIKey('')
+      setProviderAPIKeyStatus(await GetProviderAPIKeyStatus(provider))
+      setSaveStatus(`API key saved for ${selectedProvider}`)
+    } catch (error) {
+      setSaveStatus(`API key save failed: ${String(error)}`)
+    } finally {
+      setProviderAPIKeySaving(false)
+    }
+  }
+
+  const clearProviderAPIKey = async () => {
+    if (!provider || !confirm(`Clear the stored API key for ${selectedProvider}?`)) return
+    setProviderAPIKeySaving(true)
+    try {
+      await ClearProviderAPIKey(selectedProvider)
+      setProviderAPIKey('')
+      setProviderAPIKeyStatus(await GetProviderAPIKeyStatus(provider))
+      setSaveStatus(`Stored API key cleared for ${selectedProvider}`)
+    } catch (error) {
+      setSaveStatus(`API key clear failed: ${String(error)}`)
+    } finally {
+      setProviderAPIKeySaving(false)
+    }
+  }
+
+  const applyLocalModelTemplate = async (candidate: Profile): Promise<Profile> => {
+    const result = await RecommendModelProfileTemplate(candidate).catch(() => null)
+    if (!result?.matched) {
+      return { ...candidate, ctx_tokens: candidate.ctx_tokens || FALLBACK_CONTEXT_TOKENS }
+    }
+    const configured = {
+      ...result.profile,
+      name: candidate.name,
+      provider: candidate.provider,
+      model_id: candidate.model_id,
+    }
+    const templateLabel = [result.template_id, result.chat_template].filter(Boolean).join(' · ')
+    setSaveStatus(`Applied local model template: ${templateLabel}`)
+    return configured
+  }
+
+  const selectProviderModel = async (model: ModelMetadata) => {
+    if (!profilesFile || !selectedProvider) return
+    if (profile && profile.provider === selectedProvider) {
+      const nextProfile = isCloudProvider(selectedProvider, profilesFile)
+        ? withCloudModelDefaults(profile, model)
+        : await applyLocalModelTemplate({ ...profile, model_id: model.id })
+      setProfilesFile({
+        ...profilesFile,
+        profiles: { ...profilesFile.profiles, [selectedProfile]: nextProfile },
+      })
+      setSelectedModelMetadata(model)
+      markDirty()
+      setTab('profiles')
+      return
+    }
+    const modelSlug = model.id.split('/').pop()?.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'model'
+    const base = `${selectedProvider}-${modelSlug}`
+    let name = base
+    let suffix = 2
+    while (profilesFile.profiles[name]) name = `${base}-${suffix++}`
+    const params: GenerationParams = { temperature: 0.7, top_p: 0.95, top_k: 0, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 8192, seed: -1 }
+    const next: Profile = {
+      name,
+      provider: selectedProvider,
+      model_id: model.id,
+      ctx_tokens: isCloudProvider(selectedProvider, profilesFile) ? FALLBACK_CONTEXT_TOKENS : 0,
+      thinking: false,
+      preserve_thinking: false,
+      mmproj: '',
+      thinking_general: { ...params },
+      thinking_coding: { ...params },
+      nothinking: { ...params },
+      spec_type: '',
+      spec_draft_n_max: 0,
+      spec_draft_model: '',
+    }
+    const configured = isCloudProvider(selectedProvider, profilesFile)
+      ? withCloudModelDefaults(next, model)
+      : await applyLocalModelTemplate(next)
+    setProfilesFile({ ...profilesFile, profiles: { ...profilesFile.profiles, [name]: configured } })
+    setSelectedProfile(name)
+    setSelectedModelMetadata(model)
+    setTab('profiles')
+    markDirty()
   }
 
   const fetchProfileModels = async () => {
@@ -650,8 +838,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     const prov = profilesFile.providers[profile.provider]
     if (!prov) return
     setProfileModels([])
-    const ms = await ListModelsForProvider(prov).catch(() => [] as string[])
+    const ms = await ListModelMetadataForProvider(prov).catch(() => [] as ModelMetadata[])
     setProfileModels(ms)
+    setSelectedModelMetadata(ms.find(model => model.id === profile.model_id) ?? null)
   }
 
   const handleUseProfile = async () => {
@@ -699,6 +888,21 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     } finally {
       setBenchmarking(false)
     }
+  }
+
+  const handleApplyModelTemplate = async () => {
+    if (!profile || !selectedProfile) return
+    const result = await RecommendModelProfileTemplate({ ...profile, name: selectedProfile }).catch(error => {
+      setSaveStatus(`Model template failed: ${String(error)}`)
+      return null
+    })
+    if (!result) return
+    if (!result.matched) {
+      setSaveStatus('No code-owned template matched this model; existing settings were kept')
+      return
+    }
+    replaceProfile(selectedProfile, { ...result.profile, name: selectedProfile })
+    setSaveStatus(`Applied ${result.template_id}${result.chat_template ? ` · ${result.chat_template}` : ''}`)
   }
 
   const applyBenchmarkRecommendation = () => {
@@ -774,8 +978,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       setSelectedProfile(e.target.value)
                     }}
                   >
-                    {profileNames.map(n => <option key={n} value={n}>{n}</option>)}
+                    {localProfileNames.map(n => <option key={n} value={n}>{n}</option>)}
                   </select>
+                  <small>Local profiles are defaults. OpenRouter profiles are selected for one task beside the Chat composer.</small>
                 </Field>
                 <Field label="Log level">
                   <select value={settings.log_level} onChange={e => updateSettings('log_level', e.target.value)}>
@@ -797,6 +1002,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                         setSelectedProvider(n)
                         setPingResult('')
                         setModels([])
+                        setSelectedModelMetadata(null)
                       }}
                     >
                       {n}
@@ -816,16 +1022,11 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       <div className="model-list">
                         {models.map(m => (
                           <button
-                            key={m}
+                            key={m.id}
                             className="model-item"
-                            onClick={() => {
-                              if (profile && profile.provider === selectedProvider) {
-                                updateProfileField(selectedProfile, 'model_id', m)
-                                setTab('profiles')
-                              }
-                            }}
+                            onClick={() => void selectProviderModel(m)}
                           >
-                            {m}
+                            {modelCatalogueLabel(m, isCloudProvider(selectedProvider, profilesFile))}
                           </button>
                         ))}
                       </div>
@@ -833,7 +1034,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
 
                     <Field label="Backend">
                       <select value={provider.backend} onChange={e => updateProviderField(selectedProvider, 'backend', e.target.value)}>
-                        {['llamacpp', 'lmstudio'].map(b => <option key={b}>{b}</option>)}
+                        {['llamacpp', 'lmstudio', 'openai-compatible'].map(b => <option key={b}>{b}</option>)}
                       </select>
                     </Field>
                     <Field label="Base URL">
@@ -842,6 +1043,37 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     <Field label="API key env">
                       <input value={provider.api_key_env ?? ''} onChange={e => updateProviderField(selectedProvider, 'api_key_env', e.target.value)} />
                     </Field>
+                    {provider.backend === 'openai-compatible' && (
+                      <Field label="API key">
+                        <div className="provider-secret-editor">
+                          <div className="provider-secret-input">
+                            <input
+                              type={showProviderAPIKey ? 'text' : 'password'}
+                              value={providerAPIKey}
+                              placeholder={providerAPIKeyStatus?.effective_configured ? 'A key is configured — enter a replacement' : 'Paste API key'}
+                              autoComplete="new-password"
+                              aria-label={`${selectedProvider} API key`}
+                              onChange={e => setProviderAPIKey(e.target.value)}
+                            />
+                            <button onClick={() => setShowProviderAPIKey(value => !value)}>{showProviderAPIKey ? 'Hide' : 'Show'}</button>
+                          </div>
+                          <div className="provider-secret-actions">
+                            <button className="primary" disabled={providerAPIKeySaving || !providerAPIKey.trim()} onClick={() => void saveProviderAPIKey()}>
+                              {providerAPIKeySaving ? 'Saving...' : 'Save API key'}
+                            </button>
+                            <button disabled={providerAPIKeySaving || !providerAPIKeyStatus?.stored_configured} onClick={() => void clearProviderAPIKey()}>Clear stored key</button>
+                            <span className={providerAPIKeyStatus?.effective_configured ? 'provider-secret-ready' : 'provider-secret-missing'}>
+                              {providerAPIKeyStatus?.environment_configured
+                                ? `Configured through ${provider.api_key_env || 'environment'}`
+                                : providerAPIKeyStatus?.stored_configured
+                                  ? 'Stored locally'
+                                  : 'No key configured'}
+                            </span>
+                          </div>
+                          <small>Environment variables take precedence. Stored keys stay outside profiles.toml and are never returned to the interface.</small>
+                        </div>
+                      </Field>
+                    )}
                   </div>
                 )}
               </div>
@@ -878,14 +1110,19 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       <button
                         className="primary"
                         onClick={() => void handleUseProfile()}
-                        disabled={saving || settings.active_profile === selectedProfile}
+                        disabled={saving || settings.active_profile === selectedProfile || isOneTaskCloudProfile(selectedProfile, profilesFile)}
                       >
-                        {settings.active_profile === selectedProfile ? 'Active profile' : 'Use this profile'}
+                        {isOneTaskCloudProfile(selectedProfile, profilesFile)
+                          ? 'Available as cloud boost'
+                          : settings.active_profile === selectedProfile ? 'Active profile' : 'Use as local default'}
                       </button>
                       <button onClick={newProfile} title="Create a blank profile">New</button>
                       <button onClick={duplicateProfile} title="Clone this profile">Duplicate</button>
                       <button onClick={() => void handleBenchmarkProfile()} disabled={benchmarking} title="Probe the selected provider and recommend model settings">
                         {benchmarking ? 'Benchmarking...' : 'Benchmark LLM'}
+                      </button>
+                      <button onClick={() => void handleApplyModelTemplate()} disabled={benchmarking} title="Apply code-owned defaults for a recognised local or Hugging Face model">
+                        Apply model template
                       </button>
                       <button onClick={deleteProfile} disabled={profileNames.length <= 1} title="Delete this profile">Delete</button>
                     </div>
@@ -962,17 +1199,36 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       <div className="model-list">
                         {profileModels.map(m => (
                           <button
-                            key={m}
-                            className={`model-item ${m === profile.model_id ? 'active' : ''}`}
-                            onClick={() => { updateProfileField(selectedProfile, 'model_id', m); setProfileModels([]) }}
+                            key={m.id}
+                            className={`model-item ${m.id === profile.model_id ? 'active' : ''}`}
+                            onClick={() => {
+                              const nextProfile = isCloudProvider(profile.provider, profilesFile)
+                                ? withCloudModelDefaults(profile, m)
+                                : { ...profile, model_id: m.id }
+                              setProfilesFile({
+                                ...profilesFile,
+                                profiles: { ...profilesFile.profiles, [selectedProfile]: nextProfile },
+                              })
+                              setSelectedModelMetadata(m)
+                              setProfileModels([])
+                              markDirty()
+                            }}
                           >
-                            {m}
+                            {modelCatalogueLabel(m, isCloudProvider(profile.provider, profilesFile))}
                           </button>
                         ))}
                       </div>
                     )}
                     <Field label="Context tokens">
                       <input type="number" value={profile.ctx_tokens} onChange={e => updateProfileField(selectedProfile, 'ctx_tokens', parseInt(e.target.value, 10) || 0)} />
+                      {isCloudProvider(profile.provider, profilesFile) && (
+                        <small>
+                          Working budget used by Mauler before compaction. Standard is 128K; the cloud provider still enforces the model's hard maximum
+                          {selectedModelMetadata?.id === profile.model_id && selectedModelMetadata.context_length
+                            ? ` (${compactTokenCount(selectedModelMetadata.context_length)} for this route).`
+                            : '.'}
+                        </small>
+                      )}
                     </Field>
 
                     <div className={`thinking-card ${profile.thinking ? 'thinking-on' : 'thinking-off'}`}>
@@ -1072,7 +1328,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     value={settings.agents.mode_override || 'Auto'}
                     onChange={e => updateSettings('agents', { ...settings.agents, mode_override: e.target.value })}
                   >
-                    {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+                    {agentModeNames.map(mode => (
                       <option key={mode} value={mode}>{mode}</option>
                     ))}
                   </select>
@@ -1283,7 +1539,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                 </Field>
 
                 <div className="preset-editor-list">
-                  {['Auto', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(name => {
+                  {agentPresetNames.map(name => {
                     const preset = settings.agents.presets?.[name]
                     if (!preset) return null
                     return (
@@ -1806,7 +2062,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     value={settings.telegram?.default_mode || 'Auto'}
                     onChange={e => updateTelegram({ default_mode: e.target.value })}
                   >
-                    {['Auto', 'Manual', 'Builder', 'Fixer', 'Reviewer', 'Researcher', 'Planner'].map(mode => (
+                    {agentModeNames.map(mode => (
                       <option key={mode} value={mode}>{mode}</option>
                     ))}
                   </select>
@@ -1912,7 +2168,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     <div className="audio-health-actions">
                       <button onClick={() => void refreshAudioHealth()} disabled={audioTesting}>Refresh</button>
                       <button onClick={() => void testVoice()} disabled={audioTesting || !(settings.audio?.enabled ?? true)}>{audioTesting ? 'Working...' : 'Play test voice'}</button>
-                      <button onClick={() => void restartVoice()} disabled={audioTesting}>Restart worker</button>
+                      <button onClick={() => void restartVoice()} disabled={audioTesting}>Restart voice</button>
                     </div>
                   </div>
                   <div className="audio-health-grid">
@@ -1998,7 +2254,11 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                 <Field label="Project docs max bytes">
                   <input type="number" min={4096} max={131072} step={1024} value={settings.context.project_doc_max_bytes || 32768}
                     onChange={e => updateSettings('context', { ...settings.context, project_doc_max_bytes: parseInt(e.target.value, 10) || 32768 })} />
-                  <span className="field-hint">Caps layered project instruction files before they enter context. Master skills are registered from the Skills tab.</span>
+                  <span className="field-hint">Source discovery/read allowance. Large files remain readable, while the always-on packet is separately compiled and capped.</span>
+                </Field>
+                <Field label="Always-on instruction packet">
+                  <input value="Validated manifest · task-aware · bounded" readOnly />
+                  <span className="field-hint">External research receives no project documents. Workspace work gets up to three heading-aware excerpts with hashes and line ranges. Preview Core, Relevant, or one-task Expanded packets from More → Context.</span>
                 </Field>
                 <Field label="Project doc filenames">
                   <input value={(settings.context.project_doc_fallback_filenames || ['MAULER.md', 'AGENTS.md']).join(', ')}
@@ -2092,6 +2352,15 @@ export function SettingsModal({ onClose, onSaved }: Props) {
 
             {tab === 'ui' && (
               <div className="settings-section">
+                <h3>Startup</h3>
+                <Field label="Terminal on launch">
+                  <label className="checkbox-label">
+                    <input type="checkbox" checked={settings.ui.terminal_default_open ?? false}
+                      onChange={e => updateSettings('ui', { ...settings.ui, terminal_default_open: e.target.checked })} />
+                    Show the terminal panel when TheMauler opens
+                  </label>
+                  <span className="field-hint">Applies on the next launch. The Terminal button controls only the current session.</span>
+                </Field>
                 <h3>Appearance</h3>
                 <div className="theme-preset-grid">
                   {themeOptions.map(option => (
@@ -2202,13 +2471,6 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     <input type="checkbox" checked={settings.ui.tool_countdown ?? false}
                       onChange={e => updateSettings('ui', { ...settings.ui, tool_countdown: e.target.checked })} />
                     Show countdown for long-running tool calls
-                  </label>
-                </Field>
-                <Field label="Terminal default">
-                  <label className="checkbox-label">
-                    <input type="checkbox" checked={settings.ui.terminal_default_open ?? false}
-                      onChange={e => updateSettings('ui', { ...settings.ui, terminal_default_open: e.target.checked })} />
-                    Open terminal by default
                   </label>
                 </Field>
                 <Field label="Terminal height">
@@ -2339,6 +2601,7 @@ function knownTools(enabled: Record<string, boolean> | undefined): string[] {
     'file_changes',
     'sqlite',
     'todo_write',
+    'engagement',
     'skill',
     'http_probe',
     'start_listener',
@@ -2416,6 +2679,7 @@ function ParamsEditor({
       {numField('Top K', 'top_k', 1)}
       {numField('Min P', 'min_p')}
       {numField('Presence penalty', 'presence_penalty')}
+      {numField('Repeat penalty', 'repeat_penalty')}
       {numField('Max tokens', 'max_tokens', 256)}
     </div>
   )

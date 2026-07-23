@@ -215,7 +215,7 @@
 
 .logs-kpis {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   gap: 0;
   margin-top: 7px;
   overflow: hidden;
@@ -234,6 +234,75 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 8px;
+}
+
+.logs-control-plane .logs-telemetry-summary {
+  margin-top: 7px;
+}
+
+.logs-contract-objective {
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #111514;
+}
+
+.logs-contract-objective span,
+.logs-contract-checks span {
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.logs-contract-objective strong {
+  min-width: 0;
+  color: var(--text-bright);
+  font-size: 11px;
+}
+
+.logs-contract-objective code {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.logs-contract-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.logs-contract-checks > div {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #171a19;
+}
+
+.logs-contract-checks > div.pass {
+  border-color: rgba(98, 174, 132, 0.45);
+}
+
+.logs-contract-checks > div.waiting {
+  border-color: rgba(220, 170, 90, 0.5);
+}
+
+.logs-contract-checks strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.logs-contract-checks small {
+  color: var(--text-dim);
+  font-size: 10px;
 }
 
 .logs-telemetry-card {

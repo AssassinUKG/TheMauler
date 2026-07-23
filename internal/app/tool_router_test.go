@@ -88,6 +88,34 @@ func TestExplicitOpsResearchAddsWebButNotBrowserAgent(t *testing.T) {
 	}
 }
 
+func TestPublicCVELookupRoutesWebToolsInsteadOfMasterSkill(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	prompt := "find and reachsearch this poc for me CVE-2026-50522 its exploited in the wild now"
+
+	selected := selectToolsForTurn(cfg, prompt, 0, 0)
+	for _, want := range []string{"web_search", "fetch_url"} {
+		if !selected[want] {
+			t.Fatalf("public CVE/PoC lookup should include %s: %#v", want, selected)
+		}
+	}
+	if selected["skill"] {
+		t.Fatalf("public CVE/PoC lookup should not offer the broad master skill: %#v", selected)
+	}
+	if !explicitWebResearchIntent(prompt) || looksShellCentricTask(prompt) {
+		t.Fatalf("public CVE/PoC lookup was not separated from target-shell work")
+	}
+
+	registry := tools.New()
+	defs, choice := toolDefsAndChoiceForTurn(registry, cfg, prompt, 0, 0)
+	if choice != "required" {
+		t.Fatalf("first lookup turn choice = %q, want required", choice)
+	}
+	if !toolCallAdvertised(defs, "web_search") || !toolCallAdvertised(defs, "fetch_url") || toolCallAdvertised(defs, "skill") {
+		t.Fatalf("bad public lookup definitions: %s", toolProtocolToolNames(defs))
+	}
+}
+
 func TestOpsToolRouterUsesPhaseSpecificToolsets(t *testing.T) {
 	cfg := settings.DefaultSettings().Tools
 	cfg.ActiveToolset = "unrestricted"

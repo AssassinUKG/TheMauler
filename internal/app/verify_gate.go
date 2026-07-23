@@ -28,6 +28,13 @@ func (a *App) runVerifyGate(ctx context.Context, run *TaskRun, cfg *settings.Set
 	}
 	commands := detectVerifyCommands(*cfg)
 	if len(commands) == 0 {
+		// The sealed task contract only requires a project command verdict when
+		// one was available at intake. Simple text/config mutations still have
+		// the file-hash postcondition and must not be made permanently
+		// unfinishable by a verifier the contract never promised.
+		if run.Control != nil && !controlNeedsProjectVerification(*run) {
+			return nil
+		}
 		return []VerifyVerdict{{
 			Gate:         "verify",
 			Status:       "inconclusive",

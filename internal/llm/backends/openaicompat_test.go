@@ -11,7 +11,106 @@ import (
 	"time"
 
 	"mauler/internal/llm"
+	"mauler/internal/settings"
 )
+
+func TestOpenAICompatibleUsesUIManagedProviderSecret(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	t.Setenv("OPENROUTER_API_KEY", "")
+	if err := settings.SaveProviderAPIKey("openrouter", "sk-or-test"); err != nil {
+		t.Fatal(err)
+	}
+	client := NewOpenAICompatible(settings.Profile{
+		Provider:  "openrouter",
+		Backend:   "openai-compatible",
+		BaseURL:   "https://openrouter.ai/api/v1",
+		ModelID:   "vendor/frontier-model",
+		APIKeyEnv: "OPENROUTER_API_KEY",
+	})
+	compat, ok := client.(*OpenAICompat)
+	if !ok {
+		t.Fatalf("client type = %T", client)
+	}
+	if compat.apiKey != "sk-or-test" {
+		t.Fatalf("api key was not resolved from the provider secret store")
+	}
+}
+
+func TestOpenAICompatPingFallsBackToAuthenticatedGetWhenHeadIsRejected(t *testing.T) {
+	var headCalls, getCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sk-or-test" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodHead:
+			headCalls.Add(1)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case http.MethodGet:
+			getCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("openai-compatible", server.URL, "frontier-model", 32768, "sk-or-test", false)
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if headCalls.Load() != 1 || getCalls.Load() != 1 {
+		t.Fatalf("HEAD calls = %d, GET calls = %d", headCalls.Load(), getCalls.Load())
+	}
+}
+
+func TestOpenAICompatModelMetadataUsesSafeProviderLimits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{
+			"id":"moonshotai/kimi-k3",
+			"context_length":1048576,
+			"max_completion_tokens":32768,
+			"supported_parameters":["max_tokens","tools"],
+			"top_provider":{"context_length":262144,"max_completion_tokens":16384}
+		},{
+			"id":"local/model"
+		}]}`))
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("openai-compatible", server.URL, "", 0, "", false)
+	models, err := client.ModelMetadata(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models = %d, want 2", len(models))
+	}
+	if got := models[0]; got.ID != "moonshotai/kimi-k3" || got.ContextLength != 262_144 || got.MaxCompletionTokens != 16_384 {
+		t.Fatalf("metadata = %#v", got)
+	}
+	if len(models[0].SupportedParameters) != 2 {
+		t.Fatalf("supported parameters = %#v", models[0].SupportedParameters)
+	}
+	if models[1].ContextLength != 0 || models[1].MaxCompletionTokens != 0 {
+		t.Fatalf("missing limits should remain unknown: %#v", models[1])
+	}
+
+	ids, err := client.Models(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "moonshotai/kimi-k3" || ids[1] != "local/model" {
+		t.Fatalf("ids = %#v", ids)
+	}
+}
 
 func TestOpenAICompatBuildBodyIncludesProfileRequestSettings(t *testing.T) {
 	client := newOpenAICompat("llamacpp", "http://example.test/v1", "qwen-local", 32768, "", true)
@@ -24,6 +123,7 @@ func TestOpenAICompatBuildBodyIncludesProfileRequestSettings(t *testing.T) {
 		TopK:             20,
 		MinP:             0.05,
 		PresencePenalty:  1.5,
+		RepeatPenalty:    1.1,
 		Seed:             seed,
 		EnableThinking:   true,
 		PreserveThinking: true,
@@ -49,6 +149,7 @@ func TestOpenAICompatBuildBodyIncludesProfileRequestSettings(t *testing.T) {
 	assertJSONNumber(t, got, "top_k", 20)
 	assertJSONNumber(t, got, "min_p", 0.05)
 	assertJSONNumber(t, got, "presence_penalty", 1.5)
+	assertJSONNumber(t, got, "repeat_penalty", 1.1)
 	assertJSONNumber(t, got, "seed", 42)
 	if got["model"] != "qwen-local" {
 		t.Fatalf("model = %v, want qwen-local", got["model"])

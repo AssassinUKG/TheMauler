@@ -39,6 +39,9 @@ export function LogsPage({ version }: { version: number }) {
         run.mode,
         run.profile,
         run.model ?? '',
+        run.origin ?? '',
+        run.claimant_alias ?? '',
+        run.claimant_id ?? '',
         run.status,
         run.state ?? '',
         run.stop_reason ?? '',
@@ -131,7 +134,9 @@ export function LogsPage({ version }: { version: number }) {
               <div className="logs-run-prompt">{run.prompt || '(empty prompt)'}</div>
               <div className="logs-run-meta">
                 {run.duration_ms != null && <span>{fmtDuration(run.duration_ms)}</span>}
+                <span>{run.origin || 'desktop'}</span>
                 {(run.tools ?? []).length > 0 && <span>{(run.tools ?? []).length} tools</span>}
+				{run.control?.phase && <span>control {run.control.phase.replaceAll('_', ' ')}</span>}
                 {compactionCount(run) > 0 && <span>{compactionCount(run)} compact</span>}
                 {run.total_tokens != null && run.total_tokens > 0 && <span>{run.total_tokens.toLocaleString()} tok</span>}
                 {run.stop_reason && <span>{run.stop_reason}</span>}
@@ -167,11 +172,45 @@ function RunDetail({ run }: { run: TaskRun }) {
       <section className="logs-kpis">
         <Metric label="Status" value={run.stop_reason || run.status} />
         <Metric label="State" value={run.state || '-'} />
+		<Metric label="Control" value={run.control?.phase?.replaceAll('_', ' ') || '-'} />
+        <Metric label="Origin" value={run.origin || 'desktop'} />
+        <Metric label="Claimant" value={run.claimant_alias || run.claimant_id || run.id} />
         <Metric label="Duration" value={run.duration_ms != null ? fmtDuration(run.duration_ms) : '-'} />
         <Metric label="Tokens" value={run.total_tokens != null && run.total_tokens > 0 ? run.total_tokens.toLocaleString() : '-'} />
         <Metric label="Avg TTFT" value={telemetry.avgTtftMs == null ? '-' : `${Math.round(telemetry.avgTtftMs)}ms`} />
         <Metric label="Tok/s" value={telemetry.avgTokensPerSecond == null ? '-' : telemetry.avgTokensPerSecond.toFixed(1)} />
       </section>
+
+	  {run.contract && run.control && (
+		<section className="logs-section logs-control-plane">
+		  <h2>Task Contract</h2>
+		  <div className="logs-telemetry-summary">
+			<Metric label="Revision" value={`${run.contract.revision}`} />
+			<Metric label="Risk" value={run.contract.risk} />
+			<Metric label="Plan" value={run.control.plan_required ? (run.control.plan_accepted ? 'accepted' : 'required') : 'not required'} />
+			<Metric label="Phase" value={run.control.phase.replaceAll('_', ' ')} />
+			<Metric label="Checks" value={`${Object.keys(run.control.satisfied_checks ?? {}).length}/${(run.control.blocking_check_ids ?? []).length}`} />
+			<Metric label="Evidence IDs" value={`${Object.values(run.control.satisfied_checks ?? {}).flat().length}`} />
+		  </div>
+		  <div className="logs-contract-objective">
+			<span>Objective</span>
+			<strong>{run.contract.objective}</strong>
+			<code title={run.contract.digest}>{shortDigest(run.contract.digest)}</code>
+		  </div>
+		  {(run.contract.acceptance_checks ?? []).length > 0 && (
+			<div className="logs-contract-checks">
+			  {(run.contract.acceptance_checks ?? []).map(check => {
+				const evidence = run.control?.satisfied_checks?.[check.id] ?? []
+				return <div key={check.id} className={evidence.length > 0 ? 'pass' : check.blocking ? 'waiting' : ''}>
+				  <span>{evidence.length > 0 ? 'verified' : check.blocking ? 'blocking' : 'advisory'}</span>
+				  <strong>{check.description}</strong>
+				  <small>{check.verifier} - {evidence.length} evidence ID{evidence.length === 1 ? '' : 's'}</small>
+				</div>
+			  })}
+			</div>
+		  )}
+		</section>
+	  )}
 
       {(telemetry.modelCalls.length > 0 || telemetry.promptBudgets.length > 0 || telemetry.latestLoopMetrics) && (
         <section className="logs-section">
@@ -237,6 +276,11 @@ function RunDetail({ run }: { run: TaskRun }) {
       )}
     </>
   )
+}
+
+function shortDigest(value: string): string {
+  const digest = value.replace(/^sha256:/, '')
+  return digest.length > 16 ? `${digest.slice(0, 12)}...${digest.slice(-4)}` : digest
 }
 
 function RunTelemetryCard({ event }: { event: { kind: string; message: string; detail?: string } }) {

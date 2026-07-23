@@ -163,6 +163,54 @@ func TestAgentEvalScoringSeparatesArtifactAndHygiene(t *testing.T) {
 	}
 }
 
+func TestAgentEvalScoringEnforcesToolDisciplineAndOptionalCaseInsensitiveArtifact(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "math.go"), []byte("func Max() {}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	run := TaskRun{
+		Status: "done",
+		Tools: []TaskToolEvent{{
+			Name: "shell", Status: "done", Input: `{"command":"curl http://10.129.14.129"}`,
+		}},
+	}
+	scenario := AgentEvalScenario{
+		ExpectStatus:               "done",
+		ExpectFiles:                map[string]string{"math.go": "max"},
+		ExpectFilesCaseInsensitive: true,
+		ForbidTools:                []string{"shell"},
+		ForbidToolInputSubstr:      []string{"10.129.14.129"},
+		MaxAutoContinues:           1,
+	}
+	var result AgentEvalResult
+	scoreAgentEvalResult(&result, run, workspace, scenario)
+	if !result.ArtifactPass || result.HygienePass || result.Pass {
+		t.Fatalf("discipline scoring = %#v", result)
+	}
+	if !strings.Contains(result.FailReason, "forbidden tool used") || !strings.Contains(result.FailReason, "forbidden substring") {
+		t.Fatalf("discipline failure reason = %q", result.FailReason)
+	}
+}
+
+func TestCanonicalAgentEvalSettingsIgnoreLivePolicyAndReviewerOverrides(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Agents.MaxRunSeconds = 1
+	cfg.Agents.ReviewLoop.ReviewerPass = true
+	cfg.Agents.ReviewLoop.VerifyCommands = []string{"false"}
+	cfg.Tools.Enabled = false
+	cfg.Tools.ActiveToolset = "offline"
+	cfg.Tools.ConfirmWrites = true
+	cfg.Tools.EnabledTools = map[string]bool{"read": false}
+
+	got := canonicalAgentEvalSettings(cfg)
+	if got.Agents.MaxRunSeconds != 0 || got.Agents.ReviewLoop.ReviewerPass || len(got.Agents.ReviewLoop.VerifyCommands) != 0 {
+		t.Fatalf("agent envelope was not canonicalized: %#v", got.Agents)
+	}
+	if !got.Tools.Enabled || got.Tools.ActiveToolset != "unrestricted" || got.Tools.ConfirmWrites || !got.Tools.EnabledTools["read"] {
+		t.Fatalf("tool envelope was not canonicalized: %#v", got.Tools)
+	}
+}
+
 func TestLoadAgentEvalScenarios(t *testing.T) {
 	scenarios, err := loadAgentEvalScenarios()
 	if err != nil {
@@ -309,6 +357,41 @@ func TestAgentEvalReportPersistence(t *testing.T) {
 	}
 }
 
+func TestAgentEvalRepeatedReportMetrics(t *testing.T) {
+	report := AgentEvalReport{
+		Repeats:      5,
+		FixtureCount: 2,
+		Total:        10,
+		PassCount:    9,
+		Results: []AgentEvalResult{
+			{Pass: true, ToolCalls: 4, RepeatedToolInputs: 1, ToolErrors: 1, RecoveryEvents: 1, Recovered: true, DurationMs: 1000},
+			{Pass: false, FalseDone: true, ToolCalls: 2, RepeatedSkips: 1, PolicyViolations: 1, HumanInterventions: 1, RecoveryEvents: 1, DurationMs: 3000},
+		},
+	}
+	report.FixturePassCount = 1
+	populateAgentEvalReportMetrics(&report)
+	if report.FullPass || report.PassPower != "not pass^5" {
+		t.Fatalf("failed repeated report claimed full reliability: %#v", report)
+	}
+	if report.UnsupportedCompletionRate != 10 || report.DuplicateActionRate != float64(2)*100/6 || report.ToolErrorRate != float64(1)*100/6 {
+		t.Fatalf("bad repeated rates: %#v", report)
+	}
+	if report.RecoverySuccessRate != 50 || report.AverageToolCalls != 0.6 || report.AverageDurationMs != 400 {
+		t.Fatalf("bad repeated aggregates: %#v", report)
+	}
+	if report.PolicyViolations != 1 || report.HumanInterventions != 1 {
+		t.Fatalf("missing policy/intervention totals: %#v", report)
+	}
+}
+
+func TestNormalizeAgentEvalRepeats(t *testing.T) {
+	for input, want := range map[int]int{-1: 1, 0: 1, 1: 1, 5: 5, 99: 10} {
+		if got := normalizeAgentEvalRepeats(input); got != want {
+			t.Fatalf("repeats(%d)=%d want %d", input, got, want)
+		}
+	}
+}
+
 type agentEvalMockClient struct {
 	turn int
 }
@@ -319,6 +402,21 @@ func (c *agentEvalMockClient) Chat(ctx context.Context, req llm.Request) (<-chan
 	go func(turn int) {
 		defer close(ch)
 		if turn == 1 {
+			args, _ := json.Marshal(map[string]any{
+				"action": "replace",
+				"items":  []string{"Inspect the compile error", "Edit main.go", "Verify the result"},
+			})
+			ch <- llm.Delta{ToolCalls: []llm.ToolCallDef{{
+				ID:   "call-plan",
+				Type: "function",
+				Function: llm.FunctionCall{
+					Name:      "todo_write",
+					Arguments: args,
+				},
+			}}}
+			return
+		}
+		if turn == 2 {
 			args, _ := json.Marshal(map[string]string{
 				"path": "main.go",
 				"old":  "return 123",
