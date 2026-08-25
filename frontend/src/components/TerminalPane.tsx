@@ -43,19 +43,27 @@ function b64ToBytes(b64: string): Uint8Array {
 }
 
 const TERM_THEME = {
-  background: '#0b0e14',
-  foreground: '#cbd5e1',
+  background: '#080c12',
+  foreground: '#dbe7f5',
   cursor: '#4ade80',
-  selectionBackground: 'rgba(255,255,255,0.18)',
+  cursorAccent: '#080c12',
+  selectionBackground: 'rgba(74,222,128,0.24)',
+  black: '#101722',
+  brightBlack: '#64748b',
+  white: '#dbe7f5',
+  brightWhite: '#ffffff',
 }
 
-const AI_COMMANDS_DEFAULT_WIDTH = 420
+const AI_COMMANDS_DEFAULT_WIDTH = 520
 const AI_COMMANDS_DEFAULT_HEIGHT = 120
-const AI_COMMANDS_MIN_WIDTH = 300
+const AI_COMMANDS_MIN_WIDTH = 340
 const AI_COMMANDS_MIN_HEIGHT = 64
 const TERMINAL_MIN_WIDTH = 320
 const TERMINAL_MIN_HEIGHT = 80
 const AI_COMMANDS_SPLITTER_SIZE = 10
+const TERMINAL_FONT_DEFAULT = 14
+const TERMINAL_FONT_MIN = 12
+const TERMINAL_FONT_MAX = 20
 
 export function TerminalPane({ visible }: Props) {
 	const [tabs, setTabs] = useState<TerminalTab[]>(() => [newTab(1)])
@@ -303,6 +311,7 @@ function TerminalSession({
   const [showHelp, setShowHelp] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
   const [terminalState, setTerminalState] = useState<TerminalStateSnapshot | null>(null)
+  const [terminalFontSize, setTerminalFontSize] = useState(() => loadTerminalFontSize())
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -336,8 +345,16 @@ function TerminalSession({
     if (!containerRef.current || termRef.current) return
     const term = new Terminal({
       fontFamily: "'Cascadia Code', 'Cascadia Mono', 'Consolas', monospace",
-      fontSize: 12.5,
+      fontSize: terminalFontSize,
+      fontWeight: 500,
+      fontWeightBold: 700,
+      lineHeight: 1.18,
+      letterSpacing: 0.15,
+      minimumContrastRatio: 4.5,
+      drawBoldTextInBrightColors: true,
       cursorBlink: true,
+      cursorStyle: 'bar',
+      cursorWidth: 2,
       scrollback: 5000,
       theme: TERM_THEME,
       allowProposedApi: true,
@@ -394,6 +411,20 @@ function TerminalSession({
       fitAndResize()
     })
   }, [fitAndResize])
+
+  const adjustTerminalFont = useCallback((delta: number) => {
+    setTerminalFontSize(current => {
+      const next = Math.min(TERMINAL_FONT_MAX, Math.max(TERMINAL_FONT_MIN, current + delta))
+      localStorage.setItem('mauler.terminalFontSize', String(next))
+      const term = termRef.current
+      if (term) {
+        term.options.fontSize = next
+        lastFitRef.current = { cols: 0, rows: 0 }
+        requestAnimationFrame(scheduleFit)
+      }
+      return next
+    })
+  }, [scheduleFit])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -535,6 +566,10 @@ function TerminalSession({
             <>
               <button className="terminal-btn" onClick={() => termRef.current?.clear()}>Clear</button>
               <button className="terminal-btn" onClick={() => void copyOutput()}>Copy</button>
+              <span className="terminal-font-controls" aria-label={`Terminal text size ${terminalFontSize} pixels`}>
+                <button className="terminal-btn terminal-font-btn" onClick={() => adjustTerminalFont(-1)} disabled={terminalFontSize <= TERMINAL_FONT_MIN} title="Smaller terminal text">A-</button>
+                <button className="terminal-btn terminal-font-btn" onClick={() => adjustTerminalFont(1)} disabled={terminalFontSize >= TERMINAL_FONT_MAX} title="Larger terminal text">A+</button>
+              </span>
               {isAgentTerminal && <button className="terminal-btn" onClick={onToggleAICommands}>{showAICommands ? 'Hide AI Commands' : 'Show AI Commands'}</button>}
               {isAgentTerminal && <button className="terminal-btn terminal-btn-warn" onClick={() => void recoverShell()}>Recover</button>}
               <button className="terminal-btn" onClick={() => void restartShell()}>Restart</button>
@@ -872,6 +907,12 @@ function loadAICommandsVisible() {
 	const raw = localStorage.getItem('mauler.aiCommandsVisible')
 	if (raw === '0') return false
 	return true
+}
+
+function loadTerminalFontSize() {
+	const raw = Number(localStorage.getItem('mauler.terminalFontSize') || '')
+	if (Number.isFinite(raw) && raw >= TERMINAL_FONT_MIN && raw <= TERMINAL_FONT_MAX) return raw
+	return TERMINAL_FONT_DEFAULT
 }
 
 function trimResult(result: string) {

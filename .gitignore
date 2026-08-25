@@ -18,6 +18,19 @@ frontend/dist-ssr/
 
 # Wails / local build output
 build/bin/
+mauler.exe
+*.exe
+
+# Local runtime state and app databases
+.cache/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite
+**/*.sqlite3
+**/state.db
+**/run-ledger.jsonl
+**/task-runs.json
 
 # Environment and local secrets
 .env

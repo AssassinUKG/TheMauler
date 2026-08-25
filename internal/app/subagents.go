@@ -77,6 +77,7 @@ func (a *App) registerAppTools() {
 	a.registry.Register(&terminalSendTool{app: a})
 	a.registry.Register(&terminalReadTool{app: a})
 	a.registry.Register(&startListenerTool{app: a})
+	a.registry.Register(&generateImageTool{app: a})
 	if a.engagements != nil {
 		a.registry.Register(&engagementTool{app: a})
 	}

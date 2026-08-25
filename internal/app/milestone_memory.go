@@ -31,7 +31,7 @@ func buildRunMilestoneMemory(run *TaskRun) *MemoryEntry {
 	if len(milestones) == 0 && run.Status == "done" {
 		milestones = append(milestones, "Run completed.")
 	}
-	if len(milestones) == 0 && run.StopReason == "" {
+	if len(milestones) == 0 {
 		return nil
 	}
 

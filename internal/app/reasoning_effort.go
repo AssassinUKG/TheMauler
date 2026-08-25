@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"mauler/internal/llm"
+	"mauler/internal/runtimeprofile"
 	"mauler/internal/settings"
 )
 
@@ -79,11 +80,11 @@ type effortPlan struct {
 
 func defaultReasoningEffortForMode(mode AgentMode) string {
 	switch strings.ToLower(strings.TrimSpace(mode.Name)) {
-	case "reviewer", "planner", "researcher":
-		return "medium"
-	case "fixer", "ops":
+	case "reviewer", "planner":
+		return "xhigh"
+	case "fixer":
 		return "high"
-	case "builder", "auto", "manual":
+	case "researcher", "ops", "builder", "auto", "manual":
 		return "medium"
 	default:
 		return "medium"
@@ -92,11 +93,107 @@ func defaultReasoningEffortForMode(mode AgentMode) string {
 
 func normaliseReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "minimal", "low", "medium", "high":
+	case "minimal", "none", "low", "medium", "high", "xhigh":
 		return strings.ToLower(strings.TrimSpace(effort))
 	default:
 		return ""
 	}
+}
+
+func isQwen38Profile(profile settings.Profile) bool {
+	rp, ok := runtimeprofile.Match(profile)
+	return ok && strings.EqualFold(rp.Family, "qwen3.8")
+}
+
+func normaliseThinkingMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "on", "off":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return "auto"
+	}
+}
+
+// applyThinkingMode resolves the Chat-level override without mutating the saved
+// profile. "on" is honoured only when the code-owned runtime profile says the
+// model supports thinking (or an unknown profile already opted into thinking).
+func applyThinkingMode(profile settings.Profile, mode string) (settings.Profile, string, bool) {
+	mode = normaliseThinkingMode(mode)
+	switch mode {
+	case "off":
+		profile.Thinking = false
+		profile.PreserveThink = false
+		return profile, "off", true
+	case "on":
+		supported := profile.Thinking
+		if rp, ok := runtimeprofile.Match(profile); ok {
+			supported = rp.Supports.Thinking
+		}
+		if !supported {
+			return profile, "unsupported", false
+		}
+		profile.Thinking = true
+		profile.PreserveThink = true
+		return profile, "on", true
+	default:
+		return profile, "auto", true
+	}
+}
+
+func effectiveEffortForThinkingMode(effort, mode string, profile settings.Profile) string {
+	mode = normaliseThinkingMode(mode)
+	normalized := normaliseReasoningEffort(effort)
+	if normalized == "" {
+		normalized = "medium"
+	}
+	if mode == "on" && !effortToThinking(normalized, profile).enableThinking {
+		return "medium"
+	}
+	return normalized
+}
+
+func shouldForceNoThinking(profile settings.Profile, mode string, totalToolCalls, threshold, noToolContinues int) bool {
+	if normaliseThinkingMode(mode) == "on" || !profile.Thinking {
+		return false
+	}
+	if threshold <= 0 {
+		threshold = 2
+	}
+	return totalToolCalls >= threshold || noToolContinues > 0
+}
+
+func thinkingModePrompt(mode string) string {
+	switch normaliseThinkingMode(mode) {
+	case "on":
+		return "Chat thinking override: ON for supported models. Keep new model thinking enabled on every turn; reasoning effort may change depth but must not switch to none/minimal/direct mode. "
+	case "off":
+		return "Chat thinking override: OFF. Use the direct/no-thinking sampler for this run and do not attempt to enable model thinking. "
+	default:
+		// Profile/auto is the long-standing default. Keep the canonical prompt packet byte-for-byte
+		// lean in that mode so this optional UI control cannot displace routed project rules.
+		return ""
+	}
+}
+
+func providerReasoningEffort(effort string, enableThinking bool, profile settings.Profile) string {
+	normalized := normaliseReasoningEffort(effort)
+	if !enableThinking || normalized == "minimal" || normalized == "none" {
+		if isQwen38Profile(profile) {
+			return ""
+		}
+		return "none"
+	}
+	if isQwen38Profile(profile) {
+		switch normalized {
+		case "low", "medium", "xhigh":
+			return normalized
+		case "high":
+			return "xhigh"
+		default:
+			return "medium"
+		}
+	}
+	return normalized
 }
 
 func configuredReasoningEffort(cfg settings.Settings, mode AgentMode) string {
@@ -111,11 +208,14 @@ func configuredReasoningEffort(cfg settings.Settings, mode AgentMode) string {
 
 func effortToThinking(effort string, profile settings.Profile) effortPlan {
 	switch normaliseReasoningEffort(effort) {
-	case "minimal":
+	case "minimal", "none":
 		return effortPlan{enableThinking: false, maxTokensCap: 1024, coding: true}
 	case "low":
+		if isQwen38Profile(profile) {
+			return effortPlan{enableThinking: profile.Thinking, maxTokensCap: 0, coding: true}
+		}
 		return effortPlan{enableThinking: false, maxTokensCap: 0, coding: true}
-	case "high":
+	case "high", "xhigh":
 		return effortPlan{enableThinking: profile.Thinking, maxTokensCap: 0, coding: false}
 	default:
 		return effortPlan{enableThinking: profile.Thinking, maxTokensCap: 0, coding: false}
@@ -127,13 +227,13 @@ func reasoningEffortToolDef() llm.ToolDef {
 		Type: "function",
 		Function: llm.ToolFunctionDef{
 			Name:        reasoningEffortToolName,
-			Description: "Set reasoning effort for subsequent turns in this task. Use low/minimal for rote reads, small edits, formatting, or command execution; use high for ambiguous design, debugging, or complex analysis.",
+			Description: "Set reasoning effort for subsequent turns in this task. Use none/minimal for direct command execution, low or medium for ordinary work, high for debugging, and xhigh for difficult planning or final review.",
 			Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
     "effort": {
       "type": "string",
-      "enum": ["minimal", "low", "medium", "high"],
+      "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
       "description": "Reasoning depth for subsequent model turns."
     }
   },
@@ -165,7 +265,7 @@ func applyReasoningEffortTool(current *string, changes *int, raw json.RawMessage
 	}
 	effort := normaliseReasoningEffort(args.Effort)
 	if effort == "" {
-		return `{"ok":false,"error":"effort must be one of minimal, low, medium, high"}`, false
+		return `{"ok":false,"error":"effort must be one of none, minimal, low, medium, high, xhigh"}`, false
 	}
 	*current = effort
 	*changes++

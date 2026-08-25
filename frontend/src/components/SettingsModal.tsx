@@ -36,6 +36,8 @@ import {
   type AgentDefinition,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
+import { isQwen38Profile, QwenProfileGuide } from './QwenProfileGuide'
+import { primaryScopeHostname, replacePrimaryScopeTarget } from './scopeTargets'
 import './SettingsModal.css'
 
 interface Props {
@@ -160,6 +162,10 @@ function isCloudProvider(providerName: string, profilesFile: ProfilesFile): bool
   const provider = profilesFile.providers?.[providerName]
   const baseURL = String(provider?.base_url || '').toLowerCase()
   return normalizedName === 'openrouter' || baseURL.includes('openrouter.ai')
+}
+
+function isLlamaCppProvider(providerName: string, profilesFile: ProfilesFile): boolean {
+  return String(profilesFile.providers?.[providerName]?.backend || '').toLowerCase() === 'llamacpp'
 }
 
 function recommendedCloudContext(model: ModelMetadata): number {
@@ -402,6 +408,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       workspace_dir: settings.context.workspace_dir || '',
       target: lab.target || '',
       hostname: lab.hostname || '',
+      scope_targets: lab.scope_targets || [],
       vpn_interface: lab.vpn_interface || '',
       latest_artifact: lab.latest_artifact || '',
       ops_profile: lab.ops_profile || 'pentesting',
@@ -434,6 +441,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         name: profile.name || profile.id,
         target: profile.target || '',
         hostname: profile.hostname || '',
+        scope_targets: profile.scope_targets || [],
         vpn_interface: profile.vpn_interface || '',
         latest_artifact: profile.latest_artifact || '',
         ops_profile: profile.ops_profile || 'pentesting',
@@ -453,6 +461,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       workspace_dir: settings.context.workspace_dir || '',
       target: '',
       hostname: '',
+      scope_targets: [],
       vpn_interface: settings.context.lab.vpn_interface || '',
       latest_artifact: '',
       ops_profile: 'pentesting',
@@ -468,6 +477,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         name: profile.name,
         target: '',
         hostname: '',
+        scope_targets: [],
         vpn_interface: profile.vpn_interface,
         latest_artifact: '',
         ops_profile: 'pentesting',
@@ -542,6 +552,28 @@ export function SettingsModal({ onClose, onSaved }: Props) {
         profiles: {
           ...prev.profiles,
           [name]: nextProfile,
+        },
+      }
+    })
+    markDirty()
+  }
+
+  const updateKVCachePrecision = (name: string, precision: string) => {
+    setProfilesFile(prev => {
+      if (!prev) return prev
+      const current = prev.profiles[name]
+      const custom = precision === 'custom'
+      const automatic = precision === 'auto'
+      return {
+        ...prev,
+        profiles: {
+          ...prev.profiles,
+          [name]: {
+            ...current,
+            kv_cache_precision: precision,
+            kv_cache_type_k: custom ? (current.kv_cache_type_k || 'f16') : automatic ? '' : precision,
+            kv_cache_type_v: custom ? (current.kv_cache_type_v || 'f16') : automatic ? '' : precision,
+          },
         },
       }
     })
@@ -647,6 +679,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       thinking: false,
       preserve_thinking: false,
       mmproj: '',
+      kv_cache_precision: 'f16',
+      kv_cache_type_k: 'f16',
+      kv_cache_type_v: 'f16',
       thinking_general: { temperature: 0.6, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 8192, seed: -1 },
       thinking_coding: { temperature: 0.6, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 8192, seed: -1 },
       nothinking: { temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0, presence_penalty: 0, repeat_penalty: 1.05, max_tokens: 4096, seed: -1 },
@@ -816,6 +851,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       thinking: false,
       preserve_thinking: false,
       mmproj: '',
+      kv_cache_precision: 'f16',
+      kv_cache_type_k: 'f16',
+      kv_cache_type_v: 'f16',
       thinking_general: { ...params },
       thinking_coding: { ...params },
       nothinking: { ...params },
@@ -1127,6 +1165,16 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       <button onClick={deleteProfile} disabled={profileNames.length <= 1} title="Delete this profile">Delete</button>
                     </div>
 
+                    <QwenProfileGuide
+                      profile={profile}
+                      active={settings.active_profile === selectedProfile}
+                      reasoningEffort={settings.agents.reasoning_effort || 'auto'}
+                      benchmarking={benchmarking}
+                      onReasoningEffortChange={effort => updateSettings('agents', { ...settings.agents, reasoning_effort: effort })}
+                      onApplyOfficial={() => void handleApplyModelTemplate()}
+                      onBenchmark={() => void handleBenchmarkProfile()}
+                    />
+
                     {benchmarkResult && (
                       <div className={`benchmark-card benchmark-${benchmarkResult.status}`}>
                         <div className="benchmark-card-head">
@@ -1231,6 +1279,54 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       )}
                     </Field>
 
+                    {isLlamaCppProvider(profile.provider, profilesFile) && (
+                      <>
+                        <h4>KV cache</h4>
+                        <Field label="Precision">
+                          <select
+                            value={profile.kv_cache_precision || 'f16'}
+                            onChange={e => updateKVCachePrecision(selectedProfile, e.target.value)}
+                          >
+                            <option value="f16">FP16 — recommended quality / compatibility</option>
+                            <option value="bf16">BF16 — quality equivalent, backend dependent</option>
+                            <option value="q8_0">Q8_0 — more context / VRAM headroom</option>
+                            <option value="q4_0">Q4_0 — maximum headroom</option>
+                            <option value="auto">Automatic — InferenceBridge default</option>
+                            <option value="custom">Custom K / V types</option>
+                          </select>
+                          <span className="field-hint">
+                            This is applied when InferenceBridge loads the model and is recorded in the runtime lock.
+                          </span>
+                        </Field>
+                        {profile.kv_cache_precision === 'custom' && (
+                          <>
+                            <Field label="Key cache type">
+                              <select
+                                value={profile.kv_cache_type_k || 'f16'}
+                                onChange={e => updateProfileField(selectedProfile, 'kv_cache_type_k', e.target.value)}
+                              >
+                                <option value="f16">FP16</option>
+                                <option value="bf16">BF16</option>
+                                <option value="q8_0">Q8_0</option>
+                                <option value="q4_0">Q4_0</option>
+                              </select>
+                            </Field>
+                            <Field label="Value cache type">
+                              <select
+                                value={profile.kv_cache_type_v || 'f16'}
+                                onChange={e => updateProfileField(selectedProfile, 'kv_cache_type_v', e.target.value)}
+                              >
+                                <option value="f16">FP16</option>
+                                <option value="bf16">BF16</option>
+                                <option value="q8_0">Q8_0</option>
+                                <option value="q4_0">Q4_0</option>
+                              </select>
+                            </Field>
+                          </>
+                        )}
+                      </>
+                    )}
+
                     <div className={`thinking-card ${profile.thinking ? 'thinking-on' : 'thinking-off'}`}>
                       <div className="thinking-card-head">
                         <div>
@@ -1238,7 +1334,9 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                           <div className="thinking-subtitle">
                             {profile.thinking
                               ? 'This profile uses reasoning-oriented parameters.'
-                              : 'This profile uses the faster no-thinking parameter set.'}
+                              : isQwen38Profile(profile)
+                                ? 'This profile answers directly while retaining earlier reasoning when enabled.'
+                                : 'This profile uses the faster no-thinking parameter set.'}
                           </div>
                         </div>
                         <div className="thinking-toggle-group">
@@ -1263,11 +1361,12 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                           <input
                             type="checkbox"
                             checked={profile.preserve_thinking}
-                            disabled={!profile.thinking}
+                            disabled={!profile.thinking && !isQwen38Profile(profile)}
                             onChange={e => updateProfileField(selectedProfile, 'preserve_thinking', e.target.checked)}
                           />
-                          Show preserved thinking in chat
+                          Keep reasoning context between turns
                         </label>
+                        <span className="field-hint">This improves Qwen3.8 multi-step continuity. Visible thinking is controlled separately by the interface setting.</span>
                       </div>
                     </div>
 
@@ -1313,7 +1412,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                         disabled={!profile.spec_type}
                         onChange={e => updateProfileField(selectedProfile, 'spec_draft_n_max', parseInt(e.target.value, 10) || 0)}
                       />
-                      <span className="field-hint">0 = server default · 2 is safe for Qwen3.6</span>
+                      <span className="field-hint">0 = server default · n=2 is the conservative Qwen3.8 starting point and still requires a live comparison against Off.</span>
                     </Field>
                   </div>
                 )}
@@ -1724,10 +1823,13 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   <input value={settings.context.lab.id || ''} onChange={e => updateLab({ id: e.target.value })} placeholder="connected" />
                 </Field>
                 <Field label="Target IP / URL">
-                  <input value={settings.context.lab.target || ''} onChange={e => updateLab({ target: e.target.value })} placeholder="10.129.x.x or https://host" />
+                  <input value={settings.context.lab.target || ''} onChange={e => {
+                    const scopeTargets = replacePrimaryScopeTarget(settings.context.lab.scope_targets, e.target.value)
+                    updateLab({ target: e.target.value, scope_targets: scopeTargets, hostname: primaryScopeHostname(scopeTargets) })
+                  }} placeholder="Primary target (manage full scope from Home)" />
                 </Field>
                 <Field label="Hostname">
-                  <input value={settings.context.lab.hostname || ''} onChange={e => updateLab({ hostname: e.target.value })} placeholder="boxname.htb" />
+                  <input value={settings.context.lab.hostname || ''} readOnly title="Derived from the full Authorised Scope editor on Home" placeholder="Derived from authorised scope" />
                 </Field>
                 <Field label="VPN/interface">
                   <input value={settings.context.lab.vpn_interface || ''} onChange={e => updateLab({ vpn_interface: e.target.value })} placeholder="Ethernet 3 / tun0 / 10.10.x.x" />

@@ -668,12 +668,50 @@ export function AgentPanel({
                 disabled={!settings}
               >
                 <option value="auto">Auto</option>
+                <option value="none">None / direct</option>
                 <option value="minimal">Minimal</option>
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
+                <option value="xhigh">XHigh</option>
               </select>
             </label>
+            <div className="agent-setting-block">
+              <div className="agent-setting-block-head">
+                <div>
+                  <div className="agent-setting-name">Thinking</div>
+                  <div className="agent-setting-desc">Model thinking for the next Chat run</div>
+                </div>
+                <span className={`agent-thinking-state state-${settings?.agents.thinking_mode || 'auto'}`}>
+                  {(settings?.agents.thinking_mode || 'auto') === 'auto' ? 'Profile' : (settings?.agents.thinking_mode || 'auto').toUpperCase()}
+                </span>
+              </div>
+              <div className="agent-thinking-switch" role="group" aria-label="Thinking mode">
+                {(['auto', 'on', 'off'] as const).map(mode => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={(settings?.agents.thinking_mode || 'auto') === mode ? 'active' : ''}
+                    onClick={() => settings && void updateAgents({ ...settings.agents, thinking_mode: mode })}
+                    disabled={!settings || streaming || saving}
+                    title={mode === 'auto'
+                      ? 'Use the selected profile and Mauler adaptive policy'
+                      : mode === 'on'
+                        ? 'Keep thinking enabled on every turn for supported models, especially Qwen'
+                        : 'Use the direct/no-thinking sampler and do not preserve model thinking'}
+                  >
+                    {mode === 'auto' ? 'Profile' : mode === 'on' ? 'On' : 'Off'}
+                  </button>
+                ))}
+              </div>
+              <div className="agent-thinking-help">
+                {(settings?.agents.thinking_mode || 'auto') === 'on'
+                  ? 'Forced on for supported Qwen/Gemma templates; effort controls depth.'
+                  : (settings?.agents.thinking_mode || 'auto') === 'off'
+                    ? 'Direct mode: no new or preserved thinking is sent.'
+                    : 'Uses the profile setting and Mauler\'s adaptive tool-loop fallback.'}
+              </div>
+            </div>
 
             <div className="agent-section-head">Access preset</div>
             <div className="agent-preset-group">

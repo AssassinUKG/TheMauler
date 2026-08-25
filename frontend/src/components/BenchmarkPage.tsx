@@ -1193,7 +1193,17 @@ function scenarioPurpose(name: string) {
 function profileChanges(current?: ProfilesFile['profiles'][string], recommended?: ProfilesFile['profiles'][string]) {
   if (!recommended) return []
   const changes: string[] = []
-  const fields: Array<keyof ProfilesFile['profiles'][string]> = ['model_id', 'ctx_tokens', 'thinking', 'preserve_thinking', 'spec_type', 'spec_draft_n_max']
+  const fields: Array<keyof ProfilesFile['profiles'][string]> = [
+    'model_id',
+    'ctx_tokens',
+    'thinking',
+    'preserve_thinking',
+    'kv_cache_precision',
+    'kv_cache_type_k',
+    'kv_cache_type_v',
+    'spec_type',
+    'spec_draft_n_max',
+  ]
   for (const field of fields) {
     if (current?.[field] !== recommended[field]) changes.push(`${String(field)}: ${String(current?.[field] ?? 'n/a')} -> ${String(recommended[field] ?? 'n/a')}`)
   }

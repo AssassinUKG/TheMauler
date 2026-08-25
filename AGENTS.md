@@ -84,7 +84,7 @@ Settings/profile access uses a profile map, not a slice:
 ```go
 cfg, _ := settings.Load()
 profiles, _ := settings.LoadProfiles()
-profile := profiles.Profiles["qwen3.6-think"]
+profile := profiles.Profiles["qwen3.8-agent-stability"]
 cfg.Context.CompactionAt
 cfg.Context.MAULERMDPath
 ```

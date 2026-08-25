@@ -241,6 +241,8 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
   const [streamBuffer, setStreamBuffer] = useState('')
+  const answerCheckpointRef = useRef('')
+  const streamErrorHandledRef = useRef(false)
   const [confirm, setConfirm] = useState<ConfirmPayload | null>(null)
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null)
   const [showSaveSession, setShowSaveSession] = useState(false)
@@ -352,11 +354,12 @@ export default function App() {
         setRunState({ state: 'starting', detail: 'Preparing request' })
         setStreamBuffer('')
         setThinkingBuffer('')
+        answerCheckpointRef.current = ''
+        streamErrorHandledRef.current = false
         setShowTerminal(true)
-        setTerminalHeight(prev => {
-          const focusHeight = Math.min(520, Math.max(340, Math.round(window.innerHeight * 0.42)))
-          return Math.max(prev, focusHeight)
-        })
+		// Opening live activity must not discard the height the user chose with
+		// the visible terminal splitter. The previous 42%-of-window expansion
+		// produced a huge empty terminal for short commands.
         pendingThinkingRef.current = ''
       }),
       EventsOn('mauler:budget_updated', () => {
@@ -378,25 +381,54 @@ export default function App() {
       EventsOn('mauler:stream_replace', (...args: unknown[]) => {
         setStreamBuffer(args[0] as string)
       }),
+      EventsOn('mauler:answer_checkpoint', (...args: unknown[]) => {
+        const candidate = cleanAssistantTranscriptText(String(args[0] || ''))
+        if (candidate.length > answerCheckpointRef.current.length) {
+          answerCheckpointRef.current = candidate
+        }
+      }),
       EventsOn('mauler:tool_protocol_repair', () => {
         setStreamBuffer('')
       }),
-      EventsOn('mauler:stream_done', () => {
+      EventsOn('mauler:stream_done', (...args: unknown[]) => {
         setStreaming(false)
         setActiveRunProfile('')
         setToolCountdown(null)
+        if (streamErrorHandledRef.current) {
+          streamErrorHandledRef.current = false
+          answerCheckpointRef.current = ''
+          setStreamBuffer('')
+          return
+        }
+        const terminalAnswer = cleanAssistantTranscriptText(String(args[0] || ''))
+        const terminalStatus = String(args[1] || 'done')
+        const stopReason = String(args[2] || '')
         setStreamBuffer(prev => {
-          const visible = cleanAssistantTranscriptText(prev)
+          const current = cleanAssistantTranscriptText(prev)
+          const checkpoint = cleanAssistantTranscriptText(answerCheckpointRef.current)
+          const visible = terminalStatus === 'done'
+            ? (terminalAnswer || current || checkpoint)
+            : (checkpoint || terminalAnswer || current)
+          answerCheckpointRef.current = ''
           if (visible) {
             const thinking = pendingThinkingRef.current || undefined
             pendingThinkingRef.current = ''
-            setMessages(m => [...m, {
-              id: crypto.randomUUID(),
-              role: 'assistant',
-              content: visible,
-              thinking,
-              timestamp: Date.now(),
-            }])
+            setMessages(m => [
+              ...m,
+              {
+                id: crypto.randomUUID(),
+                role: 'assistant',
+                content: visible,
+                thinking,
+                timestamp: Date.now(),
+              },
+              ...(terminalStatus !== 'done' && stopReason ? [{
+                id: crypto.randomUUID(),
+                role: 'system' as const,
+                content: `The answer above was preserved, but run finalisation stopped: ${stopReason}`,
+                timestamp: Date.now(),
+              }] : []),
+            ])
           } else {
             pendingThinkingRef.current = ''
           }
@@ -420,17 +452,37 @@ export default function App() {
       }),
       EventsOn('mauler:stream_error', (...args: unknown[]) => {
         const err = args[0] as string
+        streamErrorHandledRef.current = true
         setStreaming(false)
         setActiveRunProfile('')
         setToolCountdown(null)
-        setStreamBuffer('')
         setRunState({ state: 'failed', detail: err })
-        setMessages(m => [...m, {
-          id: crypto.randomUUID(),
-          role: 'system',
-          content: `Error: ${err}`,
-          timestamp: Date.now(),
-        }])
+        setStreamBuffer(prev => {
+          const checkpoint = cleanAssistantTranscriptText(answerCheckpointRef.current)
+          const visible = checkpoint || cleanAssistantTranscriptText(prev)
+          answerCheckpointRef.current = ''
+          const thinking = pendingThinkingRef.current || undefined
+          pendingThinkingRef.current = ''
+          setMessages(m => [
+            ...m,
+            ...(visible ? [{
+              id: crypto.randomUUID(),
+              role: 'assistant' as const,
+              content: visible,
+              thinking,
+              timestamp: Date.now(),
+            }] : []),
+            {
+              id: crypto.randomUUID(),
+              role: 'system' as const,
+              content: visible
+                ? `The answer above was preserved, but the follow-up run finalisation failed: ${err}`
+                : `Error: ${err}`,
+              timestamp: Date.now(),
+            },
+          ])
+          return ''
+        })
         const pending = pendingInterruptRef.current
         if (pending) {
           pendingInterruptRef.current = null
@@ -494,6 +546,26 @@ export default function App() {
           setTaskRunVersion(v => v + 1)
           refreshTodos()
         }
+      }),
+      EventsOn('mauler:image_progress', (...args: unknown[]) => {
+        const progress = args[0] as {
+          tool_call_id?: string
+          job_id?: string
+          status?: string
+          message?: string
+          progress?: number
+          current_step?: number
+          total_steps?: number
+        }
+        if (!progress?.tool_call_id) return
+        const percent = Math.max(0, Math.min(100, Math.round((progress.progress ?? 0) * 100)))
+        const steps = progress.total_steps
+          ? ` · step ${progress.current_step ?? 0}/${progress.total_steps}`
+          : ''
+        const detail = `${progress.message || progress.status || 'Generating image'} · ${percent}%${steps}`
+        setActivity(items => items.map(item => item.id === progress.tool_call_id
+          ? { ...item, result: detail }
+          : item))
       }),
       EventsOn('mauler:job_update', (...args: unknown[]) => {
         const job = args[0] as BackgroundJob
@@ -1077,6 +1149,7 @@ export default function App() {
                 settingsVersion={statsVersion}
                 agentDefinitions={agentDefinitions}
                 agentSelection={agentSelection}
+                agentMode={agentMode}
                 draftRequest={chatDraftRequest}
                 onSubmitMessage={handleSubmitMessage}
                 onRunProfileOverrideChange={setRunProfileOverride}

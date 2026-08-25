@@ -287,6 +287,7 @@ func TestAgentEvalSmokeWithMockClient(t *testing.T) {
 	cfg.Agents.MaxToolCalls = 8
 	cfg.Agents.MaxRunSeconds = 0
 	cfg.Agents.ReviewLoop.VerifyGate = false
+	cfg.Agents.ReviewLoop.CompletionRails = false
 	cfg.Context.CompactionAt = 0.99
 	profile := settings.Profile{
 		Name:      "mock",
@@ -303,18 +304,20 @@ func TestAgentEvalSmokeWithMockClient(t *testing.T) {
 
 	evalApp := &App{cfg: &cfg, profiles: &profiles}
 	reviewerPass := false
+	completionBlocking := false
 	report := evalApp.runAgentEvalScenarios("mock", []AgentEvalScenario{{
 		Name:   "edit-then-verify",
 		Prompt: "Fix the compile error in main.go.",
 		Workspace: map[string]string{
 			"main.go": "package main\n\nfunc broken() string {\n\treturn 123\n}\n",
 		},
-		Mode:             "Fixer",
-		MaxToolCalls:     8,
-		ExpectStatus:     "done",
-		ExpectFiles:      map[string]string{"main.go": "return \"123\""},
-		MaxAutoContinues: 1,
-		ReviewerPass:     &reviewerPass,
+		Mode:               "Fixer",
+		MaxToolCalls:       8,
+		ExpectStatus:       "done",
+		ExpectFiles:        map[string]string{"main.go": "return \"123\""},
+		MaxAutoContinues:   1,
+		CompletionBlocking: &completionBlocking,
+		ReviewerPass:       &reviewerPass,
 	}})
 
 	if report.Total != 1 || report.PassCount != 1 {

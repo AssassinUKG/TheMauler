@@ -26,6 +26,9 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	if cfg.Agents.NoThinkAfterToolCalls != 2 {
 		t.Fatalf("no_think_after_tool_calls = %d, want 2", cfg.Agents.NoThinkAfterToolCalls)
 	}
+	if cfg.Agents.ThinkingMode != "auto" {
+		t.Fatalf("thinking_mode = %q, want auto", cfg.Agents.ThinkingMode)
+	}
 	if cfg.Memory.MaxInject == 0 || cfg.Memory.MaxEntryChars == 0 {
 		t.Fatalf("memory numeric defaults were not backfilled: %#v", cfg.Memory)
 	}
@@ -46,6 +49,23 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	}
 	if cfg.Tools.ActiveToolset != "run-lean" || len(cfg.Tools.Toolsets["unrestricted"]) == 0 || len(cfg.Tools.Toolsets["explore"]) == 0 {
 		t.Fatalf("toolset defaults were not backfilled: active=%q toolsets=%#v", cfg.Tools.ActiveToolset, cfg.Tools.Toolsets)
+	}
+}
+
+func TestNormaliseSettingsPreservesThinkingMode(t *testing.T) {
+	for _, mode := range []string{"auto", "on", "off"} {
+		cfg := DefaultSettings()
+		cfg.Agents.ThinkingMode = mode
+		normaliseSettings(&cfg)
+		if cfg.Agents.ThinkingMode != mode {
+			t.Fatalf("thinking mode %q normalized to %q", mode, cfg.Agents.ThinkingMode)
+		}
+	}
+	cfg := DefaultSettings()
+	cfg.Agents.ThinkingMode = "invalid"
+	normaliseSettings(&cfg)
+	if cfg.Agents.ThinkingMode != "auto" {
+		t.Fatalf("invalid thinking mode = %q, want auto", cfg.Agents.ThinkingMode)
 	}
 }
 
@@ -347,6 +367,14 @@ func TestDefaultProfilesIncludeModernLocalProviderPresets(t *testing.T) {
 	}
 	if pf.Providers["openrouter"].APIKeyEnv != "OPENROUTER_API_KEY" {
 		t.Fatalf("openrouter provider = %#v", pf.Providers["openrouter"])
+	}
+
+	qwen38 := pf.Profiles["qwen3.8-agent-stability"]
+	if qwen38.Provider != "inference-bridge" || qwen38.ModelID != "Qwen3.8-27B-Q4_K_M.gguf" || qwen38.CtxTokens != 35000 || !qwen38.Thinking || !qwen38.PreserveThink {
+		t.Fatalf("Qwen3.8 default = %#v, want the role-aware 35K agent profile", qwen38)
+	}
+	if qwen38.NoThink.Temperature != 0.7 || qwen38.NoThink.TopP != 0.8 || qwen38.NoThink.PresencePenalty != 1.5 || qwen38.NoThink.RepeatPenalty != 1.0 {
+		t.Fatalf("Qwen3.8 no-thinking sampling = %#v", qwen38.NoThink)
 	}
 
 	qwen := pf.Profiles["qwen3.6-think"]

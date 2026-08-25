@@ -184,7 +184,7 @@ func (h *History) MicrocompactThinking(keepRecentAssistant int) MicrocompactStat
 	}
 	assistantIndexes := make([]int, 0)
 	for i, msg := range h.messages {
-		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) == 0 && hasThinkingTrace(messageContentText(msg)) {
+		if msg.Role == llm.RoleAssistant && (strings.TrimSpace(msg.ReasoningContent) != "" || hasThinkingTrace(messageContentText(msg))) {
 			assistantIndexes = append(assistantIndexes, i)
 		}
 	}
@@ -195,12 +195,20 @@ func (h *History) MicrocompactThinking(keepRecentAssistant int) MicrocompactStat
 	}
 	for _, idx := range assistantIndexes[:compactUntil] {
 		msg := &h.messages[idx]
+		compacted := false
+		if strings.TrimSpace(msg.ReasoningContent) != "" {
+			msg.ReasoningContent = ""
+			compacted = true
+		}
 		if text, ok := msg.Content.(string); ok {
 			updated := stripThinkingTrace(text)
 			if updated != text {
 				msg.Content = updated
-				stats.Compacted++
+				compacted = true
 			}
+		}
+		if compacted {
+			stats.Compacted++
 		}
 	}
 	if stats.Compacted > 0 {
@@ -266,6 +274,9 @@ func (h *History) recount() {
 // estimateTokens gives a rough token count (~4 chars per token).
 func estimateTokens(m llm.Message) int {
 	n := len(m.Role)/4 + len(m.Name)/4 + len(m.ToolCallID)/4 + 4
+	if m.ReasoningContent != "" {
+		n += len(m.ReasoningContent)/4 + 4
+	}
 	switch c := m.Content.(type) {
 	case string:
 		n += len(c)/4 + 4

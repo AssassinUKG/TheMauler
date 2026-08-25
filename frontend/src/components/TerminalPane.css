@@ -6,7 +6,7 @@
   height: 100%;
   background: var(--c-terminal);
   font-family: 'Cascadia Code', 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
-  font-size: 12.5px;
+  font-size: 13px;
   min-height: 0;
 }
 
@@ -190,11 +190,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 3px 10px;
+  padding: 4px 10px;
   background: var(--bg2);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  height: 28px;
+  min-height: 32px;
 }
 
 .terminal-title {
@@ -260,7 +260,21 @@
 
 .terminal-header-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 5px;
+}
+
+.terminal-font-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.terminal-font-btn {
+  min-width: 30px;
+  padding-inline: 6px;
+  font-weight: 800;
 }
 
 .terminal-btn {
@@ -301,9 +315,9 @@
 .terminal-xterm {
   flex: 1;
   min-height: 0;
-  padding: 4px 6px 2px;
+  padding: 8px 12px 5px;
   overflow: hidden;
-  background: #0b0e14;
+  background: #080c12;
 }
 /* Do NOT force .xterm / .xterm-viewport to height:100% — that stretches xterm's
    viewport past its actual row grid, and the extra strip at the bottom is where
@@ -373,7 +387,7 @@
   width: var(--ai-commands-width, 420px);
   flex: 0 0 var(--ai-commands-width, 420px);
   flex-direction: column;
-  min-width: 300px;
+  min-width: 340px;
   max-width: calc(100% - 320px);
   min-height: 0;
   background: var(--c-pane);
@@ -502,11 +516,14 @@ html.terminal-ai-resizing-row * {
 
 .terminal-ai-command summary {
   display: grid;
-  grid-template-columns: 62px minmax(66px, .35fr) minmax(0, 1fr) max-content 58px;
+  grid-template-areas:
+    "status tool repeat time"
+    "command command command command";
+  grid-template-columns: 62px minmax(0, 1fr) max-content 58px;
   align-items: center;
   gap: 7px;
-  min-height: 42px;
-  padding: 7px 9px;
+  min-height: 58px;
+  padding: 8px 10px;
   cursor: pointer;
   background: var(--c-panel);
 }
@@ -516,6 +533,7 @@ html.terminal-ai-resizing-row * {
 }
 
 .terminal-ai-status {
+  grid-area: status;
   color: var(--text-dim);
   font-size: 10px;
   font-weight: 800;
@@ -542,6 +560,7 @@ html.terminal-ai-resizing-row * {
 }
 
 .terminal-ai-command summary strong {
+  grid-area: tool;
   overflow: hidden;
   color: var(--text-bright);
   font-size: 11px;
@@ -550,21 +569,28 @@ html.terminal-ai-resizing-row * {
 }
 
 .terminal-ai-command summary code {
+  grid-area: command;
+  display: -webkit-box;
   overflow: hidden;
   color: var(--text);
   font-family: inherit;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .terminal-ai-command summary time {
+  grid-area: time;
   color: var(--text-dim);
   font-size: 10px;
   text-align: right;
 }
 
 .terminal-ai-repeat {
+  grid-area: repeat;
   min-width: 30px;
   padding: 3px 7px;
   border: 1px solid rgba(250, 204, 21, .36);
@@ -613,9 +639,9 @@ html.terminal-ai-resizing-row * {
   border-top: 1px solid var(--border);
   color: var(--text);
   font-family: inherit;
-  font-size: 11px;
-  line-height: 1.45;
-  background: var(--bg1);
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: #080c12;
   white-space: pre-wrap;
   word-break: break-word;
 }

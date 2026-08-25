@@ -80,6 +80,30 @@ func TestBuildRunMilestoneMemorySkipsEmptyRuns(t *testing.T) {
 	}
 }
 
+func TestBuildRunMilestoneMemorySkipsUserStoppedWithoutMilestones(t *testing.T) {
+	run := startTaskRun("Can you access the attached Swagger file?", "Auto", "profile", "model")
+	run.stop("user_stopped", "The user stopped the current run.")
+	run.finish("stopped", "Run stopped")
+
+	if mem := buildRunMilestoneMemory(&run); mem != nil {
+		t.Fatalf("expected no memory for a user-stopped run without durable milestones, got %#v", mem)
+	}
+}
+
+func TestAutoInjectionRejectsOldLowSignalStoppedRunMemory(t *testing.T) {
+	entry := MemoryEntry{
+		ID: "runmem-old", Title: "Run memory", Source: "previous_run", Kind: "fact",
+		Content: "Prompt: access swagger.json\nStatus: stopped\nStop: user_stopped\nNext: The user stopped the current run.",
+	}
+	if autoInjectMemoryAllowed(entry, "ops", []string{"swagger"}, "read swagger.json") {
+		t.Fatal("old stopped-run narration must not be auto-injected")
+	}
+	entry.Pinned = true
+	if !autoInjectMemoryAllowed(entry, "ops", []string{"swagger"}, "read swagger.json") {
+		t.Fatal("an explicitly pinned memory must remain eligible")
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

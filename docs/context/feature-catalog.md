@@ -13,6 +13,10 @@ remain authoritative for implementation detail.
   collapsed rails and narrow-layout behavior.
 - Terminal and Stream bottom tabs; shared-terminal AI commands are visible without duplicating full
   scrollback/tool results.
+- Native multi-file Chat attachment picker plus Explorer clipboard-path and drag/drop-path handling.
+  Exact path attachments stay on disk for bounded full-file reading; inline browser-only text is a
+  clearly signalled bounded fallback. Attachment content is labelled untrusted data and cannot
+  override the user's request, expand scope, authorize actions, or request secret disclosure.
 
 ## Agent operation
 
@@ -28,7 +32,9 @@ remain authoritative for implementation detail.
 - Compact file, shell, terminal, HTTP, glob, grep, session, todo, skill, task, web/fetch/browser,
   memory, evidence, SQLite, listener, and reasoning-support tools.
 - Platform-aware Windows/WSL/Linux paths and shell selection; visible shared terminal and isolated
-  execution modes.
+  execution modes. Per-call backend selection routes local Windows process/app/service/GPU facts to
+  native PowerShell without disturbing the WSL/Kali target terminal, and preserves PowerShell `$`
+  variables by removing redundant cross-shell wrappers.
 - Search-provider fallback, readable fetch, GitHub-aware fetching, source ranking, web/browser budgets,
   and browser snapshots/interactions/screenshots.
 - Text PDF extraction with page/output bounds; scanned-PDF OCR and the broader extractor registry are
@@ -43,7 +49,7 @@ remain authoritative for implementation detail.
   React.
 - OpenRouter catalogue context/output limits seed new profiles; task-level cloud selection resets to
   the local profile after use.
-- Local/Hugging Face Qwen3.6 and Gemma4 ids receive code-owned family/variant templates for context,
+- Local/Hugging Face Qwen3.8, Qwen3.6, Qwen3.5, and Gemma4 ids receive code-owned family/variant templates for context,
   sampling, adapter, tool protocol, and embedded-GGUF Jinja handling; Profiles can apply them
   explicitly and unknown models remain benchmark-required.
 - Model Lab uses one excluded warm-up plus three measured text runs, keeps tool/loop latency out of
@@ -51,6 +57,15 @@ remain authoritative for implementation detail.
   end-to-end fallbacks. Matrix rows can explicitly create and activate a matching local Chat profile.
 - Generation settings include end-to-end `repeat_penalty` transport for local OpenAI-compatible
   providers.
+- Qwen3.8 profiles support normalized `none` through `xhigh` reasoning effort, preserved thinking,
+  official thinking/no-thinking samplers, bounded tool-call fallback, and blocking completion evidence.
+- Chat has a request-effective Thinking selector in Inspector > Agent > Behaviour: Profile follows
+  profile/adaptive policy, On forces thinking for supported templates across the run, and Off forces
+  direct generation with no preserved reasoning. Reasoning Effort remains the depth control rather
+  than a second hidden on/off switch.
+- Profiles shows a Qwen3.8-only guided setup card with per-setting health, one-click template apply,
+  reasoning-depth selection, and direct benchmarking. Local preserved reasoning uses the separate
+  `reasoning_content` field and is removed from older turns by bounded micro-compaction.
 - Settings modal covers general, providers, profiles, agents, environment, tools, Telegram, context,
   storage, UI, image, and associated media controls.
 
@@ -78,10 +93,19 @@ remain authoritative for implementation detail.
 
 - Desktop Fast Chat provides a compact active-model conversation without project documents, memory,
   tools, control-plane state, planning, or review; Project Agent remains the full work lane.
-- Telegram bot configuration, long polling, allow-list/mentions, separate side chat, quick controls,
-  queued explicit runs, progress cadence, persistent channel queue, full-page conversation/ledger UI,
-  and redaction.
+- Telegram bot configuration, long polling, allow-list/mentions, separate conversational side chat,
+  natural-language actionable-task routing without requiring `/cmd`, optional slash overrides, quick
+  controls, safe queueing, progress cadence, persistent channel queue, full-page conversation/ledger
+  UI, and redaction. Completed Telegram work is fed back into that chat’s bounded history; direct
+  result follow-ups use the exact latest result. Formatted final cards support multi-message answers
+  without the old result truncation and never present raw tool protocol as successful output. Natural
+  date-range requests are live-work signals; “route it” consumes a remembered pending task rather than
+  producing a model-only promise. A code-owned heartbeat edits the same progress card while a run is
+  quiet, using the latest real run state and elapsed time.
 - Microphone/transcription and outgoing Kokoro/Piper TTS, including Telegram voice-note conversion.
+  Desktop Talk uses the normal Project Agent path. Actionable typed or voice Telegram requests,
+  including live time/date and changing public-information checks, enter the same queued project-work
+  path with the selected agent tools; ordinary Telegram conversation remains isolated side chat.
 
 ## Security and engagements
 
@@ -89,8 +113,14 @@ remain authoritative for implementation detail.
 - Code-owned tool risk labels, confirmation policy, capability/toolset filtering, and scope boundaries.
 - Native sealed task contract/control state machine with plan-gated mutations and evidence-gated
   completion.
+- Intent-safe read-only routing distinguishes HTTP method names from workspace mutation verbs and
+  exposes Engagement Grid state only when the task explicitly requests that workflow.
 - Engagement Grid foundation, target/scope/evidence bindings, pack library, pentesting reporting
   profile, explicit HTB/CTF profile, and Bug Bounty manual-assessment planner.
+- UI-first multi-target client projects with ordered IP/CIDR/hostname/URL scope, paste-list import,
+  primary-target compatibility, External/Internal labels, per-row restrictions/notes, explicit
+  exclusions, deny-before-allow matching, legacy comma-list migration, and complete immutable Grid
+  scope locking.
 
 ## Planned, not complete
 

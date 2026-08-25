@@ -198,6 +198,83 @@
   padding: 8px 9px;
 }
 
+.agent-setting-block {
+  display: grid;
+  gap: 7px;
+  padding: 9px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.agent-setting-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-thinking-state {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.agent-thinking-state.state-on {
+  border-color: rgba(34, 197, 94, .55);
+  color: #72e39a;
+  background: rgba(34, 197, 94, .09);
+}
+
+.agent-thinking-state.state-off {
+  border-color: rgba(248, 113, 113, .45);
+  color: #fca5a5;
+  background: rgba(248, 113, 113, .07);
+}
+
+.agent-thinking-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0c1110;
+}
+
+.agent-thinking-switch button {
+  min-width: 0;
+  height: 27px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-thinking-switch button.active {
+  border-color: rgba(34, 197, 94, .55);
+  background: rgba(34, 197, 94, .14);
+  color: var(--text-bright);
+}
+
+.agent-thinking-switch button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.agent-thinking-help {
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 .agent-memory-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

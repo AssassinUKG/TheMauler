@@ -19,22 +19,25 @@ import (
 // OpenAICompat implements llm.Client against any OpenAI-compatible /v1 API.
 // It is the shared base used by both the llama.cpp and LM Studio backends.
 type OpenAICompat struct {
-	clientName     string
-	baseURL        string
-	modelID        string
-	contextTokens  int
-	apiKey         string
-	thinkingKwargs bool // send chat_template_kwargs (llama.cpp only)
-	loadKwargsJSON string
-	specType       string
-	specDraftNMax  int
-	specDraftModel string
-	httpClient     *http.Client
+	clientName       string
+	baseURL          string
+	modelID          string
+	contextTokens    int
+	apiKey           string
+	thinkingKwargs   bool // send chat_template_kwargs (llama.cpp only)
+	loadKwargsJSON   string
+	kvCachePrecision string
+	kvCacheTypeK     string
+	kvCacheTypeV     string
+	specType         string
+	specDraftNMax    int
+	specDraftModel   string
+	httpClient       *http.Client
 }
 
 // newOpenAICompat is the internal constructor.
 func newOpenAICompat(name, baseURL, modelID string, contextTokens int, apiKey string, thinkingKwargs bool) *OpenAICompat {
-	return &OpenAICompat{
+	client := &OpenAICompat{
 		clientName:     name,
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		modelID:        modelID,
@@ -43,6 +46,12 @@ func newOpenAICompat(name, baseURL, modelID string, contextTokens int, apiKey st
 		thinkingKwargs: thinkingKwargs,
 		httpClient:     newInferenceHTTPClient(),
 	}
+	if name == "llamacpp" {
+		client.kvCachePrecision = "f16"
+		client.kvCacheTypeK = "f16"
+		client.kvCacheTypeV = "f16"
+	}
+	return client
 }
 
 // newInferenceHTTPClient builds the client used for chat/streaming. The overall
@@ -151,6 +160,15 @@ func (c *OpenAICompat) loadLlamaCppModel(ctx context.Context, force bool) error 
 		"model":            c.modelID,
 		"context_size":     c.contextTokens,
 		"echo_load_config": true,
+	}
+	if strings.TrimSpace(c.kvCachePrecision) != "" {
+		body["kv_cache_precision"] = c.kvCachePrecision
+	}
+	if strings.TrimSpace(c.kvCacheTypeK) != "" {
+		body["kv_cache_type_k"] = c.kvCacheTypeK
+	}
+	if strings.TrimSpace(c.kvCacheTypeV) != "" {
+		body["kv_cache_type_v"] = c.kvCacheTypeV
 	}
 	if force {
 		body["force_reload"] = true
@@ -772,11 +790,12 @@ type jsonSchemaSpec struct {
 }
 
 type apiMessage struct {
-	Role       string      `json:"role"`
-	Content    interface{} `json:"content"` // string or []ContentBlock
-	ToolCallID string      `json:"tool_call_id,omitempty"`
-	ToolCalls  interface{} `json:"tool_calls,omitempty"`
-	Name       string      `json:"name,omitempty"`
+	Role             string      `json:"role"`
+	Content          interface{} `json:"content"` // string or []ContentBlock
+	ReasoningContent string      `json:"reasoning_content,omitempty"`
+	ToolCallID       string      `json:"tool_call_id,omitempty"`
+	ToolCalls        interface{} `json:"tool_calls,omitempty"`
+	Name             string      `json:"name,omitempty"`
 }
 
 type apiToolCall struct {
@@ -791,7 +810,7 @@ type apiFunctionCall struct {
 }
 
 func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
-	msgs := buildMessages(req)
+	msgs := buildMessages(req, c.thinkingKwargs)
 
 	body := chatReqBody{
 		Model:           c.modelID,
@@ -855,7 +874,7 @@ func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
 	return json.Marshal(body)
 }
 
-func buildMessages(req llm.Request) []apiMessage {
+func buildMessages(req llm.Request, includeReasoning bool) []apiMessage {
 	var msgs []apiMessage
 
 	if req.System != "" {
@@ -869,12 +888,57 @@ func buildMessages(req llm.Request) []apiMessage {
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
 		}
+		if includeReasoning && m.Role == llm.RoleAssistant {
+			am.ReasoningContent = m.ReasoningContent
+		}
 		if len(m.ToolCalls) > 0 {
 			am.ToolCalls = apiToolCalls(m.ToolCalls)
 		}
 		msgs = append(msgs, am)
 	}
-	return msgs
+	return normalizeOpenAIMessageTurns(msgs)
+}
+
+// normalizeOpenAIMessageTurns keeps code-owned controller prompts in temporal
+// order while making the transcript acceptable to chat templates that only
+// support system messages at the beginning. InferenceBridge/llama.cpp rejects
+// a second text-only assistant turn when late system messages are ignored by
+// the selected template, so late controller messages travel as user turns.
+func normalizeOpenAIMessageTurns(messages []apiMessage) []apiMessage {
+	out := make([]apiMessage, 0, len(messages))
+	conversationStarted := false
+	for _, message := range messages {
+		if message.Role == llm.RoleSystem && conversationStarted {
+			message.Role = llm.RoleUser
+		}
+		if message.Role != llm.RoleSystem {
+			conversationStarted = true
+		}
+
+		if len(out) > 0 && mergeableAPIMessagePair(out[len(out)-1], message) {
+			left, leftOK := out[len(out)-1].Content.(string)
+			right, rightOK := message.Content.(string)
+			if leftOK && rightOK {
+				out[len(out)-1].Content = strings.TrimSpace(left) + "\n" + strings.TrimSpace(right)
+				continue
+			}
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
+func mergeableAPIMessagePair(left, right apiMessage) bool {
+	if left.Role != right.Role || left.Role == llm.RoleTool {
+		return false
+	}
+	if left.ReasoningContent != "" || right.ReasoningContent != "" {
+		return false
+	}
+	if left.ToolCalls != nil || right.ToolCalls != nil || left.ToolCallID != "" || right.ToolCallID != "" {
+		return false
+	}
+	return left.Role == llm.RoleSystem || left.Role == llm.RoleUser || left.Role == llm.RoleAssistant
 }
 
 func apiToolCalls(calls []llm.ToolCallDef) []apiToolCall {

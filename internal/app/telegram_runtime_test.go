@@ -99,6 +99,8 @@ func newTelegramRuntimeForTest(t *testing.T, cfg settings.TelegramConfig, fake *
 		progressChats:  map[int64]bool{},
 		progressTasks:  map[int64]string{},
 		progressStarts: map[int64]time.Time{},
+		progressStates: map[int64]string{},
+		progressDetail: map[int64]string{},
 	}
 }
 
@@ -487,7 +489,7 @@ func TestTelegramRunProgressMessageFormatsModelLoad(t *testing.T) {
 	got := formatTelegramRunProgressMessage("model_loading", detail)
 	for _, want := range []string{
 		"\u23f3 Mauler is working",
-		"Stage: Loading the model",
+		"**Stage:** Loading the model",
 		"Backend: llamacpp",
 		"Model: Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved.Q4_K_M.gguf",
 		"Context: 45000 tokens",
@@ -506,7 +508,7 @@ func TestTelegramRunProgressMessageFormatsLoopGuard(t *testing.T) {
 	got := formatTelegramRunProgressMessage("blocked", "Loop circuit-breaker paused the run after a corrective prompt because loop-health stayed critical: stability_score=14 repeated_tool_inputs=1 repeated_identical_outcomes=0 repeated_skips=0 tool_errors=6 tool_cycle_detected=false tool_cycle_period=0.")
 	for _, want := range []string{
 		"\u26d4 Mauler needs attention",
-		"Stage: Blocked by the loop guard",
+		"**Stage:** Blocked by the loop guard",
 		"stability score: 14",
 		"repeated tool inputs: 1",
 		"tool errors: 6",
@@ -530,9 +532,9 @@ func TestTelegramRunCompletionSendsWhoamiResult(t *testing.T) {
 	got := formatTelegramRunProgressMessageForTask("done", detail, run.Prompt, 2*time.Second)
 	for _, want := range []string{
 		"\u2705 Mauler finished",
-		"Task: whoami",
-		"Result:\nroot",
-		"Finished in: 2s",
+		"**Task**\nwhoami",
+		"**Result**\nroot",
+		"**Finished in:** 2s",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("completion message missing %q:\n%s", want, got)
@@ -563,7 +565,7 @@ func TestTelegramRunCompletionPreservesMultilineUIAnswer(t *testing.T) {
 	run := TaskRun{Prompt: "whoami and list the directory"}
 	detail := telegramRunCompletionDetail(run, uiAnswer)
 	got := formatTelegramRunProgressMessageForTask("done", detail, run.Prompt, 4*time.Second)
-	if !strings.Contains(got, "Result:\n"+uiAnswer) {
+	if !strings.Contains(got, "**Result**\n"+uiAnswer) {
 		t.Fatalf("multiline UI answer was not preserved in Telegram completion:\n%s", got)
 	}
 }
@@ -572,10 +574,10 @@ func TestTelegramRunProgressShowsTaskAndCurrentAction(t *testing.T) {
 	got := formatTelegramRunProgressMessageForTask("testing", "shell", "whoami", 3*time.Second)
 	for _, want := range []string{
 		"\u23f3 Mauler is working",
-		"Task: whoami",
-		"Stage: Verifying",
-		"Current: Running a shell command",
-		"Elapsed: 3s",
+		"**Task**\nwhoami",
+		"**Stage:** Verifying",
+		"**Current:** Running a shell command",
+		"**Elapsed:** 3s",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("working message missing %q:\n%s", want, got)
@@ -586,6 +588,7 @@ func TestTelegramRunProgressShowsTaskAndCurrentAction(t *testing.T) {
 func TestTelegramProgressUpdateEditsExistingMessage(t *testing.T) {
 	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
 	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: true, ProgressIntervalS: 1}, fake)
+	rt.trackProgressChat(42, "test progress editing")
 
 	rt.sendTelegramProgressUpdate(context.Background(), 42, "thinking", "first")
 	rt.sendTelegramProgressUpdate(context.Background(), 42, "testing", "second")
@@ -595,6 +598,39 @@ func TestTelegramProgressUpdateEditsExistingMessage(t *testing.T) {
 	}
 	if len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "42:1:second") {
 		t.Fatalf("progress should edit first status message, got edits: %#v", fake.edits)
+	}
+}
+
+func TestTelegramProgressHeartbeatUpdatesDuringQuietRun(t *testing.T) {
+	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: true, ProgressIntervalS: 1}, fake)
+	rt.trackProgressChat(42, "Check the seven-day forecast for Bradley Stoke")
+	rt.mu.Lock()
+	rt.progressStarts[42] = time.Now().Add(-12 * time.Second)
+	rt.lastProgress[42] = time.Now().Add(-2 * time.Second)
+	rt.progressStates[42] = "thinking"
+	rt.progressDetail[42] = "Waiting for the local model to return its next action."
+	rt.mu.Unlock()
+
+	rt.sendDueProgressHeartbeats(context.Background())
+
+	if len(fake.sent) != 1 {
+		t.Fatalf("quiet active run should receive a heartbeat card, sends=%#v", fake.sent)
+	}
+	for _, want := range []string{"Mauler is working", "seven-day forecast", "Thinking", "Waiting for the local model", "Elapsed"} {
+		if !strings.Contains(fake.sent[0], want) {
+			t.Fatalf("heartbeat missing %q: %s", want, fake.sent[0])
+		}
+	}
+
+	rt.mu.Lock()
+	rt.lastProgress[42] = time.Now().Add(-2 * time.Second)
+	rt.progressStates[42] = "testing"
+	rt.progressDetail[42] = "shell"
+	rt.mu.Unlock()
+	rt.sendDueProgressHeartbeats(context.Background())
+	if len(fake.sent) != 1 || len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "Running a shell command") {
+		t.Fatalf("second heartbeat should edit the same status card: sends=%#v edits=%#v", fake.sent, fake.edits)
 	}
 }
 
@@ -608,7 +644,7 @@ func TestTelegramCompletionIsSentWhenProgressUpdatesAreDisabled(t *testing.T) {
 	if len(fake.sent) != 1 {
 		t.Fatalf("final result should be sent even with progress disabled, got %#v", fake.sent)
 	}
-	for _, want := range []string{"\u2705 Mauler finished", "Task: whoami", "Result:\nroot"} {
+	for _, want := range []string{"\u2705 Mauler finished", "**Task**\nwhoami", "**Result**\nroot"} {
 		if !strings.Contains(fake.sent[0], want) {
 			t.Fatalf("final result missing %q: %q", want, fake.sent[0])
 		}
@@ -627,7 +663,55 @@ func TestTelegramRecoverableBlockedStateDoesNotLoseFinalResult(t *testing.T) {
 	if len(fake.sent) != 1 {
 		t.Fatalf("recoverable blocked state should keep one editable status message, sends=%#v", fake.sent)
 	}
-	if len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "Result:\nroot") {
+	if len(fake.edits) != 1 || !strings.Contains(fake.edits[0], "**Result**\nroot") {
 		t.Fatalf("final result was lost after recoverable blocked state, edits=%#v", fake.edits)
+	}
+}
+
+func TestTelegramCompletionBridgesResultIntoSameChatFollowUp(t *testing.T) {
+	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: false}, fake)
+	rt.trackProgressChat(42, "Get the 7-day weather forecast for Bradley Stoke, Bristol")
+
+	rt.notifyRunState(context.Background(), "done", "Monday: 18°C and dry.\nTuesday: 17°C with light rain.")
+
+	reply, ok := rt.app.remoteRunFollowUp("telegram:42", "What's the result?")
+	if !ok {
+		t.Fatal("expected deterministic follow-up result")
+	}
+	for _, want := range []string{"Latest Mauler result", "7-day weather forecast", "Monday: 18°C", "Tuesday: 17°C"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("follow-up result missing %q: %s", want, reply)
+		}
+	}
+}
+
+func TestTelegramCompletionRejectsRawToolCallAsFinalAnswer(t *testing.T) {
+	raw := "<tool_call><function=http_probe><parameter=url>https://example.test</parameter></function></tool_call>"
+	detail := telegramRunCompletionDetail(TaskRun{Prompt: "check it"}, raw)
+	if sideChatLooksLikeToolCall(detail) || strings.Contains(detail, "https://example.test") {
+		t.Fatalf("raw tool request leaked into Telegram completion: %q", detail)
+	}
+	if !strings.Contains(detail, "rejected") {
+		t.Fatalf("expected actionable protocol failure message, got %q", detail)
+	}
+}
+
+func TestTelegramLongFinalReplacesLiveCardBeforeMultipartSend(t *testing.T) {
+	fake := &fakeTelegramAPI{me: telegram.User{Username: "TheMaulerBot"}}
+	rt := newTelegramRuntimeForTest(t, settings.TelegramConfig{SendProgress: true, ProgressIntervalS: 1}, fake)
+	rt.trackProgressChat(42, "produce a detailed report")
+	rt.lastProgress[42] = time.Now().Add(-2 * time.Second)
+	rt.notifyRunState(context.Background(), "thinking", "drafting")
+	rt.notifyRunState(context.Background(), "done", strings.Repeat("full result line\n", 400))
+
+	if len(fake.deleted) != 1 || fake.deleted[0] != "42:1" {
+		t.Fatalf("long terminal result should replace stale progress card, deleted=%#v", fake.deleted)
+	}
+	if len(fake.sent) != 2 {
+		t.Fatalf("fake API should receive live card and complete long result, sends=%d", len(fake.sent))
+	}
+	if got := strings.Count(fake.sent[1], "full result line"); got != 400 {
+		t.Fatalf("long final result was truncated: lines=%d", got)
 	}
 }

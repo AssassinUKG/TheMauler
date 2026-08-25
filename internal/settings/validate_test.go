@@ -24,11 +24,39 @@ func TestValidateClampsCompaction(t *testing.T) {
 	}
 }
 
+func TestValidateKeepsExtendedReasoningEffortValues(t *testing.T) {
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh"} {
+		cfg := DefaultSettings()
+		cfg.Agents.ReasoningEffort = effort
+		cfg.Validate()
+		if cfg.Agents.ReasoningEffort != effort {
+			t.Fatalf("reasoning effort %q normalized to %q", effort, cfg.Agents.ReasoningEffort)
+		}
+	}
+}
+
+func TestValidateKeepsThinkingModeValues(t *testing.T) {
+	for _, mode := range []string{"auto", "on", "off"} {
+		cfg := DefaultSettings()
+		cfg.Agents.ThinkingMode = mode
+		cfg.Validate()
+		if cfg.Agents.ThinkingMode != mode {
+			t.Fatalf("thinking mode %q normalized to %q", mode, cfg.Agents.ThinkingMode)
+		}
+	}
+	cfg := DefaultSettings()
+	cfg.Agents.ThinkingMode = "sometimes"
+	adjustments := cfg.Validate()
+	if cfg.Agents.ThinkingMode != "auto" || len(adjustments) != 1 {
+		t.Fatalf("invalid thinking mode was not reset cleanly: mode=%q adjustments=%#v", cfg.Agents.ThinkingMode, adjustments)
+	}
+}
+
 func TestReviewLoopConfigDefaultsPopulate(t *testing.T) {
 	cfg := DefaultSettings()
 
 	rl := cfg.Agents.ReviewLoop
-	if !rl.Enabled || !rl.OnlyAutonomous || !rl.VerifyGate || !rl.CompletionRails || !rl.ReviewerPass {
+	if !rl.Enabled || !rl.OnlyAutonomous || !rl.VerifyGate || !rl.CompletionRails || !rl.CompletionBlocking || !rl.ReviewerPass {
 		t.Fatalf("review loop defaults should enable the gate chain: %#v", rl)
 	}
 	if rl.MaxReviewCycles != 2 || rl.VerifyTimeoutSec != 120 || rl.ReviewerMaxTools != 15 {
@@ -208,6 +236,62 @@ func TestValidateIsIdempotent(t *testing.T) {
 	}
 	if got := pf.Validate(); len(got) != 0 {
 		t.Fatalf("second profiles validation adjusted again: %#v", got)
+	}
+}
+
+func TestResolveKVCacheConfig(t *testing.T) {
+	tests := []struct {
+		name                string
+		precision, key, val string
+		wantPrecision       string
+		wantKey, wantVal    string
+	}{
+		{name: "default", wantPrecision: "f16", wantKey: "f16", wantVal: "f16"},
+		{name: "q8 preset", precision: "q8_0", key: "f16", val: "q4_0", wantPrecision: "q8_0", wantKey: "q8_0", wantVal: "q8_0"},
+		{name: "automatic", precision: "auto", key: "q8_0", val: "q8_0", wantPrecision: "auto"},
+		{name: "custom", precision: "custom", key: "q8", val: "bf16", wantPrecision: "custom", wantKey: "q8_0", wantVal: "bf16"},
+		{name: "invalid", precision: "fast", key: "bad", val: "bad", wantPrecision: "f16", wantKey: "f16", wantVal: "f16"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			precision, key, val := ResolveKVCacheConfig(test.precision, test.key, test.val)
+			if precision != test.wantPrecision || key != test.wantKey || val != test.wantVal {
+				t.Fatalf("ResolveKVCacheConfig(%q, %q, %q) = (%q, %q, %q), want (%q, %q, %q)",
+					test.precision, test.key, test.val,
+					precision, key, val,
+					test.wantPrecision, test.wantKey, test.wantVal,
+				)
+			}
+		})
+	}
+}
+
+func TestProfilesValidateDefaultsLlamaCppKVCacheToFP16(t *testing.T) {
+	pf := ProfilesFile{
+		Providers: map[string]Provider{
+			"bridge": {Name: "bridge", Backend: "llamacpp"},
+		},
+		Profiles: map[string]Profile{
+			"local": {
+				Name:         "local",
+				Provider:     "bridge",
+				CtxTokens:    8192,
+				ThinkGeneral: validGenerationParams(),
+				ThinkCoding:  validGenerationParams(),
+				NoThink:      validGenerationParams(),
+			},
+		},
+	}
+
+	if got := pf.Validate(); len(got) != 1 {
+		t.Fatalf("adjustments = %#v, want one KV cache default", got)
+	}
+	profile := pf.Profiles["local"]
+	if profile.KVCachePrecision != "f16" || profile.KVCacheTypeK != "f16" || profile.KVCacheTypeV != "f16" {
+		t.Fatalf("KV cache defaults = %#v, want FP16 K/V", profile)
+	}
+	if got := pf.Validate(); len(got) != 0 {
+		t.Fatalf("second validation adjusted again: %#v", got)
 	}
 }
 

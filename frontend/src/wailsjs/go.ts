@@ -54,6 +54,7 @@ export interface Settings {
     require_plan: boolean
     no_think_after_tool_calls: number
     reasoning_effort: string
+    thinking_mode: string
     review_loop: ReviewLoopConfig
     presets: Record<string, AgentModePreset>
   }
@@ -331,11 +332,21 @@ export interface AgentDefinition {
   builtin: boolean
 }
 
+export interface LabScopeTarget {
+  value: string
+  kind: 'ip' | 'cidr' | 'hostname' | 'url' | 'invalid'
+  environment: 'auto' | 'external' | 'internal'
+  label: string
+  notes: string
+  excluded: boolean
+}
+
 export interface LabContext {
   id: string
   name: string
   target: string
   hostname: string
+  scope_targets: LabScopeTarget[]
   vpn_interface: string
   latest_artifact: string
   ops_profile: string
@@ -350,6 +361,7 @@ export interface LabProfile {
   workspace_dir: string
   target: string
   hostname: string
+  scope_targets: LabScopeTarget[]
   vpn_interface: string
   latest_artifact: string
   ops_profile: string
@@ -382,6 +394,7 @@ export interface LabStatus {
   shell_user: string
   target: string
   hostname: string
+  scope_targets: LabScopeTarget[]
   vpn_interface: string
   vpn_ip: string
   vpn_cidr: string
@@ -426,6 +439,9 @@ export interface Profile {
   thinking: boolean
   preserve_thinking: boolean
   mmproj: string
+  kv_cache_precision: string // auto | f16 | bf16 | q8_0 | q4_0 | custom
+  kv_cache_type_k: string
+  kv_cache_type_v: string
   thinking_general: GenerationParams
   thinking_coding: GenerationParams
   nothinking: GenerationParams
@@ -1538,6 +1554,12 @@ export const GetProjectInstructionsSummary = (): Promise<string> =>
 
 export const PickSaveFilePath = (defaultName: string): Promise<string> =>
   call<string>('app.App.PickSaveFilePath', defaultName)
+
+export const SelectChatFiles = (): Promise<ChatAttachment[]> =>
+  call('app.App.SelectChatFiles')
+
+export const PrepareChatAttachmentPath = (path: string): Promise<ChatAttachment> =>
+  call('app.App.PrepareChatAttachmentPath', path)
 
 export const GetHomeDir = (): Promise<string> =>
   call('app.App.GetHomeDir')

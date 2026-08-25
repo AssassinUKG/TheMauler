@@ -17,22 +17,25 @@ import (
 // "worked yesterday" regressions: model identity, profile context, adapter,
 // tool protocol, and launch-affecting flags.
 type RuntimeLock struct {
-	UpdatedAt       string `json:"updated_at"`
-	ProfileName     string `json:"profile_name"`
-	ProviderName    string `json:"provider_name"`
-	Backend         string `json:"backend"`
-	BaseURL         string `json:"base_url"`
-	ModelID         string `json:"model_id"`
-	ModelHash       string `json:"model_hash"`
-	Adapter         string `json:"adapter"`
-	ToolProtocol    string `json:"tool_protocol"`
-	CtxTokens       int    `json:"ctx_tokens"`
-	Thinking        bool   `json:"thinking"`
-	PreserveThink   bool   `json:"preserve_thinking"`
-	SpecType        string `json:"spec_type,omitempty"`
-	SpecDraftNMax   int    `json:"spec_draft_n_max,omitempty"`
-	SpecDraftModel  string `json:"spec_draft_model,omitempty"`
-	LaunchSignature string `json:"launch_signature"`
+	UpdatedAt        string `json:"updated_at"`
+	ProfileName      string `json:"profile_name"`
+	ProviderName     string `json:"provider_name"`
+	Backend          string `json:"backend"`
+	BaseURL          string `json:"base_url"`
+	ModelID          string `json:"model_id"`
+	ModelHash        string `json:"model_hash"`
+	Adapter          string `json:"adapter"`
+	ToolProtocol     string `json:"tool_protocol"`
+	CtxTokens        int    `json:"ctx_tokens"`
+	Thinking         bool   `json:"thinking"`
+	PreserveThink    bool   `json:"preserve_thinking"`
+	KVCachePrecision string `json:"kv_cache_precision"`
+	KVCacheTypeK     string `json:"kv_cache_type_k"`
+	KVCacheTypeV     string `json:"kv_cache_type_v"`
+	SpecType         string `json:"spec_type,omitempty"`
+	SpecDraftNMax    int    `json:"spec_draft_n_max,omitempty"`
+	SpecDraftModel   string `json:"spec_draft_model,omitempty"`
+	LaunchSignature  string `json:"launch_signature"`
 }
 
 func saveRuntimeLockSnapshot(profile settings.Profile) error {
@@ -49,6 +52,8 @@ func saveRuntimeLockSnapshot(profile settings.Profile) error {
 }
 
 func buildRuntimeLock(profile settings.Profile) RuntimeLock {
+	profile.KVCachePrecision, profile.KVCacheTypeK, profile.KVCacheTypeV =
+		settings.ResolveKVCacheConfig(profile.KVCachePrecision, profile.KVCacheTypeK, profile.KVCacheTypeV)
 	adapter := "unknown"
 	toolProtocol := "unknown"
 	if rp, ok := runtimeprofile.Match(profile); ok {
@@ -62,26 +67,32 @@ func buildRuntimeLock(profile settings.Profile) RuntimeLock {
 		profile.BaseURL,
 		profile.ModelID,
 		profile.MMProj,
+		profile.KVCachePrecision,
+		profile.KVCacheTypeK,
+		profile.KVCacheTypeV,
 		profile.SpecType,
 		profile.SpecDraftModel,
 	}
 	sum := sha256.Sum256([]byte(strings.Join(sigParts, "\x00")))
 	return RuntimeLock{
-		UpdatedAt:       time.Now().Format(time.RFC3339),
-		ProfileName:     profile.Name,
-		ProviderName:    profile.Provider,
-		Backend:         profile.Backend,
-		BaseURL:         profile.BaseURL,
-		ModelID:         profile.ModelID,
-		ModelHash:       hex.EncodeToString(sum[:])[:16],
-		Adapter:         adapter,
-		ToolProtocol:    toolProtocol,
-		CtxTokens:       profile.CtxTokens,
-		Thinking:        profile.Thinking,
-		PreserveThink:   profile.PreserveThink,
-		SpecType:        profile.SpecType,
-		SpecDraftNMax:   profile.SpecDraftNMax,
-		SpecDraftModel:  profile.SpecDraftModel,
-		LaunchSignature: strings.Join(sigParts, " | "),
+		UpdatedAt:        time.Now().Format(time.RFC3339),
+		ProfileName:      profile.Name,
+		ProviderName:     profile.Provider,
+		Backend:          profile.Backend,
+		BaseURL:          profile.BaseURL,
+		ModelID:          profile.ModelID,
+		ModelHash:        hex.EncodeToString(sum[:])[:16],
+		Adapter:          adapter,
+		ToolProtocol:     toolProtocol,
+		CtxTokens:        profile.CtxTokens,
+		Thinking:         profile.Thinking,
+		PreserveThink:    profile.PreserveThink,
+		KVCachePrecision: profile.KVCachePrecision,
+		KVCacheTypeK:     profile.KVCacheTypeK,
+		KVCacheTypeV:     profile.KVCacheTypeV,
+		SpecType:         profile.SpecType,
+		SpecDraftNMax:    profile.SpecDraftNMax,
+		SpecDraftModel:   profile.SpecDraftModel,
+		LaunchSignature:  strings.Join(sigParts, " | "),
 	}
 }

@@ -34,11 +34,11 @@ The Grid, not the chat transcript or Plan popover, is the source of truth for an
 
 ## First run: the shortest safe path
 
-### 1. Create or open a project
+### 1. Create or open a project and set its complete scope
 
 Open **Home**.
 
-- For a new target, click **+ New HTB box**.
+- For a new lab or client, click **+ New project**.
 - For an existing target, select it from **Your boxes**.
 - Click **Edit details**.
 
@@ -46,7 +46,21 @@ At minimum, set:
 
 - **Name**: the box, lab, or client-project name;
 - **Agent root folder**: the workspace where notes and evidence will live;
-- **Target IP / URL** or **Hostname**: the authorised target.
+- **Authorised scope**: add every approved IP, CIDR, hostname, host/port, or HTTP(S) URL/path.
+
+You can paste a comma-separated or newline-separated list. For example, paste two client IPs as two
+rows rather than saving one combined string. The first allowed row is the primary target used by
+the readiness check and older status surfaces. Use the row controls to reorder it.
+
+For an internal engagement, add the exact authorised CIDR such as `10.20.30.0/24`. Add multiple
+CIDRs as separate rows. Do not add a broader network than the written authorisation. Mark explicit
+carve-outs as **Exclude**; exclusions win even when a broader allowed CIDR also matches. A port or
+path restriction belongs in the target value, such as `api.client.test:8443` or
+`https://client.test/admin`.
+
+Use **External**, **Internal**, or **Auto** labels and put authorisation dates, permitted testing,
+owners, and other restrictions in each row's notes. These labels and notes aid review; the exact
+target values and exclusions are the enforced network scope.
 
 Click **Save & open** or **Save & resume**. Opening the project makes its workspace and target context active.
 
@@ -58,7 +72,7 @@ open **Grid** and click **Start guided setup**.
 The wizard walks through six short checks:
 
 1. confirm the active project and workspace;
-2. preview the target and hostname that will become immutable locked scope;
+2. preview the complete allowed/excluded target list that will become immutable locked scope;
 3. select the bundled **Web App (Simple)** workflow and reviewed 20-check OWASP pack;
 4. review candidate notes, scans, screenshots, reports, and artifacts already in the workspace;
 5. run provider and target-readiness checks; and
@@ -68,9 +82,10 @@ Existing files are passed to the first-run draft only as untrusted historical ca
 contents are not silently copied into the Grid, and file existence never completes a check. The
 agent must inspect and verify useful material before attaching it as evidence.
 
-The target reachability check is advisory because Windows may not share the same VPN/WSL route as
-the agent shell. A failed active-provider check blocks **Start first run**, but it does not prevent
-you from creating and inspecting the Grid.
+The target reachability check probes only the primary concrete target and is advisory because
+Windows may not share the same VPN/WSL route as the agent shell. A CIDR is validated as scope but is
+not automatically swept during setup. A failed active-provider check blocks **Start first run**, but
+it does not prevent you from creating and inspecting the Grid.
 
 If the target is wrong, correct the project first. The current Grid scope cannot be edited after it is locked; delete only the Grid and recreate it after correcting the project. Deleting a Grid does not delete workspace files or RunLedger evidence.
 
@@ -81,7 +96,7 @@ Click **Open Grid**, or use the **Grid** navigation item.
 Before starting a run, check:
 
 - the correct engagement is selected on the left;
-- **Locked scope** contains only the authorised target and hostname;
+- **Locked scope** contains every authorised target plus the expected explicit exclusions;
 - the phase rail begins at **Reconnaissance** for a new Grid;
 - **Deterministic next action** names one ready task;
 - there is no unexpected active claim.
@@ -94,6 +109,10 @@ prompt; it does not send or run anything automatically. Review it and press Send
 For an existing Grid, click **Ask agent to continue** or **Continue in Chat**. Then send:
 
 > Continue the active Engagement Grid. Take the next safe item, work only inside the locked scope, attach useful evidence, and keep going until you need my input or reach a real blocker.
+
+For a multi-asset client, you can instead ask the agent to group discovery by asset and preserve
+separate evidence for each target. Adding several authorised rows does not itself start a scan; the
+normal Chat run and Grid controls still govern execution.
 
 Every new run receives a fresh compact Grid packet automatically. You should not need to paste workflow JSON, checklist text, or old chat history.
 
@@ -163,9 +182,9 @@ These gates are intentional. They stop a scanner hint or model guess from becomi
 
 ## When the Grid looks stuck
 
-### “Set a target or hostname before creating a grid”
+### “Add at least one allowed target before creating a grid”
 
-Return to **Home > Edit details**, set the authorised target or hostname, then save and open the project.
+Return to **Home > Edit details**, add at least one valid allowed scope row, then save and open the project.
 
 ### “No unclaimed work is ready”
 
@@ -208,7 +227,7 @@ The following are not complete yet:
 The current setup wizard uses this sequence:
 
 1. **Project** - confirm the active workspace and project name.
-2. **Target** - preview the target/hostname that will become locked scope.
+2. **Target** - preview the complete allowed/excluded list that will become locked scope.
 3. **Workflow** - choose a workflow pack; initially the reviewed Web App workflow.
 4. **Existing work** - preview scans, notes, screenshots, and reports that can be indexed as candidate evidence without marking checks complete.
 5. **Ready check** - show model/provider, shell, VPN, target reachability, and scope warnings.

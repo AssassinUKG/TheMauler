@@ -348,18 +348,27 @@ func TestMicrocompactThinkingDropsOldThinkBlocks(t *testing.T) {
 	}
 }
 
-func TestMicrocompactThinkingDoesNotTouchToolCalls(t *testing.T) {
+func TestMicrocompactThinkingClearsReasoningWithoutBreakingToolCalls(t *testing.T) {
 	h := NewHistory(4096)
 	h.Append(llm.Message{
-		Role:    llm.RoleAssistant,
-		Content: "<think>tool planning</think>",
+		Role:             llm.RoleAssistant,
+		Content:          "Inspecting the file.",
+		ReasoningContent: strings.Repeat("tool planning ", 80),
 		ToolCalls: []llm.ToolCallDef{{
 			ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
 		}},
 	})
+	before := h.TokenCount()
 	stats := h.MicrocompactThinking(0)
-	if stats.Compacted != 0 {
-		t.Fatalf("assistant tool-call messages must not be microcompacted")
+	if stats.Compacted != 1 {
+		t.Fatalf("expected one reasoning payload compacted, got %#v", stats)
+	}
+	msgs := h.Messages()
+	if msgs[0].ReasoningContent != "" || len(msgs[0].ToolCalls) != 1 || msgs[0].Content != "Inspecting the file." {
+		t.Fatalf("reasoning compaction damaged the tool turn: %#v", msgs[0])
+	}
+	if h.TokenCount() >= before {
+		t.Fatalf("reasoning compaction did not reduce token estimate: before=%d after=%d", before, h.TokenCount())
 	}
 }
 

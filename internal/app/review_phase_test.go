@@ -12,6 +12,7 @@ import (
 func TestReviewPhaseProceedsWhenAllPass(t *testing.T) {
 	cfg := settings.DefaultSettings()
 	cfg.Agents.ReviewLoop.VerifyGate = false
+	cfg.Agents.ReviewLoop.CompletionRails = false
 	cfg.Agents.ReviewLoop.ReviewerPass = false
 	run := gateableReviewRun()
 	cycles := 0

@@ -1,10 +1,12 @@
 import { useRef, useEffect, useState, useCallback, useMemo, useLayoutEffect, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Undo,
   EncodeFileBase64,
+  SelectChatFiles,
+  PrepareChatAttachmentPath,
   IngestVideo,
   IngestVideoPath,
   PickSaveFilePath,
@@ -30,6 +32,16 @@ import {
 import type { AgentActivity, ChatMessage, RunProfileOption, RunStatePayload, ToolCountdown } from '../App'
 import './ChatPane.css'
 
+const sharedMarkdownComponents: Components = {
+  table({ children }) {
+    return (
+      <div className="markdown-table-scroll" role="region" aria-label="Scrollable table" tabIndex={0}>
+        <table>{children}</table>
+      </div>
+    )
+  },
+}
+
 interface Props {
   messages: ChatMessage[]
   streaming: boolean
@@ -48,6 +60,7 @@ interface Props {
   settingsVersion: number
   agentDefinitions: AgentDefinition[]
   agentSelection: string
+  agentMode: string
   draftRequest?: { id: string; text: string } | null
   onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[], profileOverride?: string) => void
   onRunProfileOverrideChange: (profile: string) => void
@@ -89,6 +102,7 @@ export function ChatPane({
   settingsVersion,
   agentDefinitions,
   agentSelection,
+  agentMode,
   draftRequest,
   onSubmitMessage,
   onRunProfileOverrideChange,
@@ -115,6 +129,7 @@ export function ChatPane({
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  const [attachmentStatus, setAttachmentStatus] = useState<string | null>(null)
   const [videoStatus, setVideoStatus] = useState<string | null>(null)
   const [lightboxImage, setLightboxImage] = useState<string | null>(null)
   const [attachmentEditor, setAttachmentEditor] = useState<{ attachment: ChatAttachment; source: 'draft' | 'message' } | null>(null)
@@ -276,7 +291,7 @@ export function ChatPane({
         void blobToDataURI(blob)
           .then(TranscribeVoiceClip)
           .then(transcript => {
-            setVoiceStatus(`Heard: ${transcript}`)
+            setVoiceStatus(`Heard: ${transcript} · sending to Project Agent with configured tools`)
             onSubmitMessage(transcript, [], [], runProfileOverride)
           })
           .catch(error => setVoiceStatus(`Transcription failed: ${String(error)}`))
@@ -403,10 +418,15 @@ export function ChatPane({
   const IMAGE_EXTS: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
   const VIDEO_EXTS: Record<string, string> = { mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', avi: 'video/x-msvideo' }
   const TEXT_EXTS = new Set(['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'yaml', 'yml', 'toml', 'ini', 'log', 'go', 'ts', 'tsx', 'js', 'jsx', 'css', 'html', 'py', 'ps1', 'sh', 'sql'])
-  const MAX_ATTACHMENT_CHARS = 180_000
+  const MAX_ATTACHMENT_CHARS = 24_000
 
   const addAttachment = useCallback((attachment: Omit<ChatAttachment, 'id'>) => {
     setAttachments(prev => [...prev, { ...attachment, id: crypto.randomUUID() }])
+  }, [])
+
+  const showAttachmentStatus = useCallback((message: string) => {
+    setAttachmentStatus(message)
+    window.setTimeout(() => setAttachmentStatus(current => current === message ? null : current), 5000)
   }, [])
 
   const readTextFileAttachment = useCallback((file: File) => {
@@ -436,9 +456,12 @@ export function ChatPane({
         content: truncated ? raw.slice(0, MAX_ATTACHMENT_CHARS) : raw,
         truncated,
       })
+      if (truncated) {
+        showAttachmentStatus(`Only the first ${MAX_ATTACHMENT_CHARS.toLocaleString()} characters were attached inline. Use Attach files or paste the file path to let Mauler read the complete file in safe chunks.`)
+      }
     }
     reader.readAsText(file)
-  }, [TEXT_EXTS, addAttachment])
+  }, [TEXT_EXTS, addAttachment, showAttachmentStatus])
 
   // Video: local vision models can't decode raw video, so the Go side samples
   // keyframes (added as images) plus an optional audio transcript (added as a
@@ -484,11 +507,62 @@ export function ChatPane({
     }
   }, [applyVideoIngest, addAttachment])
 
+  const addPreparedFile = useCallback(async (attachment: ChatAttachment) => {
+    const path = attachment.path || ''
+    if (!path) {
+      addAttachment(attachment)
+      return
+    }
+    if (attachment.kind === 'image' || attachment.mime?.startsWith('image/')) {
+      const mime = attachment.mime || IMAGE_EXTS[path.split('.').pop()?.toLowerCase() ?? ''] || 'image/png'
+      const b64 = await EncodeFileBase64(path)
+      setImages(prev => [...prev, `data:${mime};base64,${b64}`])
+      return
+    }
+    if (attachment.kind === 'video' || attachment.mime?.startsWith('video/')) {
+      await ingestVideoPath(path)
+      return
+    }
+    addAttachment(attachment)
+  }, [IMAGE_EXTS, addAttachment, ingestVideoPath])
+
+  const attachLocalPath = useCallback(async (path: string): Promise<boolean> => {
+    try {
+      const attachment = await PrepareChatAttachmentPath(path)
+      await addPreparedFile(attachment)
+      showAttachmentStatus(`Attached ${attachment.name}. Mauler can read the complete file in bounded chunks.`)
+      return true
+    } catch (err) {
+      showAttachmentStatus(`Could not attach ${path}: ${String(err)}`)
+      return false
+    }
+  }, [addPreparedFile, showAttachmentStatus])
+
+  const chooseChatFiles = useCallback(async () => {
+    try {
+      const selected = await SelectChatFiles()
+      for (const attachment of selected) {
+        await addPreparedFile(attachment)
+      }
+      if (selected.length > 0) {
+        showAttachmentStatus(`Attached ${selected.length} file${selected.length === 1 ? '' : 's'}. Large files will be read in bounded chunks.`)
+        inputRef.current?.focus()
+      }
+    } catch (err) {
+      showAttachmentStatus(`Could not attach files: ${String(err)}`)
+    }
+  }, [addPreparedFile, showAttachmentStatus])
+
   const handleDrop = useCallback(async (e: React.DragEvent<HTMLTextAreaElement>) => {
     e.preventDefault()
     const files = Array.from(e.dataTransfer.files ?? [])
     if (files.length > 0) {
       for (const file of files) {
+        const localPath = (file as File & { path?: string }).path
+        if (localPath) {
+          await attachLocalPath(localPath)
+          continue
+        }
         const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
         const mime = file.type || IMAGE_EXTS[ext]
         if (mime?.startsWith('image/')) {
@@ -506,36 +580,23 @@ export function ChatPane({
     }
     const path = e.dataTransfer.getData('text/plain')
     if (!path) return
-    const ext = path.split('.').pop()?.toLowerCase() ?? ''
-    const mime = IMAGE_EXTS[ext]
-    if (VIDEO_EXTS[ext]) {
-      void ingestVideoPath(path)
-    } else if (mime) {
-      try {
-        const b64 = await EncodeFileBase64(path)
-        setImages(prev => [...prev, `data:${mime};base64,${b64}`])
-      } catch {
-        setInput(prev => prev ? `${prev} @${path}` : `@${path}`)
-      }
-    } else {
-      addAttachment({
-        name: path.split(/[\\/]/).pop() || 'Attached file',
-        kind: ext === 'pdf' ? 'pdf' : 'file',
-        path,
-        content: `Local file path: ${path}`,
-      })
-    }
+    await attachLocalPath(path)
     inputRef.current?.focus()
-  }, [IMAGE_EXTS, VIDEO_EXTS, addAttachment, readTextFileAttachment, ingestVideoData, ingestVideoPath])
+  }, [IMAGE_EXTS, VIDEO_EXTS, readTextFileAttachment, ingestVideoData, attachLocalPath])
 
   // Paste images, copied files, and larger/multiline text as attachments.
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData.items)
     let handledBinary = false
     for (const item of items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        const file = item.getAsFile()
-        if (!file) continue
+      if (item.kind !== 'file') continue
+      const file = item.getAsFile()
+      if (!file) continue
+      const localPath = (file as File & { path?: string }).path
+      if (localPath) {
+        handledBinary = true
+        void attachLocalPath(localPath)
+      } else if (item.type.startsWith('image/')) {
         handledBinary = true
         const reader = new FileReader()
         reader.onload = () => {
@@ -543,18 +604,28 @@ export function ChatPane({
         }
         reader.readAsDataURL(file)
       } else if (item.kind === 'file' && item.type.startsWith('video/')) {
-        const file = item.getAsFile()
-        if (!file) continue
         handledBinary = true
         void ingestVideoData(file)
-      } else if (item.kind === 'file') {
-        const file = item.getAsFile()
-        if (!file) continue
+      } else {
         handledBinary = true
         readTextFileAttachment(file)
       }
     }
     const pastedText = e.clipboardData.getData('text/plain')
+    const pastedPaths = clipboardFilePathCandidates(pastedText)
+    if (!handledBinary && pastedPaths.length > 0) {
+      e.preventDefault()
+      void (async () => {
+        const failed: string[] = []
+        for (const path of pastedPaths) {
+          if (!await attachLocalPath(path)) failed.push(path)
+        }
+        if (failed.length > 0) {
+          setInput(prev => prev ? `${prev}\n${failed.join('\n')}` : failed.join('\n'))
+        }
+      })()
+      return
+    }
     const shouldAttachText = pastedText && (pastedText.length > 600 || pastedText.split(/\r?\n/).length > 8)
     if (shouldAttachText) {
       e.preventDefault()
@@ -567,10 +638,13 @@ export function ChatPane({
         content: truncated ? pastedText.slice(0, MAX_ATTACHMENT_CHARS) : pastedText,
         truncated,
       })
+      if (truncated) {
+        showAttachmentStatus(`Only the first ${MAX_ATTACHMENT_CHARS.toLocaleString()} characters were attached inline. Use Attach files or paste a file path for the complete source.`)
+      }
     } else if (handledBinary) {
       e.preventDefault()
     }
-  }, [addAttachment, readTextFileAttachment, ingestVideoData])
+  }, [addAttachment, readTextFileAttachment, ingestVideoData, attachLocalPath, showAttachmentStatus])
 
   const removeImage = useCallback((idx: number) => {
     setImages(prev => prev.filter((_, i) => i !== idx))
@@ -856,9 +930,9 @@ export function ChatPane({
               type="button"
               className={`run-popover-trigger ${openPopover === 'agent' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'agent' ? null : 'agent')}
-              title="Choose the agent remembered for this workspace"
+              title={streaming ? `Active task route: ${agentMode || agentSelection || 'Auto'}` : 'Choose the agent remembered for this workspace'}
             >
-              Agent <strong>{agentSelection || 'Auto'}</strong>
+              {streaming ? 'Route' : 'Agent'} <strong>{streaming ? (agentMode || agentSelection || 'Auto') : (agentSelection || 'Auto')}</strong>
             </button>
             {openPopover === 'agent' && (
               <ComposerPopoverPortal anchor={agentTriggerRef.current} width={560}>
@@ -928,7 +1002,7 @@ export function ChatPane({
             onPaste={handlePaste}
             onDrop={e => void handleDrop(e)}
             onDragOver={e => e.preventDefault()}
-            placeholder="Ask anything... drop a file to attach. Enter sends; Ctrl+Enter adds a new line."
+            placeholder="Ask anything... attach, paste a file path, or drop files here. Enter sends; Ctrl+Enter adds a new line."
             rows={4}
             disabled={false}
             spellCheck
@@ -936,6 +1010,9 @@ export function ChatPane({
             autoCapitalize="sentences"
           />
           <div className="chat-input-actions">
+            <button className="composer-attach-btn" onClick={() => void chooseChatFiles()} title="Choose one or more files. Large files stay on disk and are read in bounded chunks.">
+              Attach files
+            </button>
             <button
               className={`composer-voice-btn ${recording ? 'recording' : voiceSession ? 'active' : ''}`}
               onClick={() => recording ? stopRecording() : void startRecording()}
@@ -963,6 +1040,7 @@ export function ChatPane({
               <span>{streaming ? 'Interrupt & Send' : 'Send'}</span>
             </button>
           </div>
+          {attachmentStatus && <div className="composer-attachment-status" role="status">{attachmentStatus}</div>}
           {voiceStatus && <div className="composer-voice-status" role="status">{voiceStatus}</div>}
         </div>
       </div>
@@ -977,6 +1055,25 @@ function blobToDataURI(blob: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error || new Error('Could not read recording'))
     reader.readAsDataURL(blob)
   })
+}
+
+// Windows Explorer commonly places copied files on the clipboard as an
+// absolute path string in WebView2. Only treat the clipboard as files when
+// every non-empty line is an absolute path/URL; ordinary prose remains prose.
+function clipboardFilePathCandidates(raw: string): string[] {
+  const text = raw.trim()
+  if (!text || text.length > 16_000) return []
+  const candidates = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (candidates.length === 0 || candidates.length > 20) return []
+  const stripQuotes = (value: string) => value.replace(/^["']|["']$/g, '')
+  const paths = candidates.map(stripQuotes)
+  const isAbsoluteFilePath = (value: string) => (
+    /^[a-zA-Z]:[\\/]/.test(value)
+    || /^\\\\[^\\]+\\[^\\]+/.test(value)
+    || /^\/mnt\/[a-zA-Z]\//.test(value)
+    || /^file:\/\//i.test(value)
+  )
+  return paths.every(isAbsoluteFilePath) ? paths : []
 }
 
 function takeSpeechChunks(input: string, minChars: number, flush: boolean): { chunks: string[]; rest: string } {
@@ -1546,6 +1643,7 @@ function MessageBubble({
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
+              ...sharedMarkdownComponents,
               code({ className, children, ...props }) {
                 const match = /language-(\w+)/.exec(className ?? '')
                 const lang = match?.[1] ?? ''
@@ -1590,33 +1688,25 @@ function MessageBubble({
 
 function LiveModelBubble({ thinking, content }: { thinking: string; content: string }) {
   const hasThinking = thinking.trim().length > 0
-  const contentParts = splitLiveAssistantContent(content)
-  const hasContent = contentParts.length > 0
+  const visibleContent = content.replace(/\r\n/g, '\n').trim()
+  const hasContent = visibleContent.length > 0
   if (!hasThinking && !hasContent) return null
   return (
     <div className="msg msg-assistant msg-streaming msg-live-model">
       {hasThinking && <ThinkingBlock text={thinking} live />}
-      {contentParts.map((part, index) => (
-        <div className="live-response-message" key={`${index}-${part.slice(0, 24)}`}>
+      {hasContent && (
+        <div className="live-response-message">
           <div className="msg-header">
             <span className="msg-role">Assistant</span>
             <span className="msg-time">live</span>
           </div>
           <div className="msg-body live-response-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{part}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={sharedMarkdownComponents}>{visibleContent}</ReactMarkdown>
           </div>
         </div>
-      ))}
+      )}
     </div>
   )
-}
-
-function splitLiveAssistantContent(content: string): string[] {
-  const text = content.replace(/\r\n/g, '\n').trim()
-  if (!text) return []
-  const parts = text.split(/\n{2,}/).map(part => part.trim()).filter(Boolean)
-  if (parts.length <= 1) return parts
-  return parts
 }
 
 function isPlanToolOutput(content: string): boolean {

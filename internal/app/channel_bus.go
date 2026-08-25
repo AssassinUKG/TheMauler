@@ -32,7 +32,25 @@ func (a *App) DispatchChannelMessage(env ChannelEnvelope) (ChannelResponse, erro
 		return ChannelResponse{Status: "busy", Message: "Agent Eval is running; retry when it finishes."}, fmt.Errorf("agent eval is running")
 	}
 	env = channelbus.NormalizeEnvelope(env)
+	originalText := env.Text
+	continuedTask, confirmedRoute := a.takeRemotePendingTask(env.SessionID, originalText)
+	if confirmedRoute {
+		env.Text = continuedTask
+		if env.Metadata == nil {
+			env.Metadata = map[string]string{}
+		}
+		env.Metadata["route_confirmation"] = originalText
+	}
 	route := channelbus.RouteEnvelope(env)
+	if confirmedRoute {
+		route = channelbus.Route{
+			Lane:     channelbus.LaneWork,
+			Command:  "cmd",
+			Argument: continuedTask,
+			Policy:   channelbus.WorkQueueIfBusy,
+			Reason:   "confirmed routing of pending Telegram task",
+		}
+	}
 	a.recordChannelEvent("channel_message_in", env, route, "")
 	switch route.Lane {
 	case channelbus.LaneSideChat:
@@ -133,7 +151,7 @@ func (a *App) handleChannelQuickAction(env channelbus.Envelope, route channelbus
 	case "quick_terminal":
 		command, label := quickTerminalCommand(route.Argument)
 		if command == "" {
-			return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "I recognised a quick terminal request, but do not have a deterministic command for it yet. Use /cmd <task> for the full agent."}, nil
+			return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "I recognised a quick terminal request, but do not have a deterministic command for it yet. Send the task normally for the full agent."}, nil
 		}
 		raw, _ := json.Marshal(terminalRunArgs{Command: command, WaitFor: "output", Lines: 60})
 		result, err := (&terminalRunTool{app: a}).Run(context.Background(), raw)
@@ -150,7 +168,7 @@ func (a *App) handleChannelQuickAction(env channelbus.Envelope, route channelbus
 			},
 		}, nil
 	default:
-		return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "Unknown quick action. Use /cmd <task> for full agent work."}, nil
+		return channelbus.Response{Lane: route.Lane, Status: "unsupported", Message: "Unknown quick action. Send the task normally for full agent work."}, nil
 	}
 }
 
@@ -227,7 +245,10 @@ func (a *App) GetChannelBusStatus() map[string]string {
 func (a *App) handleChannelSideChat(env channelbus.Envelope, route channelbus.Route) channelbus.Response {
 	reply, err := a.runChannelSideChat(env, route)
 	if err != nil {
-		reply = "I received that, but the side-chat model call failed: " + err.Error() + "\n\nUse /cmd <task> if you want me to start an unrestricted project agent run."
+		reply = "I received that, but the side-chat model call failed: " + err.Error() + "\n\nSend the task normally if you want me to start an unrestricted project agent run."
+	}
+	if strings.EqualFold(strings.TrimSpace(env.Source), "telegram") && sideChatOffersAgentRoute(reply) {
+		a.rememberRemotePendingTask(env.SessionID, firstNonEmpty(strings.TrimSpace(route.Argument), strings.TrimSpace(env.Text)))
 	}
 	return channelbus.Response{
 		Lane:    route.Lane,
@@ -246,7 +267,18 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 		text = strings.TrimSpace(env.Text)
 	}
 	if text == "" {
-		return "I received an empty message. Send text, voice with transcription configured, or use /cmd <task>.", nil
+		return "I received an empty message. Send text or a voice note with transcription configured.", nil
+	}
+	sessionID := strings.TrimSpace(env.SessionID)
+	if sessionID == "" {
+		sessionID = env.Source + ":default"
+	}
+	if looksRemoteRouteContinuation(text) {
+		return "I don’t have a pending task to route in this Telegram conversation. Send the full task in a normal message and I’ll start it automatically.", nil
+	}
+	if reply, ok := a.remoteRunFollowUp(sessionID, text); ok {
+		a.appendSideChatTurn(sessionID, text, reply)
+		return reply, nil
 	}
 	cfg, pf, profile, err := a.sideChatProfile()
 	if err != nil {
@@ -263,10 +295,6 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 	if err := a.ensureModelLoaded(ctx, client, profile); err != nil {
 		a.recordChannelSideChatModelEvent("channel_sidechat_model_error", env, route, profile, time.Since(start), 0, err.Error())
 		return "", err
-	}
-	sessionID := strings.TrimSpace(env.SessionID)
-	if sessionID == "" {
-		sessionID = env.Source + ":default"
 	}
 	msgs := a.sideChatMessages(sessionID, env, text, cfg, pf)
 	reply, err := a.runSideChatCompletion(ctx, client, profile, msgs)
@@ -301,7 +329,7 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 	reply = strings.TrimSpace(reply)
 	if sideChatLooksLikeToolCall(reply) {
 		retryMsgs := []llm.Message{
-			llm.NewTextMessage(llm.RoleSystem, "This is no-tool side chat. Do not output function calls, JSON tool calls, code fences, or command syntax. If action is needed, tell the user to send /cmd followed by the task."),
+			llm.NewTextMessage(llm.RoleSystem, "This is no-tool side chat. Do not output function calls, JSON tool calls, code fences, or command syntax. If action is needed, explain that the user's normal actionable message will be routed to the project agent."),
 			llm.NewTextMessage(llm.RoleUser, text),
 		}
 		reply, err = a.runSideChatCompletion(ctx, client, profile, retryMsgs)
@@ -311,7 +339,7 @@ func (a *App) runChannelSideChat(env channelbus.Envelope, route channelbus.Route
 		}
 		reply = strings.TrimSpace(reply)
 		if reply == "" || sideChatLooksLikeToolCall(reply) {
-			reply = "That needs a real tool run. Send it as `/cmd <task>` and I will execute it through the agent instead of printing a tool call in chat."
+			reply = "That needs a real tool run. Send the task normally and I will route it through the Mauler agent instead of printing a tool call in chat. `/cmd` remains available as an explicit override."
 			a.recordChannelSideChatModelEvent("channel_sidechat_model_tool_leak", env, route, profile, time.Since(start), 0, "side-chat model emitted tool-call syntax")
 		}
 	}
@@ -443,12 +471,12 @@ func (a *App) sideChatMessages(sessionID string, env channelbus.Envelope, text s
 
 	system := "You are MaulBot, TheMauler's Telegram side-chat assistant running on the user's local Windows machine. Reply conversationally and directly. " +
 		"Do not claim you are cloud-hosted, remote-only, or unable to access the local machine because you are in the cloud. " +
-		"Your side-chat lane has no tools, but /cmd starts a local TheMauler agent run with approved local tools and CLI access. " +
+		"Your side-chat lane has no tools, but actionable requests are automatically routed to a local TheMauler agent run with approved local tools and CLI access; /cmd remains an optional explicit override. " +
 		"The Telegram runtime can receive voice notes, transcribe them, and synthesize your final text into a Telegram voice note; never claim you cannot send voice messages or audio. " +
-		"Keep this chat separate from the active project run. Do not claim to have run tools or changed files in side chat. " +
+		"Keep this chat separate from the desktop project transcript. Completed Telegram agent tasks and their final results are included in this Telegram conversation history, so answer follow-up questions from that evidence. Do not claim to have run tools or changed files in side chat itself. " +
 		"You may answer questions about current app/project status using the status packet below. " +
-		"If the user wants real work, tell them to use /cmd <task>, /stop, /status, /facts, /plan, or /terminal. " +
-		"For screenshots, files, shell commands, web research, or other actions, ask for /cmd <task> instead of saying you cannot do it."
+		"For explicit controls, mention /cmd <task>, /stop, /status, /facts, /plan, or /terminal only when useful. " +
+		"For screenshots, files, shell commands, web research, or other actions, tell the user the normal message will be routed to the agent rather than saying you cannot do it."
 	if envHasAudioAttachment(env) {
 		system += " This incoming user turn came from a Telegram voice/audio message; answer as if in voice chat, concise and spoken-friendly."
 	}
@@ -498,6 +526,144 @@ func (a *App) appendSideChatTurn(sessionID, userText, assistantText string) {
 	a.sideChatHistories[sessionID] = history
 }
 
+func (a *App) rememberRemotePendingTask(sessionID, task string) {
+	sessionID = strings.TrimSpace(sessionID)
+	task = strings.TrimSpace(task)
+	if sessionID == "" || task == "" || looksRemoteRouteContinuation(task) {
+		return
+	}
+	a.sideChatMu.Lock()
+	defer a.sideChatMu.Unlock()
+	if a.remotePendingTasks == nil {
+		a.remotePendingTasks = map[string]string{}
+	}
+	a.remotePendingTasks[sessionID] = task
+}
+
+func (a *App) takeRemotePendingTask(sessionID, confirmation string) (string, bool) {
+	if !looksRemoteRouteContinuation(confirmation) {
+		return "", false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	a.sideChatMu.Lock()
+	defer a.sideChatMu.Unlock()
+	if a.remotePendingTasks == nil {
+		return "", false
+	}
+	task := strings.TrimSpace(a.remotePendingTasks[sessionID])
+	if task == "" {
+		return "", false
+	}
+	delete(a.remotePendingTasks, sessionID)
+	return task, true
+}
+
+func looksRemoteRouteContinuation(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	lower = strings.Trim(lower, " \t\r\n.!?,;:")
+	switch lower {
+	case "route it", "route that", "run it", "run that", "do it", "do that", "go ahead", "yes route it", "yes run it", "yes please", "proceed":
+		return true
+	default:
+		return false
+	}
+}
+
+func sideChatOffersAgentRoute(reply string) bool {
+	lower := strings.ToLower(strings.TrimSpace(reply))
+	if lower == "" {
+		return false
+	}
+	return (strings.Contains(lower, "route") && strings.Contains(lower, "agent")) ||
+		(strings.Contains(lower, "normal message") && strings.Contains(lower, "handled") && strings.Contains(lower, "web access"))
+}
+
+type remoteRunConversationResult struct {
+	Task   string
+	State  string
+	Result string
+}
+
+func (a *App) recordRemoteRunConversation(sessionID, task, state, result string) {
+	sessionID = strings.TrimSpace(sessionID)
+	task = strings.TrimSpace(task)
+	result = cleanTelegramRunResult(result)
+	if sessionID == "" || task == "" || result == "" || sideChatLooksLikeToolCall(result) {
+		return
+	}
+	entry := remoteRunConversationResult{Task: task, State: firstNonEmpty(strings.TrimSpace(state), "done"), Result: result}
+	a.sideChatMu.Lock()
+	defer a.sideChatMu.Unlock()
+	if a.sideChatHistories == nil {
+		a.sideChatHistories = map[string][]llm.Message{}
+	}
+	if a.remoteRunResults == nil {
+		a.remoteRunResults = map[string]remoteRunConversationResult{}
+	}
+	history := a.sideChatHistories[sessionID]
+	history = append(history,
+		llm.NewTextMessage(llm.RoleUser, task),
+		llm.NewTextMessage(llm.RoleAssistant, formatRemoteRunHistoryEntry(entry)),
+	)
+	if len(history) > 16 {
+		history = history[len(history)-16:]
+	}
+	a.sideChatHistories[sessionID] = history
+	a.remoteRunResults[sessionID] = entry
+}
+
+func (a *App) remoteRunFollowUp(sessionID, text string) (string, bool) {
+	if !looksRemoteRunResultFollowUp(text) {
+		return "", false
+	}
+	a.sideChatMu.Lock()
+	entry, ok := a.remoteRunResults[sessionID]
+	a.sideChatMu.Unlock()
+	if !ok {
+		entry, ok = a.persistedRemoteRunResult(sessionID)
+	}
+	if !ok {
+		return "I do not have a completed Mauler task result for this Telegram conversation yet.", true
+	}
+	return formatRemoteRunHistoryEntry(entry), true
+}
+
+func (a *App) persistedRemoteRunResult(sessionID string) (remoteRunConversationResult, bool) {
+	runs, err := a.ListTaskRuns()
+	if err != nil {
+		return remoteRunConversationResult{}, false
+	}
+	prefix := "channel:telegram:" + claimantSegment(sessionID) + ":"
+	for _, run := range runs {
+		if !strings.EqualFold(strings.TrimSpace(run.Origin), "telegram") || !strings.HasPrefix(run.ClaimantID, prefix) {
+			continue
+		}
+		result := telegramRunCompletionDetail(run, firstNonEmpty(run.Response, run.Summary))
+		if strings.TrimSpace(result) == "" || sideChatLooksLikeToolCall(result) {
+			continue
+		}
+		return remoteRunConversationResult{Task: run.Prompt, State: firstNonEmpty(run.State, run.Status), Result: result}, true
+	}
+	return remoteRunConversationResult{}, false
+}
+
+func looksRemoteRunResultFollowUp(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	lower = strings.Trim(lower, " \t\r\n.!?,;:")
+	return hasAny(lower,
+		"what's the result", "whats the result", "what is the result", "show me the result", "give me the result",
+		"what was the result", "did it work", "did that work", "did it finish", "has it finished",
+		"what did it find", "what did you find", "what did it return", "what did that return",
+	)
+}
+
+func formatRemoteRunHistoryEntry(entry remoteRunConversationResult) string {
+	return "**Latest Mauler result**\n\n" +
+		"**Task:** " + entry.Task + "\n" +
+		"**Status:** " + remoteRunPhase(entry.State) + "\n\n" +
+		"**Result**\n" + entry.Result
+}
+
 func (a *App) sideChatFallbackReply(text string) string {
 	lower := strings.ToLower(text)
 	status := a.remoteStatusSummary()
@@ -506,9 +672,9 @@ func (a *App) sideChatFallbackReply(text string) string {
 		strings.Contains(lower, "running") ||
 		strings.Contains(lower, "queue") ||
 		(strings.Contains(lower, "what") && strings.Contains(lower, "go")) {
-		return "The local side-chat model returned no visible text, but I still have Mauler state:\n\n" + status + "\n\nUse /cmd <task> if you want me to start or queue project work."
+		return "The local side-chat model returned no visible text, but I still have Mauler state:\n\n" + status + "\n\nSend the task normally to start or queue project work; `/cmd` is optional."
 	}
-	return "I received that, but the local side-chat model returned no visible text. Telegram is still connected; use /cmd <task> for project work, or ask again and I will retry the side chat."
+	return "I received that, but the local side-chat model returned no visible text. Telegram is still connected; send the task normally for project work, or ask again and I will retry side chat."
 }
 
 func sideChatMaxTokens(profile settings.Profile) int {
@@ -605,7 +771,17 @@ func (a *App) remoteProjectsSummary() string {
 		if project.ID == a.cfg.Context.ActiveLabProfile {
 			marker = " [active]"
 		}
-		lines = append(lines, fmt.Sprintf("- %s%s — %s — %s", firstNonEmpty(project.ID, project.Name), marker, firstNonEmpty(project.Target, "no target"), project.WorkspaceDir))
+		allowed := 0
+		for _, entry := range project.ScopeTargets {
+			if !entry.Excluded && entry.Kind != "invalid" {
+				allowed++
+			}
+		}
+		targetLabel := firstNonEmpty(project.Target, "no target")
+		if allowed > 1 {
+			targetLabel = fmt.Sprintf("%s +%d more", targetLabel, allowed-1)
+		}
+		lines = append(lines, fmt.Sprintf("- %s%s — %s — %s", firstNonEmpty(project.ID, project.Name), marker, targetLabel, project.WorkspaceDir))
 	}
 	lines = append(lines, "", "Use /project <id> to switch.")
 	return strings.Join(lines, "\n")
@@ -643,7 +819,7 @@ func (a *App) remoteSelectProject(id string) (string, error) {
 	}
 	cfg.Context.ActiveLabProfile = selected.ID
 	cfg.Context.WorkspaceDir = selected.WorkspaceDir
-	cfg.Context.Lab = settings.LabContext{ID: selected.ID, Name: selected.Name, Target: selected.Target, Hostname: selected.Hostname, VPNInterface: selected.VPNInterface, LatestArtifact: selected.LatestArtifact, OpsProfile: selected.OpsProfile, EvidencePolicy: selected.EvidencePolicy, AccessPreference: selected.AccessPreference, Notes: selected.Notes}
+	cfg.Context.Lab = settings.LabContext{ID: selected.ID, Name: selected.Name, Target: selected.Target, Hostname: selected.Hostname, ScopeTargets: append([]settings.LabScopeTarget(nil), selected.ScopeTargets...), VPNInterface: selected.VPNInterface, LatestArtifact: selected.LatestArtifact, OpsProfile: selected.OpsProfile, EvidencePolicy: selected.EvidencePolicy, AccessPreference: selected.AccessPreference, Notes: selected.Notes}
 	cfg.Context.OpenFolders = []settings.WorkspaceFolder{{Path: selected.WorkspaceDir, Name: firstNonEmpty(selected.Name, selected.ID), Role: "root"}}
 	if err := a.UpdateSettings(cfg); err != nil {
 		return "Project switch failed: " + err.Error(), err
@@ -1093,7 +1269,8 @@ func remoteHelpText() string {
 		"/file <path> - read a workspace file",
 		"/artifact [path] - list or read run artifacts",
 		"/brain - recent RunLedger/Brain signals",
-		"/cmd <task> - start or queue project work",
+		"Plain actionable messages - automatically start or queue project work",
+		"/cmd <task> - explicit project-work override (optional)",
 		"/run <task> - compatibility alias for /cmd",
 		"/stop - stop active project run",
 		"/terminal_read - read shared terminal state",
@@ -1102,7 +1279,7 @@ func remoteHelpText() string {
 		"/logs - latest run summary",
 		"/help - this help",
 		"",
-		"Plain messages are side chat and do not interrupt the project run.",
+		"Conversation stays in side chat; actionable requests use the project agent. Messages queue safely while another run is active.",
 	}, "\n")
 }
 

@@ -15,6 +15,9 @@ func selectToolsForTurn(cfg settings.ToolsConfig, firstUserText string, autoCont
 
 func selectToolsForTurnWithState(cfg settings.ToolsConfig, firstUserText string, autoContinues int, totalToolCallsMade int, state TerminalStateSnapshot) map[string]bool {
 	selected := selectToolsForTurn(cfg, firstUserText, autoContinues, totalToolCallsMade)
+	if needsLiveSystemInfoTool(firstUserText) || needsWindowsHostInspectionTool(firstUserText) || needsLiveExternalInfoTool(firstUserText) {
+		return selected
+	}
 	return applyTerminalStateToolRouting(selected, firstUserText, state)
 }
 
@@ -46,8 +49,26 @@ func applyTerminalStateToolRouting(selected map[string]bool, firstUserText strin
 
 func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[string]bool {
 	lower := strings.ToLower(strings.TrimSpace(firstUserText))
+	if needsLiveSystemInfoTool(lower) || needsWindowsHostInspectionTool(lower) {
+		// Keep this deterministic: a required-tool time/date request should not
+		// let a small local model choose skill, memory, workspace inspection, or
+		// the WSL interactive terminal. Windows host facts use a per-call native
+		// PowerShell backend applied by the execution router.
+		return map[string]bool{"shell": true}
+	}
+	if needsLiveExternalInfoTool(lower) {
+		// Current public facts require provenance. Keep the opening choice small
+		// while allowing either a direct API probe or sourced public research.
+		selected := map[string]bool{"http_probe": true}
+		addAlwaysAvailableTools(selected)
+		addResearchTools(selected)
+		return selected
+	}
 	selected := map[string]bool{}
 	addAlwaysAvailableTools(selected)
+	if looksLikeImageGenerationTask(lower) {
+		selected[generateImageToolName] = true
+	}
 
 	if lower == "" {
 		addReadTools(selected)
@@ -74,7 +95,7 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 			addLeanReadTools(selected)
 		}
 	case looksCodeOrWorkspaceTask(lower) || needsInspectionTool(lower):
-		if looksReadOnlyInspectionTask(lower) {
+		if promptLooksReadOnly(lower) || looksReadOnlyInspectionTask(lower) {
 			addInspectionTools(selected)
 		} else {
 			addCodeTools(selected)
@@ -85,6 +106,9 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 		if isUnrestrictedToolset(cfg) {
 			addBasicShellTools(selected)
 		}
+	}
+	if looksEngagementGridTask(lower) {
+		selected["engagement"] = true
 	}
 
 	if len(selected) < 6 {
@@ -99,10 +123,32 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 	return selected
 }
 
+func looksLikeImageGenerationTask(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return hasAny(lower,
+		"generate an image", "generate image", "create an image", "create image",
+		"make an image", "make image", "draw an image", "render an image",
+		"image generation", "text to image", "text-to-image", "picture of",
+		"illustration of", "concept art", "wallpaper", "poster image",
+	)
+}
+
 func broadenToolSelection(selected map[string]bool, cfg settings.ToolsConfig, firstUserText string, totalToolCallsMade int) map[string]bool {
 	out := cloneBoolMap(selected)
 	lower := strings.ToLower(strings.TrimSpace(firstUserText))
+	if needsLiveSystemInfoTool(lower) || needsWindowsHostInspectionTool(lower) {
+		return map[string]bool{"shell": true}
+	}
+	if needsLiveExternalInfoTool(lower) {
+		out := map[string]bool{"http_probe": true}
+		addAlwaysAvailableTools(out)
+		addResearchTools(out)
+		return out
+	}
 	addAlwaysAvailableTools(out)
+	if looksEngagementGridTask(lower) {
+		out["engagement"] = true
+	}
 	if needsOperationalTool(lower) || looksShellCentricTask(lower) {
 		addOpsToolsForPhase(out, opsPhaseFromText(lower))
 		if totalToolCallsMade >= 4 {
@@ -145,10 +191,19 @@ func addAlwaysAvailableTools(selected map[string]bool) {
 		"read_tool_result",
 		"skill",
 		"todo_write",
-		"engagement",
 	} {
 		selected[name] = true
 	}
+}
+
+func looksEngagementGridTask(lower string) bool {
+	lower = strings.ToLower(strings.TrimSpace(lower))
+	return lower == "engagement" || hasAny(lower,
+		"engagement grid", "engagement checklist", "active engagement", "project engagement",
+		"create engagement", "open engagement", "engagement status", "engagement notes",
+		"claim engagement", "finish engagement", "advance engagement", "engagement finding",
+		"grid checklist", "claim the next check", "record the finding in the grid",
+	)
 }
 
 func addLeanReadTools(selected map[string]bool) {
@@ -303,13 +358,20 @@ func explicitBrowserIntent(lower string) bool {
 }
 
 func looksReportOrDocsTask(lower string) bool {
-	return hasAny(lower,
+	documentNoun := hasAny(lower,
 		"report", "writeup", "write-up", "documentation", "readme", "notes", "deliverable",
 		"summary document", "architecture document", "plan document",
 	)
+	if !documentNoun {
+		return false
+	}
+	return promptExplicitlyRequestsMutation(lower) || hasAny(lower, "finish ", "complete ")
 }
 
 func looksCodeOrWorkspaceTask(lower string) bool {
+	if promptLooksLikeAPIInventory(lower) && !promptExplicitlyRequestsMutation(lower) {
+		return false
+	}
 	return looksCodebaseTask(lower) || hasAny(lower,
 		"fix", "repair", "restore", "bug", "implement", "patch", "refactor", "update", "edit", "change", "modify", "wire", "test", "tests", "build",
 		"compile", "lint", "typecheck", "type-check", "function", "class", "component",

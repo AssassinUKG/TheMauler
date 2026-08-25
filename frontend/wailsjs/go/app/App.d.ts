@@ -212,6 +212,8 @@ export function Ping():Promise<string>;
 
 export function PingProvider(arg1:settings.Provider):Promise<string>;
 
+export function PrepareChatAttachmentPath(arg1:string):Promise<app.ChatAttachment>;
+
 export function PreviewContext(arg1:string,arg2:string):Promise<app.ContextInspection>;
 
 export function PruneLedgerEvents(arg1:string,arg2:Array<string>):Promise<number>;
@@ -275,6 +277,8 @@ export function SaveUserProfile(arg1:string):Promise<void>;
 export function ScaffoldWorkspaceFolders(arg1:string,arg2:Array<string>):Promise<Array<string>>;
 
 export function SearchSessionRecall(arg1:string,arg2:number):Promise<Array<sessionstore.SearchResult>>;
+
+export function SelectChatFiles():Promise<Array<app.ChatAttachment>>;
 
 export function SelectProjectInstructionDirectory(arg1:string):Promise<string>;
 

@@ -69,6 +69,10 @@ LSP server a hard dependency for basic operation.
 
 ## 6. Workbench and channels
 
+- Multi-target client scope is implemented through the Home **Authorised scope** editor, legacy
+  comma-list migration, explicit exclusions, and complete Grid locking. Remaining enhancements are
+  batch readiness for selected concrete hosts and per-asset Grid/evidence filters; see
+  `../multi-target-authorised-scope-plan-2026-08.md`.
 - Continue the cockpit cleanup plan without removing resizers, collapsed rails, Terminal/AI Commands
   boundaries, or daily controls.
 - Finish Telegram/audio live-smoke edges and guarantee remote delivery of the same final answer shown

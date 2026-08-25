@@ -151,6 +151,22 @@ func TestEngagementToolRejectsModelChosenOutOfScopeTarget(t *testing.T) {
 	}
 }
 
+func TestLockedAuthoritativeScopeDoesNotBroadenPathOrBypassExclusion(t *testing.T) {
+	lab := settings.LabContext{ScopeTargets: []settings.LabScopeTarget{
+		{Value: "https://client.example/admin", Kind: "url"},
+		{Value: "https://client.example/admin/private", Kind: "url", Excluded: true},
+	}}
+	if _, err := lockedAuthoritativeScope(lab, []string{"https://client.example/"}); err == nil {
+		t.Fatal("requested root URL broadened an authorised path prefix")
+	}
+	if _, err := lockedAuthoritativeScope(lab, []string{"https://client.example/admin/users"}); err != nil {
+		t.Fatalf("narrower authorised path rejected: %v", err)
+	}
+	if _, err := lockedAuthoritativeScope(lab, []string{"https://client.example/admin/private/keys"}); err == nil {
+		t.Fatal("requested scope bypassed an explicit exclusion")
+	}
+}
+
 func TestStructuredHTTPProbeScopeFailsClosedForActiveEngagement(t *testing.T) {
 	app, cleanup := newEngagementToolTestApp(t)
 	defer cleanup()
@@ -236,6 +252,29 @@ func TestEngagementToolRegistrationAndRoutingAreCompact(t *testing.T) {
 	defs, _ := toolDefsAndChoiceForTurn(app.registry, cfg, "continue the HTB engagement checklist", 0, 0)
 	if !toolCallAdvertised(defs, "engagement") {
 		t.Fatalf("engagement definition missing: %s", toolProtocolToolNames(defs))
+	}
+}
+
+func TestOrdinaryFileAnalysisDoesNotRouteEngagementTool(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	for _, prompt := range []string{
+		`Can you access this file? "C:\Users\richa\Desktop\New folder\swagger.json"`,
+		"Count the endpoints and HTTP operations in the attached OpenAPI file.",
+		"Read this API document and summarise it.",
+		"how many POST, PUT, PATCH, DELETE endpoints are there and how many should be targeted for 20% coverage?",
+	} {
+		selected := selectToolsForTurn(cfg, prompt, 0, 0)
+		if selected["engagement"] {
+			t.Fatalf("ordinary file prompt routed Engagement Grid tool: %q selected=%#v", prompt, selected)
+		}
+		if promptLooksReadOnly(prompt) && (selected["edit"] || selected["write"] || selected["run_script"] || selected["start_listener"]) {
+			t.Fatalf("read-only file/API prompt routed mutation or listener tools: %q selected=%#v", prompt, selected)
+		}
+	}
+
+	selected := selectToolsForTurn(cfg, "continue the HTB engagement checklist", 1, 3)
+	if !selected["engagement"] {
+		t.Fatalf("explicit engagement continuation lost Grid tool: %#v", selected)
 	}
 }
 

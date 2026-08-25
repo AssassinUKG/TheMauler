@@ -16,6 +16,30 @@ func TestMatchQwen36Profile(t *testing.T) {
 	}
 }
 
+func TestMatchQwen38OfficialAndUncensoredProfiles(t *testing.T) {
+	for _, modelID := range []string{
+		"Qwen3.8-27B-Q4_K_M.gguf",
+		"Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+	} {
+		rp, ok := Match(settings.Profile{Name: "local-import", ModelID: modelID})
+		if !ok {
+			t.Fatalf("expected Qwen3.8 runtime profile match for %q", modelID)
+		}
+		if rp.Name != "qwen3.8-27b" || rp.Adapter != "qwen38" || rp.ToolProtocol != "native-openai" {
+			t.Fatalf("unexpected Qwen3.8 runtime profile: %#v", rp)
+		}
+		if !rp.Supports.Tools || !rp.Supports.Thinking || !rp.Supports.MTP || !rp.RequiresJinja {
+			t.Fatalf("missing Qwen3.8 capability metadata: %#v", rp)
+		}
+		if rp.Defaults.Temperature != 0.7 || rp.Defaults.TopP != 0.8 || rp.Defaults.TopK != 20 || rp.Defaults.PresencePenalty != 1.5 || rp.Defaults.RepeatPenalty != 1.0 {
+			t.Fatalf("Qwen3.8 no-thinking defaults = %#v", rp.Defaults)
+		}
+		if rp.RecommendedCtx != 35000 || rp.KVTypeK != "f16" || rp.KVTypeV != "f16" {
+			t.Fatalf("Qwen3.8 local runtime defaults = %#v", rp)
+		}
+	}
+}
+
 func TestMatchInstalledQwen36VariantTemplates(t *testing.T) {
 	tests := []struct {
 		modelID      string

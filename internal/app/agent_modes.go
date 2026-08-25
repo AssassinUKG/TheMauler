@@ -43,6 +43,9 @@ func looksOpsWorkspaceTask(text string, cfg settings.Settings) bool {
 		cfg.Context.Lab.LatestArtifact,
 		cfg.Context.Lab.OpsProfile,
 	}, "\n"))
+	for _, entry := range cfg.Context.Lab.ScopeTargets {
+		context += "\n" + strings.ToLower(entry.Value) + "\n" + strings.ToLower(entry.Environment)
+	}
 	for _, folder := range cfg.Context.OpenFolders {
 		context += "\n" + strings.ToLower(folder.Path) + "\n" + strings.ToLower(folder.Role)
 	}

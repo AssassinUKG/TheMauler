@@ -91,6 +91,92 @@ func TestRunControlPlanePersistsAtInitialization(t *testing.T) {
 	}
 }
 
+func TestRunControlPlaneTreatsExplicitNoToolAnswerAsReadOnly(t *testing.T) {
+	root := t.TempDir()
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(root)
+	run := startTaskRun(
+		"Return a Markdown table, then add a closing line. Do not use tools.",
+		"Auto",
+		"profile",
+		"model",
+	)
+
+	if err := (&App{}).initializeRunControlPlane(&run, &cfg, AgentMode{Name: "Auto"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if run.Contract.PlanRequired || len(run.Contract.Deliverables) != 0 ||
+		len(run.Contract.AllowedMutations) != 0 || len(run.Contract.AcceptanceChecks) != 0 {
+		t.Fatalf("no-tool answer received a mutation contract: %#v", run.Contract)
+	}
+	if run.Control.Phase != controlplane.PhaseActing || !run.Control.PlanAccepted {
+		t.Fatalf("no-tool answer did not enter direct acting phase: %#v", run.Control)
+	}
+}
+
+func TestRunControlPlaneTreatsHTTPMethodInventoryAsReadOnly(t *testing.T) {
+	root := t.TempDir()
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(root)
+	run := startTaskRun(
+		"how many POST, PUT, PATCH, DELETE endpoints are there and how many should be targeted for 20% coverage?",
+		"Auto", "profile", "model",
+	)
+
+	if err := (&App{}).initializeRunControlPlane(&run, &cfg, AgentMode{Name: "Auto"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if run.Contract.PlanRequired || len(run.Contract.Deliverables) != 0 || len(run.Contract.AcceptanceChecks) != 0 {
+		t.Fatalf("API inventory question received a workspace-mutation contract: %#v", run.Contract)
+	}
+	if run.Contract.Risk != controlplane.RiskLow || run.Control.Phase != controlplane.PhaseActing {
+		t.Fatalf("API inventory control state = contract=%#v control=%#v", run.Contract, run.Control)
+	}
+	if mode := classifyAgentMode(run.Prompt); mode.Name != "Auto" {
+		t.Fatalf("API inventory routed to %q, want read-only Auto", mode.Name)
+	}
+}
+
+func TestRunControlPlaneTreatsAnswerArtifactsAsReadOnly(t *testing.T) {
+	root := t.TempDir()
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(root)
+	for _, prompt := range []string{
+		"Create a concise table of the endpoints in the attached swagger file.",
+		"Generate a coverage report from swagger.json and show me the totals.",
+		"Create a plan for reviewing this repository.",
+		"Tell me what this config file contains and summarise it.",
+	} {
+		run := startTaskRun(prompt, "Auto", "profile", "model")
+		if err := (&App{}).initializeRunControlPlane(&run, &cfg, classifyAgentMode(prompt), true); err != nil {
+			t.Fatal(err)
+		}
+		if run.Contract.PlanRequired || len(run.Contract.Deliverables) != 0 ||
+			len(run.Contract.AllowedMutations) != 0 || len(run.Contract.AcceptanceChecks) != 0 {
+			t.Fatalf("answer-only prompt received mutation contract: prompt=%q contract=%#v", prompt, run.Contract)
+		}
+	}
+}
+
+func TestRunControlPlaneKeepsMixedAnswerAndMutationRequestsWritable(t *testing.T) {
+	root := t.TempDir()
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(root)
+	for _, prompt := range []string{
+		"Summarise the issue, then fix the parser.",
+		"Create a coverage report and save it to a file.",
+		"Show me the current settings and update the docs.",
+	} {
+		run := startTaskRun(prompt, "Builder", "profile", "model")
+		if err := (&App{}).initializeRunControlPlane(&run, &cfg, classifyAgentMode(prompt), true); err != nil {
+			t.Fatal(err)
+		}
+		if !run.Contract.PlanRequired || len(run.Contract.AllowedMutations) == 0 {
+			t.Fatalf("mixed mutation prompt lost write contract: prompt=%q contract=%#v", prompt, run.Contract)
+		}
+	}
+}
+
 func TestRunControlPlaneAddsProjectVerificationWhenDetected(t *testing.T) {
 	root := t.TempDir()
 	previous, _ := os.Getwd()

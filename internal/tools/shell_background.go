@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -136,7 +137,7 @@ func runShellBackground(p shellParams) (string, bool, error) {
 		return out, true, err
 	}
 	if p.Background {
-		out, err := startBackgroundShellJob(p.Command, p.Verbose)
+		out, err := startBackgroundShellJob(p.Command, p.Verbose, p.Backend)
 		return out, true, err
 	}
 	return "", false, nil
@@ -145,7 +146,7 @@ func runShellBackground(p shellParams) (string, bool, error) {
 // startBackgroundShellJob launches command detached in the active backend and
 // returns a handle the agent can poll. Output streams to a temp logfile so the
 // job's stdout/stderr survives across polls.
-func startBackgroundShellJob(command string, verbose bool) (string, error) {
+func startBackgroundShellJob(command string, verbose bool, forcedBackend string) (string, error) {
 	command, err := PrepareShellCommand(command)
 	if err != nil {
 		return "", fmt.Errorf("shell: %w", err)
@@ -161,7 +162,16 @@ func startBackgroundShellJob(command string, verbose bool) (string, error) {
 		return "", fmt.Errorf("shell: too many background jobs running (%d/%d); poll existing jobs to completion before starting more", running, MaxConcurrentBackgroundJobs)
 	}
 
-	backend := detectShellBackend("")
+	backend := detectShellBackend(forcedBackend)
+	if err := validateShellBackend(backend); err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "windows" {
+		if inner, ok := unwrapNestedPowerShellCommand(command); ok {
+			command = inner
+			backend = "powershell"
+		}
+	}
 	distro := ""
 	if backend == "wsl" {
 		distro = activeWSLDistro()

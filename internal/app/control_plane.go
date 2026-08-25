@@ -71,14 +71,19 @@ func buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMode, auton
 		return controlplane.TaskContract{}, fmt.Errorf("resolve workspace root: %w", err)
 	}
 
-	concrete := promptImpliesConcreteDeliverable(run.Prompt) && !promptLooksReadOnly(run.Prompt)
+	// An explicit no-tool instruction is an answer-only contract. Even if the
+	// requested prose contains mutation-shaped words such as "add a closing
+	// line", it cannot authorize or require a workspace mutation.
+	concrete := promptImpliesConcreteDeliverable(run.Prompt) &&
+		!promptLooksReadOnly(run.Prompt) &&
+		!explicitlyForbidsToolUse(run.Prompt)
 	planRequired := cfg.Agents.RequirePlan && concrete
 	risk := controlplane.RiskLow
 	if concrete {
 		risk = controlplane.RiskMedium
 	}
 	lowerPrompt := strings.ToLower(run.Prompt)
-	if hasAny(lowerPrompt, "delete ", "remove ", "credential", "exploit", "reverse shell", "privilege escalation") {
+	if concrete && hasAny(lowerPrompt, "delete ", "remove ", "credential", "exploit", "reverse shell", "privilege escalation") {
 		risk = controlplane.RiskHigh
 	}
 

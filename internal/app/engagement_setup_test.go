@@ -91,6 +91,30 @@ func TestGetEngagementSetupPreviewBlocksMissingTarget(t *testing.T) {
 	}
 }
 
+func TestGetEngagementSetupPreviewUsesCompleteStructuredScope(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	profiles := settings.DefaultProfiles()
+	cfg.Context.WorkspaceDir = t.TempDir()
+	cfg.Context.Lab = settings.LabContext{ID: "client", Name: "Client", ScopeTargets: []settings.LabScopeTarget{
+		{Value: "13.134.229.195", Kind: "ip", Environment: "external"},
+		{Value: "3.9.20.132", Kind: "ip", Environment: "external"},
+		{Value: "10.20.0.0/16", Kind: "cidr", Environment: "internal"},
+		{Value: "10.20.10.5", Kind: "ip", Environment: "internal", Excluded: true},
+	}}
+	app := &App{cfg: &cfg, profiles: &profiles}
+	preview := app.GetEngagementSetupPreview()
+	want := "13.134.229.195,3.9.20.132,10.20.0.0/16,!10.20.10.5"
+	if got := strings.Join(preview.Scope, ","); got != want {
+		t.Fatalf("scope = %q, want %q", got, want)
+	}
+	if preview.Target != "13.134.229.195" {
+		t.Fatalf("structured scope primary target = %q", preview.Target)
+	}
+	if !preview.CanCreate {
+		t.Fatalf("structured allowed scope did not enable create: %#v", preview.Checks)
+	}
+}
+
 func TestCheckEngagementTargetHTTPAndOutOfScopeRedirect(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

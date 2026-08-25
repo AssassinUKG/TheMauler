@@ -49,6 +49,39 @@ type RuntimeProfile struct {
 func Registry() []RuntimeProfile {
 	return []RuntimeProfile{
 		{
+			Name:            "qwen3.8-27b",
+			Family:          "qwen3.8",
+			HuggingFaceRepo: "Qwen/Qwen3.8-27B",
+			MatchAliases: []string{
+				"Qwen3.8-27B-Q4_K_M",
+				"Qwen3.8-27B-Uncensored-Q4_K_M",
+			},
+			Backend:       "llama.cpp",
+			Quant:         "Q4_K_M",
+			Adapter:       "qwen38",
+			ToolProtocol:  "native-openai",
+			ChatTemplate:  "embedded-gguf-jinja",
+			RequiresJinja: true,
+			Supports: Supports{
+				Tools:    true,
+				Thinking: true,
+				MTP:      true,
+			},
+			Defaults: Defaults{
+				Temperature:     0.7,
+				TopP:            0.8,
+				TopK:            20,
+				MinP:            0.0,
+				PresencePenalty: 1.5,
+				RepeatPenalty:   1.0,
+			},
+			// The model supports much more natively, but 35K is the verified
+			// quality/VRAM point for this RTX 3090 and leaves room for F16 KV.
+			RecommendedCtx: 35000,
+			KVTypeK:        "f16",
+			KVTypeV:        "f16",
+		},
+		{
 			Name:            "qwen3.6-27b-unsloth-ud-q4-k-xl",
 			Family:          "qwen3.6",
 			HuggingFaceRepo: "unsloth/Qwen3.6-27B-GGUF",
@@ -501,6 +534,8 @@ func sizeNeedleFromName(name string) string {
 
 func matchNeedles(family string) []string {
 	switch family {
+	case "qwen3.8":
+		return []string{"qwen3.8", "qwen-3.8", "qwen_3.8"}
 	case "qwen3.6":
 		return []string{"qwen3.6", "qwen-3.6", "qwen_3.6"}
 	case "qwen3.5":

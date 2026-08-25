@@ -18,47 +18,52 @@
     api_key_env = "OPENROUTER_API_KEY"
 
 [profiles]
-  # 2026-07-21 local tournament winner for the user's RTX 3090 24 GB.
-  # The exact GGUF template is code-owned. Mauler may enable native draft-mtp
-  # only after inspecting the artifact; MTP calibration remains machine-specific.
-  [profiles."qwen3.6-nothink"]
-    name = "qwen3.6-nothink"
+  # 2026-08-16 Qwen3.8 default for the user's RTX 3090 24 GB.
+  # The exact GGUF template is code-owned. Native draft-mtp n=2 is a conservative
+  # starting point and must still be measured against MTP-off on this machine.
+  [profiles."qwen3.8-agent-stability"]
+    name = "qwen3.8-agent-stability"
     provider = "inference-bridge"
-    model_id = "Qwen3.6-27B-UD-Q4_K_XL.gguf"
+    model_id = "Qwen3.8-27B-Q4_K_M.gguf"
     ctx_tokens = 35000
-    thinking = false
-    preserve_thinking = false
+    thinking = true
+    preserve_thinking = true
     mmproj = ""
-    spec_type = ""
-    spec_draft_n_max = 0
+    # Quality-first default. Use q8_0 when a long-context profile needs more
+    # VRAM headroom; custom allows different key/value cache types.
+    kv_cache_precision = "f16"
+    kv_cache_type_k = "f16"
+    kv_cache_type_v = "f16"
+    spec_type = "draft-mtp"
+    spec_draft_n_max = 2
     spec_draft_model = ""
 
-    [profiles."qwen3.6-nothink".thinking_general]
+    [profiles."qwen3.8-agent-stability".thinking_general]
       temperature = 1.0
       top_p = 0.95
       top_k = 20
       min_p = 0.0
       presence_penalty = 0.0
-      repeat_penalty = 1.05
+      repeat_penalty = 1.0
       max_tokens = 8192
       seed = -1
 
-    [profiles."qwen3.6-nothink".thinking_coding]
-      temperature = 0.6
+    [profiles."qwen3.8-agent-stability".thinking_coding]
+      temperature = 1.0
       top_p = 0.95
       top_k = 20
       min_p = 0.0
       presence_penalty = 0.0
-      repeat_penalty = 1.05
+      repeat_penalty = 1.0
       max_tokens = 8192
       seed = -1
 
-    [profiles."qwen3.6-nothink".nothinking]
-      temperature = 0.2
-      top_p = 0.95
+    [profiles."qwen3.8-agent-stability".nothinking]
+      temperature = 0.7
+      top_p = 0.8
       top_k = 20
       min_p = 0.0
-      presence_penalty = 0.0
-      repeat_penalty = 1.05
+      presence_penalty = 1.5
+      repeat_penalty = 1.0
       max_tokens = 8192
       seed = -1

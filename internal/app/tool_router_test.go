@@ -188,6 +188,40 @@ func TestOpsReportPhasePrefersFilesAndEvidence(t *testing.T) {
 	}
 }
 
+func TestAnswerOnlyFileReportUsesInspectionTools(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+
+	for _, prompt := range []string{
+		"Create a concise table of endpoints from the attached swagger file",
+		"Generate a coverage report from the attached OpenAPI file and show me the totals",
+		"Tell me what this config file contains and summarise it",
+	} {
+		selected := selectToolsForTurn(cfg, prompt, 0, 0)
+		for _, want := range []string{"read", "glob", "grep"} {
+			if !selected[want] {
+				t.Fatalf("answer-only file route missing %s for %q: %#v", want, prompt, selected)
+			}
+		}
+		for _, notWant := range []string{"write", "edit", "shell", "run_script", "terminal_send", "start_listener", "evidence_bundle"} {
+			if selected[notWant] {
+				t.Fatalf("answer-only file route advertised %s for %q: %#v", notWant, prompt, selected)
+			}
+		}
+	}
+}
+
+func TestMixedReportAndSaveKeepsWriteTools(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	selected := selectToolsForTurn(cfg, "Generate a coverage report and save it to a file", 0, 0)
+	for _, want := range []string{"read", "write", "edit"} {
+		if !selected[want] {
+			t.Fatalf("saved report route missing %s: %#v", want, selected)
+		}
+	}
+}
+
 func TestReportPhaseDoesNotAdvertiseTerminalSend(t *testing.T) {
 	cfg := settings.DefaultSettings().Tools
 	cfg.ActiveToolset = "unrestricted"

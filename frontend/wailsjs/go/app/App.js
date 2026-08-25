@@ -406,6 +406,10 @@ export function PingProvider(arg1) {
   return window['go']['app']['App']['PingProvider'](arg1);
 }
 
+export function PrepareChatAttachmentPath(arg1) {
+  return window['go']['app']['App']['PrepareChatAttachmentPath'](arg1);
+}
+
 export function PreviewContext(arg1, arg2) {
   return window['go']['app']['App']['PreviewContext'](arg1, arg2);
 }
@@ -532,6 +536,10 @@ export function ScaffoldWorkspaceFolders(arg1, arg2) {
 
 export function SearchSessionRecall(arg1, arg2) {
   return window['go']['app']['App']['SearchSessionRecall'](arg1, arg2);
+}
+
+export function SelectChatFiles() {
+  return window['go']['app']['App']['SelectChatFiles']();
 }
 
 export function SelectProjectInstructionDirectory(arg1) {

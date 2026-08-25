@@ -105,6 +105,25 @@ func TestMaybeReinjectMemoryNoMatchNoInject(t *testing.T) {
 	}
 }
 
+func TestMaybeReinjectMemorySkipsOldStoppedRunNarration(t *testing.T) {
+	app := newReinjectTestApp(t)
+	if _, err := app.SaveMemoryEntry(MemoryEntry{
+		ID: "runmem-stopped", Title: "Run memory", Source: "previous_run", Kind: "fact",
+		Content: "Prompt: access swagger.json\nStatus: stopped\nStop: user_stopped\nNext: The user stopped the current run.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app.history.Append(llm.NewTextMessage(llm.RoleUser, "count endpoints in swagger.json"))
+	run := startTaskRun("count endpoints", "Auto", "default", "model")
+	injected := map[string]bool{}
+	count := 0
+
+	app.maybeReinjectMemory(&run, *app.cfg, injected, &count)
+	if count != 0 || countSystemMessages(app.history.Messages()) != 0 {
+		t.Fatalf("stopped-run narration was re-injected: count=%d messages=%#v", count, app.history.Messages())
+	}
+}
+
 func TestMaybeReinjectMemoryWithholdsConflictingTarget(t *testing.T) {
 	app := newReinjectTestApp(t)
 	app.cfg.Context.Lab.Target = "10.129.15.218"

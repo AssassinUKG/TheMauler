@@ -519,7 +519,10 @@ func autoInjectMemoryAllowed(entry MemoryEntry, intent string, terms []string, p
 	if kind == "preference" || kind == "constraint" || entry.Pinned {
 		return true
 	}
-	if intent == "recall" || intent == "ops" {
+	if lowSignalStoppedRunMemory(entry) {
+		return false
+	}
+	if intent == "recall" {
 		return true
 	}
 	if memoryLooksOpsScoped(entry) && !memoryOverlapsPromptTarget(entry, prompt) {
@@ -532,6 +535,18 @@ func autoInjectMemoryAllowed(entry MemoryEntry, intent string, terms []string, p
 		return true
 	}
 	return firstMemoryTermHit(entry, terms) != "" || intent == "research"
+}
+
+// Older builds persisted user-stopped runs even when no durable observation or
+// artifact existed. Keep those entries visible in Memory, but never recycle the
+// stop narration into a later model turn as if it were a project fact.
+func lowSignalStoppedRunMemory(entry MemoryEntry) bool {
+	if entry.Pinned || normaliseMemorySource(entry.Source) != "previous_run" || !strings.HasPrefix(entry.ID, "runmem-") {
+		return false
+	}
+	content := strings.ToLower(entry.Content)
+	stopped := strings.Contains(content, "status: stopped") || strings.Contains(content, "status: error")
+	return stopped && !strings.Contains(content, "milestones:") && !strings.Contains(content, "target:")
 }
 
 func memoryLooksOpsScoped(entry MemoryEntry) bool {
@@ -614,7 +629,7 @@ func memoryRetrievalIntent(prompt string) string {
 	switch {
 	case containsAny(lower, "previous", "prior", "remember", "last time", "resume", "where did we leave"):
 		return "recall"
-	case containsAny(lower, "pentest", "htb", "ctf", "exploit", "cve", "recon", "foothold", "privilege", "shell", "target"):
+	case hasWholeWord(lower, "target") || containsAny(lower, "pentest", "htb", "ctf", "exploit", "cve", "recon", "foothold", "privilege", "shell"):
 		return "ops"
 	case containsAny(lower, "fix", "bug", "test", "build", "compile", "refactor", "implement", "code"):
 		return "code"

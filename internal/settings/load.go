@@ -118,6 +118,7 @@ func normaliseSettings(s *Settings) {
 		s.Agents.DefaultAutonomy = defaults.Agents.DefaultAutonomy
 	}
 	s.Agents.ReasoningEffort = normaliseReasoningEffortSetting(s.Agents.ReasoningEffort, defaults.Agents.ReasoningEffort)
+	s.Agents.ThinkingMode = normaliseThinkingModeSetting(s.Agents.ThinkingMode, defaults.Agents.ThinkingMode)
 	if s.Agents.NoThinkAfterToolCalls <= 0 || s.Agents.NoThinkAfterToolCalls == 1 || s.Agents.NoThinkAfterToolCalls == 3 {
 		s.Agents.NoThinkAfterToolCalls = defaults.Agents.NoThinkAfterToolCalls
 	}
@@ -296,8 +297,7 @@ func normaliseLabContext(lab LabContext, defaults LabContext) LabContext {
 	if lab.Name == "" {
 		lab.Name = defaults.Name
 	}
-	lab.Target = strings.TrimSpace(lab.Target)
-	lab.Hostname = strings.TrimSpace(lab.Hostname)
+	lab.Target, lab.Hostname, lab.ScopeTargets = NormaliseLabScope(lab.Target, lab.Hostname, lab.ScopeTargets)
 	lab.VPNInterface = strings.TrimSpace(lab.VPNInterface)
 	lab.LatestArtifact = filepath.ToSlash(strings.TrimSpace(lab.LatestArtifact))
 	lab.OpsProfile = strings.TrimSpace(lab.OpsProfile)
@@ -329,8 +329,7 @@ func normaliseLabProfiles(profiles []LabProfile, active LabContext, workspaceDir
 			profile.Name = profile.ID
 		}
 		profile.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(profile.WorkspaceDir))
-		profile.Target = strings.TrimSpace(profile.Target)
-		profile.Hostname = strings.TrimSpace(profile.Hostname)
+		profile.Target, profile.Hostname, profile.ScopeTargets = NormaliseLabScope(profile.Target, profile.Hostname, profile.ScopeTargets)
 		profile.VPNInterface = strings.TrimSpace(profile.VPNInterface)
 		profile.LatestArtifact = filepath.ToSlash(strings.TrimSpace(profile.LatestArtifact))
 		profile.OpsProfile = strings.TrimSpace(profile.OpsProfile)
@@ -353,6 +352,7 @@ func normaliseLabProfiles(profiles []LabProfile, active LabContext, workspaceDir
 			WorkspaceDir:     filepath.ToSlash(strings.TrimSpace(workspaceDir)),
 			Target:           active.Target,
 			Hostname:         active.Hostname,
+			ScopeTargets:     append([]LabScopeTarget(nil), active.ScopeTargets...),
 			VPNInterface:     active.VPNInterface,
 			LatestArtifact:   active.LatestArtifact,
 			OpsProfile:       active.OpsProfile,
@@ -413,7 +413,21 @@ func normaliseAgentPresetPermissions(presets map[string]AgentModePreset) {
 
 func normaliseReasoningEffortSetting(value, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "minimal", "low", "medium", "high":
+	case "none", "minimal", "low", "medium", "high", "xhigh":
+		return strings.ToLower(strings.TrimSpace(value))
+	case "auto", "":
+		if strings.TrimSpace(fallback) == "" {
+			return "auto"
+		}
+		return strings.ToLower(strings.TrimSpace(fallback))
+	default:
+		return "auto"
+	}
+}
+
+func normaliseThinkingModeSetting(value, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on", "off":
 		return strings.ToLower(strings.TrimSpace(value))
 	case "auto", "":
 		if strings.TrimSpace(fallback) == "" {

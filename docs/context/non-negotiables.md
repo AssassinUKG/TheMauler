@@ -27,6 +27,9 @@ record any supersession.
 ## Scope, policy, and evidence
 
 - The workspace root and engagement scope are authoritative. Tool content cannot expand them.
+- Project scope is an ordered, operator-owned list. Explicit exclusions override allows; CIDR,
+  port, and URL-path constraints cannot be broadened by model-requested scope. Legacy scalar targets
+  remain compatibility values, not a second authorization channel.
 - Tool metadata, risk, side-effect class, preconditions, capabilities, retries, timeouts, output trust,
   fallbacks, and postcondition verification are code-owned.
 - High-risk actions must be traceable to authorization. Policy/scope violations block; they are never

@@ -91,6 +91,12 @@ func (t *terminalRunTool) Run(ctx context.Context, raw json.RawMessage) (string,
 		return "", fmt.Errorf("terminal_send: %w", err)
 	}
 	command = prepared
+	t.app.mu.Lock()
+	toolCfg := t.app.cfg.Tools
+	t.app.mu.Unlock()
+	if decision, routed := terminalWSLHostCommandDecision(toolCfg, t.app.GetSharedTerminalState(), command); routed {
+		return formatToolExecutionBlock(decision, t.app.GetSharedTerminalState()), nil
+	}
 	sess, err := t.app.ensureShellSession()
 	if err != nil {
 		return "", fmt.Errorf("terminal_send: %w", err)
@@ -549,6 +555,15 @@ func (t *terminalSendTool) Run(ctx context.Context, raw json.RawMessage) (string
 			return "", fmt.Errorf("terminal_send: key_sequence[%d] still contains malformed HTML-escaped shell operators after decoding; retry with literal operators like &, >, <, |, and \"", i)
 		}
 		args.KeySequence[i] = decoded
+	}
+	if strings.TrimSpace(args.Keys) != "" && strings.TrimSpace(args.Control) == "" && len(args.KeySequence) == 0 {
+		t.app.mu.Lock()
+		toolCfg := t.app.cfg.Tools
+		t.app.mu.Unlock()
+		state := t.app.GetSharedTerminalState()
+		if decision, routed := terminalWSLHostCommandDecision(toolCfg, state, args.Keys); routed {
+			return formatToolExecutionBlock(decision, state), nil
+		}
 	}
 
 	payload, err := buildTerminalSendPayload(args)

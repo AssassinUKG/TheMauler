@@ -1,5 +1,79 @@
 # Voice / audio (STT + TTS) implementation plan - 2026-07-02
 
+## 2026-07-29 current-model audit
+
+This section supersedes the model-ranking parts of the older plan. The pipeline and safety
+architecture below remain valid.
+
+### What Mauler actually runs today
+
+| Component | Active implementation | Assessment |
+|---|---|---|
+| Desktop/Telegram STT | Persistent `openai-whisper` worker, fixed `tiny.en`, CPU | Stable and private, but now materially behind in accuracy, latency, multilingual coverage, partial transcripts, and streaming endpointing. |
+| Desktop/Telegram TTS | Persistent Kokoro 82M worker (`kokoro` 0.9.4), Piper fallback | Still an excellent low-resource default. Clause-at-a-time playback hides much of its generation latency. |
+| Conversation | Recorded turn -> transcript -> normal Mauler text/tool run -> clause TTS | Correct architecture for audited tools and evidence, but not full duplex. Open-mic VAD, partial transcripts, and natural interruption remain the biggest UX gaps. |
+
+The host already has CUDA-capable PyTorch, `faster-whisper`, and the `qwen-tts` Python package, but
+Mauler does not currently select them. Installing a Python package is not the same as having a
+model integrated, benchmarked, warmed, and governed by the Voice Health lifecycle.
+
+### Updated recommendations for the RTX 3090
+
+1. **Replace `tiny.en` first.** Add a selectable local STT engine while preserving the current
+   worker protocol:
+   - recommended daily local default: **Parakeet TDT 0.6B v3 through sherpa-onnx**;
+   - low-risk interim/fallback: **faster-whisper large-v3-turbo on CUDA**;
+   - quality/cloud boost: **Voxtral Mini Transcribe V2 API**;
+   - experimental local realtime tier: **Voxtral Mini 4B Realtime 2602**, only when the main local
+     LLM is not occupying VRAM. Its BF16 weights require at least 16 GB, so it is not a sensible
+     always-warm companion to a 27B Q4 model on a 24 GB card.
+2. **Keep Kokoro as the default TTS.** It is not the most expressive model now, but it remains the
+   best fit for always-on local speech beside the user's large LLM.
+3. Add optional, on-demand quality TTS profiles:
+   - **Chatterbox-Turbo 350M** for more natural English, cloning, and paralinguistic tags;
+   - **Qwen3-TTS 0.6B CustomVoice** for streaming, multilingual speech, instruction control, and
+     cloning; consider the 1.7B model only after measured VRAM/first-audio tests;
+   - **Voxtral TTS** or another cloud TTS only as an explicit one-task/session boost.
+   OpenRouter now exposes dedicated OpenAI-compatible `/audio/transcriptions` and `/audio/speech`
+   endpoints, so Mauler can reuse its existing OpenRouter secret/provider path for this boost instead
+   of adding keys to React state. Discover compatible speech models at runtime and reset the boost
+   back to local after the selected voice turn/session.
+4. Implement **Silero VAD, partial STT, automatic endpointing, and real barge-in** before adopting a
+   native speech-to-speech model. Those changes improve every engine and preserve the authoritative
+   Mauler tool/control-plane path.
+5. Treat full-duplex cloud models such as GPT-Realtime-2/GPT-Live or Gemini Live as an optional
+   conversation transport, not as a replacement for Mauler's task contract, tool registry,
+   confirmations, RunLedger, or evidence-owned completion. Audio must be transcribed/ledgered and
+   tool calls must still pass through Go policy.
+
+OpenRouter's current audio endpoints are a good fit for higher-quality turn-based STT/TTS, but they
+are not a substitute for the provider-specific full-duplex Realtime/Live WebSocket protocols.
+
+### Current ranking
+
+| Need | Winner | Why not the other candidates |
+|---|---|---|
+| Best practical local STT beside a 27B LLM | Parakeet TDT 0.6B v3 | Much smaller than Voxtral Realtime; multilingual, timestamped, sherpa-onnx support, and suitable for streaming/buffered recognition. |
+| Easiest immediate STT improvement | faster-whisper large-v3-turbo | Already installed and far stronger than `tiny.en`, but still a chunked Whisper pipeline rather than the final open-mic architecture. |
+| Highest local realtime STT quality candidate | Voxtral Mini 4B Realtime 2602 | Strong accuracy at 480 ms and open weights, but its >=16 GB BF16 runtime conflicts with the normal 27B local LLM. |
+| Best always-on local TTS | Kokoro 82M | Newer models are more expressive, but cost more memory and have greater first-audio/integration risk. |
+| Best optional English personality TTS | Chatterbox-Turbo 350M | More natural/expressive and supports voice cloning; it needs a new supervised runtime and local benchmark. |
+| Best optional open multilingual TTS | Qwen3-TTS 0.6B CustomVoice | Stronger voice control and cloning than Kokoro; do not default it until Windows latency and shared-VRAM behavior pass live tests. |
+| Most natural cloud conversation | GPT-Realtime-2/GPT-Live class | Cloud-only, different transport, cost/privacy implications, and native full-duplex tool state must be reconciled with Mauler's control plane. |
+
+Primary sources:
+
+- [NVIDIA Parakeet TDT 0.6B v3 model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+- [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases)
+- [Mistral Voxtral Transcribe 2](https://mistral.ai/news/voxtral-transcribe-2/)
+- [Mistral Voxtral Mini 4B Realtime model card](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602)
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
+- [Resemble Chatterbox](https://github.com/resemble-ai/chatterbox)
+- [OpenAI 2026 voice models](https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/)
+- [Gemini Live capabilities](https://ai.google.dev/gemini-api/docs/live-api/capabilities)
+- [OpenRouter audio input/output](https://openrouter.ai/docs/guides/overview/multimodal/audio)
+- [OpenRouter text-to-speech](https://openrouter.ai/docs/guides/overview/multimodal/tts)
+
 ## 2026-07-12 latency update
 
 Desktop, Telegram, and video transcription now share a hidden persistent OpenAI Whisper worker.

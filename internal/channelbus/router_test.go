@@ -39,6 +39,44 @@ func TestRouteNaturalLanguageWorkRequestQueuesWork(t *testing.T) {
 	}
 }
 
+func TestRouteDirectImperativeQueuesWorkWithoutSlashCommand(t *testing.T) {
+	cases := []string{
+		"Get the 7-day weather forecast for Bradley Stoke, Bristol",
+		"Find the latest release notes and summarise them",
+		"Search for the current train times to Bristol",
+	}
+	for _, text := range cases {
+		route := RouteEnvelope(Envelope{Source: "telegram", SessionID: "telegram:42", Text: text})
+		if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy {
+			t.Fatalf("expected direct task %q to queue work without /cmd, got %+v", text, route)
+		}
+	}
+}
+
+func TestRouteLiveQuestionQueuesEvidenceBackedWork(t *testing.T) {
+	for _, text := range []string{
+		"What's the weather today?",
+		"What's the weather like over the next Seven days? In Bradley stoke uk",
+		"Will it rain over the next 7 days in Bristol?",
+		"What are today's news headlines?",
+		"What is the current exchange rate?",
+	} {
+		route := RouteEnvelope(Envelope{Source: "telegram", SessionID: "telegram:42", Text: text})
+		if route.Lane != LaneWork || route.Command != "cmd" {
+			t.Fatalf("expected live question %q to use work lane, got %+v", text, route)
+		}
+	}
+}
+
+func TestRouteStableExplanationRemainsSideChat(t *testing.T) {
+	for _, text := range []string{"Explain how weather forecasts work", "What is a stock price?", "Tell me a joke"} {
+		route := RouteEnvelope(Envelope{Source: "telegram", SessionID: "telegram:42", Text: text})
+		if route.Lane != LaneSideChat || !route.ReadOnly {
+			t.Fatalf("expected stable question %q to stay side chat, got %+v", text, route)
+		}
+	}
+}
+
 func TestRouteNaturalLanguageQuestionStaysSideChat(t *testing.T) {
 	route := RouteEnvelope(Envelope{Text: "Can you tell me what you can do?"})
 	if route.Lane != LaneSideChat {
@@ -67,12 +105,27 @@ func TestRouteLocalSystemInfoUsesWorkLane(t *testing.T) {
 		"You do via term and run commands",
 		"Can you check my GPU and RAM?",
 		"show local system specs",
+		"get the time for me",
+		"what time is it?",
+		"tell me today's date",
 	}
 	for _, text := range cases {
 		route := RouteEnvelope(Envelope{Source: "telegram", SessionID: "telegram:direct:1", Text: text})
 		if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy {
 			t.Fatalf("expected %q to route to work, got %+v", text, route)
 		}
+	}
+}
+
+func TestVoiceTimeRequestUsesProjectWorkLane(t *testing.T) {
+	route := RouteEnvelope(Envelope{
+		Source:      "telegram",
+		SessionID:   "telegram:direct:1",
+		Text:        "get the time for me",
+		Attachments: []Attachment{{Kind: "voice", ContentType: "audio/ogg"}},
+	})
+	if route.Lane != LaneWork || route.Command != "cmd" || route.Policy != WorkQueueIfBusy || !route.FromVoice {
+		t.Fatalf("expected voice time request to use project work, got %+v", route)
 	}
 }
 

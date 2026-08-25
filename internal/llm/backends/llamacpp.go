@@ -20,6 +20,8 @@ func NewLlamacpp(p settings.Profile) llm.Client {
 		apiKey = os.Getenv(p.APIKeyEnv)
 	}
 	client := newOpenAICompat("llamacpp", baseURL, p.ModelID, p.CtxTokens, apiKey, true)
+	client.kvCachePrecision, client.kvCacheTypeK, client.kvCacheTypeV =
+		settings.ResolveKVCacheConfig(p.KVCachePrecision, p.KVCacheTypeK, p.KVCacheTypeV)
 	client.specType = p.SpecType
 	client.specDraftNMax = p.SpecDraftNMax
 	client.specDraftModel = p.SpecDraftModel

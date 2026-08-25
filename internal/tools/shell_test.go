@@ -78,6 +78,35 @@ func TestDetectShellBackendForced(t *testing.T) {
 	}
 }
 
+func TestUnwrapNestedPowerShellCommandPreservesVariables(t *testing.T) {
+	command := `powershell.exe -NoProfile -Command "$p = Get-Process | Where-Object { $_.ProcessName -match 'foundation|galactic|frontier' }; $p | Select-Object Id, ProcessName, Path"`
+	got, ok := UnwrapNestedPowerShellCommand(command)
+	if !ok {
+		t.Fatalf("expected nested PowerShell command to unwrap")
+	}
+	want := `$p = Get-Process | Where-Object { $_.ProcessName -match 'foundation|galactic|frontier' }; $p | Select-Object Id, ProcessName, Path`
+	if got != want {
+		t.Fatalf("PowerShell payload changed across unwrap:\n got: %q\nwant: %q", got, want)
+	}
+	for _, variable := range []string{"$p", "$_", "$_.ProcessName"} {
+		if !strings.Contains(got, variable) {
+			t.Fatalf("unwrapped payload lost %s: %q", variable, got)
+		}
+	}
+}
+
+func TestUnwrapNestedPowerShellCommandRejectsOrdinaryCommands(t *testing.T) {
+	for _, command := range []string{
+		`Get-Process | Select-Object -First 1`,
+		`nmap -sV 10.10.10.10`,
+		`powershell.exe`,
+	} {
+		if got, ok := UnwrapNestedPowerShellCommand(command); ok || got != command {
+			t.Fatalf("ordinary command should not unwrap: command=%q got=%q ok=%v", command, got, ok)
+		}
+	}
+}
+
 func TestWSLShellCommandUsesConfiguredDistroAndCd(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("wsl.exe command shape is Windows-specific")

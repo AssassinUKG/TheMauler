@@ -185,11 +185,13 @@ function SetupProject({ preview, name, onName }: { preview: EngagementSetupPrevi
 }
 
 function SetupTarget({ preview }: { preview: EngagementSetupPreview }) {
+  const allowed = preview.scope.filter(item => !item.startsWith('!')).length
+  const excluded = preview.scope.length - allowed
   return <div className="engagement-setup-section">
     <SectionIntro eyebrow="Step 2" title="Preview the authorised scope" copy="These values come from Home > project details. The agent cannot expand them when it creates endpoints or uses structured HTTP tools." />
     <div className="engagement-scope-preview">
-      <div><span>Target</span><strong>{preview.target || 'Not set'}</strong></div>
-      <div><span>Hostname</span><strong>{preview.hostname || 'Not set'}</strong></div>
+      <div><span>Primary target</span><strong>{preview.target || 'Not set'}</strong></div>
+      <div><span>Scope rules</span><strong>{allowed} allowed{excluded ? ` · ${excluded} excluded` : ''}</strong></div>
     </div>
     <div className="engagement-lock-preview"><span>Locked scope</span><div>{preview.scope.length ? preview.scope.map(item => <code key={item}>{item}</code>) : <strong>No valid target is configured.</strong>}</div></div>
     <p className="engagement-setup-callout">If this is wrong, close the wizard, edit the project on Home, then reopen setup. Scope is intentionally immutable after creation.</p>

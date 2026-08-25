@@ -770,7 +770,33 @@ func recommendProfileSettings(profile settings.Profile) (settings.Profile, []str
 			params.MaxTokens = maxTokens
 		}
 	}
-	if strings.EqualFold(rp.Family, "qwen3.6") {
+	if strings.EqualFold(rp.Family, "qwen3.8") {
+		// Qwen3.8's official agent path keeps thinking enabled and preserved.
+		// Mauler adaptively switches to the no-thinking sampler after tool work,
+		// so both parameter sets must remain model-card correct.
+		rec.Thinking = true
+		rec.PreserveThink = true
+		for _, params := range []*settings.GenerationParams{&rec.ThinkGeneral, &rec.ThinkCoding} {
+			params.Temperature = 1.0
+			params.TopP = 0.95
+			params.TopK = 20
+			params.MinP = 0
+			params.PresencePenalty = 0
+			params.RepeatPenalty = 1.0
+			if params.MaxTokens <= 0 {
+				params.MaxTokens = 8192
+			}
+		}
+		applyRuntimeSampling(&rec.NoThink, rp.Defaults, 8192)
+		rec.SpecType = "draft-mtp"
+		if rec.SpecDraftNMax <= 0 {
+			rec.SpecDraftNMax = 2
+		}
+		notes = append(notes,
+			"Qwen3.8 agent mode keeps thinking enabled with preserve_thinking; Mauler falls back to the official no-thinking sampler after the configured tool threshold.",
+			"Enabled conservative draft-mtp n=2; the GGUF header probe remains authoritative and disables it automatically when MTP heads are absent.",
+		)
+	} else if strings.EqualFold(rp.Family, "qwen3.6") {
 		// Thinking is a user-facing profile choice. Imported/local profiles stay
 		// no-thinking by default; an explicitly configured thinking profile keeps it.
 		rec.PreserveThink = rec.Thinking && rec.PreserveThink

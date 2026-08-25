@@ -8,16 +8,19 @@ import (
 
 func TestBuildRuntimeLockCapturesAdapterAndLaunchSignature(t *testing.T) {
 	profile := settings.Profile{
-		Name:          "qwen3.6-mtp",
-		Provider:      "llamacpp-local",
-		Backend:       "llamacpp",
-		BaseURL:       "http://localhost:8080/v1",
-		ModelID:       "Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf",
-		CtxTokens:     32768,
-		Thinking:      true,
-		PreserveThink: true,
-		SpecType:      "draft-mtp",
-		SpecDraftNMax: 2,
+		Name:             "qwen3.6-mtp",
+		Provider:         "llamacpp-local",
+		Backend:          "llamacpp",
+		BaseURL:          "http://localhost:8080/v1",
+		ModelID:          "Qwen3.6-27B-MTP-UD-Q4_K_XL.gguf",
+		CtxTokens:        32768,
+		Thinking:         true,
+		PreserveThink:    true,
+		KVCachePrecision: "custom",
+		KVCacheTypeK:     "q8_0",
+		KVCacheTypeV:     "f16",
+		SpecType:         "draft-mtp",
+		SpecDraftNMax:    2,
 	}
 
 	lock := buildRuntimeLock(profile)
@@ -29,5 +32,8 @@ func TestBuildRuntimeLockCapturesAdapterAndLaunchSignature(t *testing.T) {
 	}
 	if lock.SpecType != "draft-mtp" || lock.SpecDraftNMax != 2 {
 		t.Fatalf("runtime lock lost MTP launch fields: %#v", lock)
+	}
+	if lock.KVCachePrecision != "custom" || lock.KVCacheTypeK != "q8_0" || lock.KVCacheTypeV != "f16" {
+		t.Fatalf("runtime lock lost KV cache launch fields: %#v", lock)
 	}
 }

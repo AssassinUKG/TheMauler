@@ -87,6 +87,30 @@ func TestRecommendProfileSettingsClearsMTPForPlainQwen(t *testing.T) {
 	}
 }
 
+func TestRecommendProfileSettingsUsesQwen38OfficialAgentModes(t *testing.T) {
+	rec, notes := recommendProfileSettings(settings.Profile{
+		Name:      "qwen3.8-agent-stability",
+		ModelID:   "Qwen3.8-27B-Q4_K_M.gguf",
+		CtxTokens: 35000,
+	})
+	if !rec.Thinking || !rec.PreserveThink {
+		t.Fatalf("Qwen3.8 agent recommendation must preserve thinking: %#v", rec)
+	}
+	if rec.ThinkGeneral.Temperature != 1.0 || rec.ThinkGeneral.TopP != 0.95 || rec.ThinkGeneral.TopK != 20 || rec.ThinkGeneral.RepeatPenalty != 1.0 {
+		t.Fatalf("Qwen3.8 thinking defaults = %#v", rec.ThinkGeneral)
+	}
+	if rec.NoThink.Temperature != 0.7 || rec.NoThink.TopP != 0.8 || rec.NoThink.TopK != 20 || rec.NoThink.PresencePenalty != 1.5 || rec.NoThink.RepeatPenalty != 1.0 {
+		t.Fatalf("Qwen3.8 no-thinking defaults = %#v", rec.NoThink)
+	}
+	if rec.SpecType != "draft-mtp" || rec.SpecDraftNMax != 2 {
+		t.Fatalf("Qwen3.8 conservative MTP defaults = %#v", rec)
+	}
+	joined := strings.Join(notes, " ")
+	if !strings.Contains(joined, "preserve_thinking") || !strings.Contains(joined, "GGUF header probe") {
+		t.Fatalf("Qwen3.8 recommendation notes = %#v", notes)
+	}
+}
+
 func TestRecommendProfileSettingsDisablesThinkingForGemma(t *testing.T) {
 	profile := settings.Profile{
 		Name:          "gemma4-test",

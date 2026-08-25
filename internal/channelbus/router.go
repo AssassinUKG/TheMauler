@@ -30,6 +30,9 @@ func RouteEnvelope(env Envelope) Route {
 	if looksLocalSystemInfoRequest(lower) {
 		return Route{Lane: LaneWork, Command: "cmd", Argument: text, Policy: WorkQueueIfBusy, Reason: "local system information request", FromVoice: fromVoice}
 	}
+	if looksLiveInformationRequest(lower) {
+		return Route{Lane: LaneWork, Command: "cmd", Argument: text, Policy: WorkQueueIfBusy, Reason: "live information request", FromVoice: fromVoice}
+	}
 	if looksNaturalWorkRequest(lower) {
 		return Route{Lane: LaneWork, Command: "cmd", Argument: text, Policy: WorkQueueIfBusy, Reason: "natural language work request", FromVoice: fromVoice}
 	}
@@ -94,6 +97,27 @@ func looksCapabilityQuestion(lower string) bool {
 }
 
 func looksLocalSystemInfoRequest(lower string) bool {
+	if hasAny(lower,
+		"what time is it",
+		"what's the time",
+		"whats the time",
+		"current time",
+		"local time",
+		"tell me the time",
+		"get the time",
+		"check the time",
+		"what date is it",
+		"what's the date",
+		"whats the date",
+		"current date",
+		"today's date",
+		"todays date",
+		"tell me the date",
+		"get the date",
+		"what day is it",
+	) {
+		return true
+	}
 	if hasAny(lower, " via term", " via terminal", "use terminal", "using terminal", "run command", "run commands", "run it locally", "check locally") {
 		return true
 	}
@@ -121,20 +145,48 @@ func looksNaturalWorkRequest(lower string) bool {
 			break
 		}
 	}
-	if !matchedPrefix {
-		return false
-	}
 	workVerbs := []string{
 		"add", "save", "remember", "memorise", "memorize", "open", "start", "launch", "run", "execute", "create", "write", "edit", "fix", "build",
 		"install", "delete", "remove", "move", "copy", "download", "upload", "browse", "inspect",
 		"enumerate", "scan", "test", "check", "continue", "hack", "connect", "restart", "kill",
+		"get", "find", "search", "research", "look up", "analyse", "analyze", "review", "summarise", "summarize",
 	}
 	for _, verb := range workVerbs {
-		if strings.Contains(lower, " "+verb+" ") || strings.HasSuffix(lower, " "+verb) {
+		if matchedPrefix && (strings.Contains(lower, " "+verb+" ") || strings.HasSuffix(lower, " "+verb)) {
+			return true
+		}
+		trimmed := strings.TrimLeft(lower, " \t\r\n")
+		if trimmed == verb || strings.HasPrefix(trimmed, verb+" ") {
 			return true
 		}
 	}
 	return false
+}
+
+// looksLiveInformationRequest keeps changing external facts out of the
+// no-tools side-chat lane. It is intentionally narrower than a generic factual
+// question: stable explanations remain conversational, while current weather,
+// news, prices, scores, and travel conditions get a real evidence-backed run.
+func looksLiveInformationRequest(lower string) bool {
+	lower = strings.ToLower(strings.TrimSpace(lower))
+	if lower == "" {
+		return false
+	}
+	weather := hasAny(lower, "weather", "forecast", "temperature", "humidity", "rain", "rainfall", "wind speed")
+	if weather && hasAny(lower,
+		"current", "currently", "today", "today's", "todays", "tomorrow", "tonight", "this week",
+		"next week", "next few days", "next seven days", "next 7 days", "coming days", "coming week",
+		"over the next", "day forecast", "-day forecast", "what's the", "whats the", "what is the", "get the", "show me the",
+	) {
+		return true
+	}
+	liveTopic := hasAny(lower,
+		"news", "headlines", "stock price", "share price", "exchange rate", "crypto price",
+		"score", "scores", "fixture", "fixtures", "traffic", "train time", "flight status",
+	)
+	return liveTopic && hasAny(lower,
+		"latest", "live", "current", "currently", "today", "today's", "todays", "now", "this week", "get", "find", "show",
+	)
 }
 
 func looksQuickTerminalAction(lower string) bool {

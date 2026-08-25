@@ -179,6 +179,45 @@ func TestOpenAICompatBuildBodyIncludesProfileRequestSettings(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatBuildBodyCarriesPreservedReasoningOnlyForThinkingBackend(t *testing.T) {
+	message := llm.NewTextMessage(llm.RoleAssistant, "I will inspect the file.")
+	message.ReasoningContent = "The file is the narrowest evidence path."
+	req := llm.Request{
+		Messages:        []llm.Message{llm.NewTextMessage(llm.RoleUser, "continue"), message},
+		ReasoningEffort: "xhigh",
+	}
+
+	local := newOpenAICompat("llamacpp", "http://example.test/v1", "Qwen3.8-27B", 35000, "", true)
+	bodyBytes, err := local.buildBody(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &got); err != nil {
+		t.Fatal(err)
+	}
+	messages := got["messages"].([]interface{})
+	assistant := messages[1].(map[string]interface{})
+	if assistant["reasoning_content"] != message.ReasoningContent || got["reasoning_effort"] != "xhigh" {
+		t.Fatalf("preserved Qwen reasoning missing: body=%#v", got)
+	}
+
+	cloud := newOpenAICompat("openai-compatible", "http://example.test/v1", "frontier", 35000, "", false)
+	bodyBytes, err = cloud.buildBody(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = map[string]interface{}{}
+	if err := json.Unmarshal(bodyBytes, &got); err != nil {
+		t.Fatal(err)
+	}
+	messages = got["messages"].([]interface{})
+	assistant = messages[1].(map[string]interface{})
+	if _, ok := assistant["reasoning_content"]; ok {
+		t.Fatalf("generic provider should not receive local preserved-thinking fields: %#v", assistant)
+	}
+}
+
 func TestOpenAICompatBuildBodyRequestsUsageWithoutTools(t *testing.T) {
 	client := newOpenAICompat("lmstudio", "http://example.test/v1", "qwen-local", 32768, "", false)
 	bodyBytes, err := client.buildBody(llm.Request{
@@ -339,8 +378,52 @@ func TestLlamaCppLoadModelSendsContextSizeToNativeLoadEndpoint(t *testing.T) {
 		t.Fatalf("model = %v", body["model"])
 	}
 	assertJSONNumber(t, body, "context_size", 32768)
+	if body["kv_cache_precision"] != "f16" || body["kv_cache_type_k"] != "f16" || body["kv_cache_type_v"] != "f16" {
+		t.Fatalf("default KV cache config = %#v, want FP16 K/V", body)
+	}
 	if body["echo_load_config"] != true {
 		t.Fatalf("echo_load_config = %v, want true", body["echo_load_config"])
+	}
+}
+
+func TestLlamaCppLoadModelSendsCustomKVCacheTypes(t *testing.T) {
+	var body map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"loaded"}`))
+	}))
+	defer server.Close()
+
+	client := newOpenAICompat("llamacpp", server.URL+"/v1", "model.gguf", 32768, "", true)
+	client.kvCachePrecision = "custom"
+	client.kvCacheTypeK = "q8_0"
+	client.kvCacheTypeV = "f16"
+
+	if err := client.LoadModel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if body["kv_cache_precision"] != "custom" || body["kv_cache_type_k"] != "q8_0" || body["kv_cache_type_v"] != "f16" {
+		t.Fatalf("custom KV cache config was not forwarded: %#v", body)
+	}
+}
+
+func TestNewLlamacppResolvesKVCacheProfileSettings(t *testing.T) {
+	client, ok := NewLlamacpp(settings.Profile{
+		ModelID:          "model.gguf",
+		CtxTokens:        32768,
+		KVCachePrecision: "q8",
+		KVCacheTypeK:     "f16",
+		KVCacheTypeV:     "q4_0",
+	}).(*OpenAICompat)
+	if !ok {
+		t.Fatal("NewLlamacpp did not return the shared OpenAI-compatible client")
+	}
+	if client.kvCachePrecision != "q8_0" || client.kvCacheTypeK != "q8_0" || client.kvCacheTypeV != "q8_0" {
+		t.Fatalf("resolved KV cache config = (%q, %q, %q), want Q8_0 K/V",
+			client.kvCachePrecision, client.kvCacheTypeK, client.kvCacheTypeV)
 	}
 }
 
@@ -844,5 +927,72 @@ func TestOpenAICompatBuildBodyCarriesGrammar(t *testing.T) {
 	_ = json.Unmarshal(bodyBytes, &got)
 	if _, ok := got["grammar"]; ok {
 		t.Fatalf("grammar should be omitted when empty, got %v", got["grammar"])
+	}
+}
+
+func TestBuildMessagesNormalizesLateControllerPrompts(t *testing.T) {
+	messages := buildMessages(llm.Request{Messages: []llm.Message{
+		llm.NewTextMessage(llm.RoleSystem, "primary system"),
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		llm.NewTextMessage(llm.RoleAssistant, "first answer"),
+		llm.NewTextMessage(llm.RoleSystem, "controller repair one"),
+		llm.NewTextMessage(llm.RoleAssistant, "second answer"),
+		llm.NewTextMessage(llm.RoleSystem, "controller repair two"),
+	}}, false)
+
+	wantRoles := []string{
+		llm.RoleSystem,
+		llm.RoleUser,
+		llm.RoleAssistant,
+		llm.RoleUser,
+		llm.RoleAssistant,
+		llm.RoleUser,
+	}
+	if len(messages) != len(wantRoles) {
+		t.Fatalf("messages = %#v, want %d alternating turns", messages, len(wantRoles))
+	}
+	for i, want := range wantRoles {
+		if messages[i].Role != want {
+			t.Fatalf("message %d role = %q, want %q; messages=%#v", i, messages[i].Role, want, messages)
+		}
+	}
+}
+
+func TestBuildMessagesMergesConsecutiveTextOnlyAssistantTurns(t *testing.T) {
+	messages := buildMessages(llm.Request{Messages: []llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		llm.NewTextMessage(llm.RoleAssistant, "first answer"),
+		llm.NewTextMessage(llm.RoleAssistant, "second answer"),
+	}}, false)
+
+	if len(messages) != 2 || messages[1].Role != llm.RoleAssistant {
+		t.Fatalf("messages = %#v, want one merged assistant turn", messages)
+	}
+	if messages[1].Content != "first answer\nsecond answer" {
+		t.Fatalf("merged content = %#v", messages[1].Content)
+	}
+}
+
+func TestBuildMessagesPreservesToolCallResultPair(t *testing.T) {
+	messages := buildMessages(llm.Request{Messages: []llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "read the file"),
+		{
+			Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCallDef{{
+				ID:   "call-1",
+				Type: "function",
+				Function: llm.FunctionCall{
+					Name:      "read",
+					Arguments: json.RawMessage(`{"path":"a.txt"}`),
+				},
+			}},
+		},
+		{Role: llm.RoleTool, ToolCallID: "call-1", Name: "read", Content: "contents"},
+		llm.NewTextMessage(llm.RoleAssistant, "done"),
+	}}, false)
+
+	if len(messages) != 4 || messages[1].ToolCalls == nil || messages[2].Role != llm.RoleTool ||
+		messages[2].ToolCallID != "call-1" || messages[3].Role != llm.RoleAssistant {
+		t.Fatalf("tool transcript was changed: %#v", messages)
 	}
 }

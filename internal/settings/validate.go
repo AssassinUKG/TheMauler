@@ -6,11 +6,12 @@ import (
 )
 
 const (
-	defaultCompactionAt = 0.85
-	defaultMaxToolCalls = 200
-	maxToolCallsLimit   = 2000
-	defaultCtxTokens    = 8192
-	defaultMaxTokens    = 2048
+	defaultCompactionAt     = 0.85
+	defaultMaxToolCalls     = 200
+	maxToolCallsLimit       = 2000
+	defaultCtxTokens        = 8192
+	defaultMaxTokens        = 2048
+	defaultKVCachePrecision = "f16"
 )
 
 // Validate clamps dangerous or out-of-range settings to safe values. It never
@@ -82,11 +83,20 @@ func (s *Settings) Validate() []string {
 	switch strings.ToLower(strings.TrimSpace(s.Agents.ReasoningEffort)) {
 	case "", "auto":
 		s.Agents.ReasoningEffort = "auto"
-	case "minimal", "low", "medium", "high":
+	case "none", "minimal", "low", "medium", "high", "xhigh":
 		s.Agents.ReasoningEffort = strings.ToLower(strings.TrimSpace(s.Agents.ReasoningEffort))
 	default:
 		adjustments = append(adjustments, fmt.Sprintf("agents.reasoning_effort reset from %q to auto", s.Agents.ReasoningEffort))
 		s.Agents.ReasoningEffort = "auto"
+	}
+	switch strings.ToLower(strings.TrimSpace(s.Agents.ThinkingMode)) {
+	case "", "auto":
+		s.Agents.ThinkingMode = "auto"
+	case "on", "off":
+		s.Agents.ThinkingMode = strings.ToLower(strings.TrimSpace(s.Agents.ThinkingMode))
+	default:
+		adjustments = append(adjustments, fmt.Sprintf("agents.thinking_mode reset from %q to auto", s.Agents.ThinkingMode))
+		s.Agents.ThinkingMode = "auto"
 	}
 	return adjustments
 }
@@ -113,12 +123,95 @@ func (pf *ProfilesFile) Validate() []string {
 				adjustments = append(adjustments, fmt.Sprintf("profiles.%s.provider references unknown provider %q", label, profile.Provider))
 			}
 		}
+		if pf.profileUsesLlamaCpp(profile) {
+			precision, cacheTypeK, cacheTypeV := ResolveKVCacheConfig(
+				profile.KVCachePrecision,
+				profile.KVCacheTypeK,
+				profile.KVCacheTypeV,
+			)
+			if profile.KVCachePrecision != precision || profile.KVCacheTypeK != cacheTypeK || profile.KVCacheTypeV != cacheTypeV {
+				adjustments = append(adjustments, fmt.Sprintf(
+					"profiles.%s.kv_cache normalized to %s (K %s, V %s)",
+					label,
+					precision,
+					displayKVCacheType(cacheTypeK),
+					displayKVCacheType(cacheTypeV),
+				))
+				profile.KVCachePrecision = precision
+				profile.KVCacheTypeK = cacheTypeK
+				profile.KVCacheTypeV = cacheTypeV
+			}
+		}
 		profile.ThinkGeneral, adjustments = validateGenerationParams(label, "thinking_general", profile.CtxTokens, profile.ThinkGeneral, adjustments)
 		profile.ThinkCoding, adjustments = validateGenerationParams(label, "thinking_coding", profile.CtxTokens, profile.ThinkCoding, adjustments)
 		profile.NoThink, adjustments = validateGenerationParams(label, "nothinking", profile.CtxTokens, profile.NoThink, adjustments)
 		pf.Profiles[name] = profile
 	}
 	return adjustments
+}
+
+func (pf *ProfilesFile) profileUsesLlamaCpp(profile Profile) bool {
+	backend := strings.TrimSpace(profile.Backend)
+	if provider, ok := pf.Providers[profile.Provider]; ok {
+		backend = strings.TrimSpace(provider.Backend)
+	}
+	return strings.EqualFold(backend, "llamacpp")
+}
+
+// ResolveKVCacheConfig returns the exact InferenceBridge launch values for a
+// profile. FP16 is the quality-first fallback. Automatic mode intentionally
+// leaves the K/V types empty so InferenceBridge can use its backend default.
+func ResolveKVCacheConfig(precision, cacheTypeK, cacheTypeV string) (string, string, string) {
+	precision = normalizeKVCachePrecision(precision)
+	switch precision {
+	case "auto":
+		return precision, "", ""
+	case "custom":
+		return precision, normalizeKVCacheType(cacheTypeK), normalizeKVCacheType(cacheTypeV)
+	default:
+		return precision, precision, precision
+	}
+}
+
+func normalizeKVCachePrecision(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto":
+		return "auto"
+	case "f16", "fp16":
+		return "f16"
+	case "bf16", "bfloat16":
+		return "bf16"
+	case "q8", "q8_0":
+		return "q8_0"
+	case "q4", "q4_0":
+		return "q4_0"
+	case "custom":
+		return "custom"
+	default:
+		return defaultKVCachePrecision
+	}
+}
+
+func normalizeKVCacheType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "f16", "fp16":
+		return "f16"
+	case "bf16", "bfloat16":
+		return "bf16"
+	case "q8", "q8_0":
+		return "q8_0"
+	case "q4", "q4_0":
+		return "q4_0"
+	default:
+		return defaultKVCachePrecision
+	}
+}
+
+func displayKVCacheType(value string) string {
+	if value == "" {
+		return "backend default"
+	}
+	return value
 }
 
 func validateGenerationParams(profileName, preset string, ctxTokens int, params GenerationParams, adjustments []string) (GenerationParams, []string) {

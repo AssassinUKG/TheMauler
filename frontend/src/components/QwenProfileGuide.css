@@ -1,0 +1,180 @@
+.qwen-profile-guide {
+  display: grid;
+  gap: 14px;
+  margin: 12px 0 18px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 58%),
+    var(--bg1);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 75%, transparent);
+}
+
+.qwen-guide-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.qwen-guide-kicker {
+  margin-bottom: 4px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.qwen-guide-head h4 {
+  margin: 0;
+  color: var(--text-bright);
+  font-size: 16px;
+}
+
+.qwen-guide-head p {
+  max-width: 760px;
+  margin: 7px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.qwen-active-badge {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: var(--bg2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.qwen-active-badge.active {
+  border-color: color-mix(in srgb, var(--green) 55%, var(--border));
+  color: var(--green);
+}
+
+.qwen-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.qwen-guide-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+}
+
+.qwen-check-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--yellow);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow) 16%, transparent);
+}
+
+.qwen-guide-check.ready .qwen-check-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.qwen-guide-check.review .qwen-check-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.qwen-guide-check div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.qwen-guide-check strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.qwen-guide-check span:last-child {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qwen-reasoning-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+}
+
+.qwen-reasoning-control > div {
+  display: grid;
+  gap: 3px;
+}
+
+.qwen-reasoning-control strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.qwen-reasoning-control span {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.qwen-reasoning-control select {
+  width: min(250px, 40%);
+  flex: 0 0 auto;
+}
+
+.qwen-guide-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qwen-guide-actions span {
+  margin-left: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .qwen-guide-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .qwen-guide-head,
+  .qwen-reasoning-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qwen-guide-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .qwen-reasoning-control select {
+    width: 100%;
+  }
+}

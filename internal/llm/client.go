@@ -43,13 +43,14 @@ type MessageAttachment struct {
 
 // Message is a single conversation turn.
 type Message struct {
-	Role           string              `json:"role"`
-	Content        interface{}         `json:"content"` // string or []ContentBlock
-	DisplayContent string              `json:"display_content,omitempty"`
-	Attachments    []MessageAttachment `json:"attachments,omitempty"`
-	ToolCallID     string              `json:"tool_call_id,omitempty"`
-	ToolCalls      []ToolCallDef       `json:"tool_calls,omitempty"`
-	Name           string              `json:"name,omitempty"`
+	Role             string              `json:"role"`
+	Content          interface{}         `json:"content"` // string or []ContentBlock
+	ReasoningContent string              `json:"reasoning_content,omitempty"`
+	DisplayContent   string              `json:"display_content,omitempty"`
+	Attachments      []MessageAttachment `json:"attachments,omitempty"`
+	ToolCallID       string              `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCallDef       `json:"tool_calls,omitempty"`
+	Name             string              `json:"name,omitempty"`
 }
 
 // NewTextMessage constructs a simple text-only message.

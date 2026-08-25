@@ -3,7 +3,7 @@ package settings
 // DefaultSettings returns sane global defaults (RTX 3090 / WSL2 baseline).
 func DefaultSettings() Settings {
 	return Settings{
-		ActiveProfile: "qwen3.6-nothink",
+		ActiveProfile: "qwen3.8-agent-stability",
 		Tools: ToolsConfig{
 			Enabled:                  true,
 			ConfirmReads:             false,
@@ -55,6 +55,7 @@ func DefaultSettings() Settings {
 				"task":                 true,
 				"set_reasoning_effort": true,
 				"read_tool_result":     true,
+				"generate_image":       true,
 			},
 		},
 		Agents: AgentsConfig{
@@ -66,15 +67,17 @@ func DefaultSettings() Settings {
 			RequirePlan:           true,
 			NoThinkAfterToolCalls: 2,
 			ReasoningEffort:       "auto",
+			ThinkingMode:          "auto",
 			ReviewLoop: ReviewLoopConfig{
-				Enabled:          true,
-				OnlyAutonomous:   true,
-				MaxReviewCycles:  2,
-				VerifyGate:       true,
-				VerifyTimeoutSec: 120,
-				CompletionRails:  true,
-				ReviewerPass:     true,
-				ReviewerMaxTools: 15,
+				Enabled:            true,
+				OnlyAutonomous:     true,
+				MaxReviewCycles:    2,
+				VerifyGate:         true,
+				VerifyTimeoutSec:   120,
+				CompletionRails:    true,
+				CompletionBlocking: true,
+				ReviewerPass:       true,
+				ReviewerMaxTools:   15,
 			},
 			Presets: defaultAgentPresets(),
 		},
@@ -193,12 +196,12 @@ func DefaultSettings() Settings {
 }
 
 func DefaultToolsets() map[string][]string {
-	coreRead := []string{"read", "glob", "grep", "sqlite", "session_search", "skill", "memory", "progress", "read_tool_result", "todo_write"}
+	coreRead := []string{"read", "glob", "grep", "sqlite", "session_search", "skill", "memory", "progress", "read_tool_result", "todo_write", "generate_image"}
 	localCode := append(append([]string{}, coreRead...), "write", "edit", "shell", "run_script", "terminal_send", "terminal_read", "start_listener", "http_probe", "evidence_bundle", "file_changes", "set_reasoning_effort", "task", "engagement")
 	runLean := []string{"read", "write", "edit", "glob", "grep", "shell", "terminal_send", "terminal_read", "run_script", "http_probe", "start_listener", "evidence_bundle", "memory", "progress", "read_tool_result", "todo_write", "skill", "set_reasoning_effort", "task", "engagement"}
 	opsLean := append(append([]string{}, runLean...), "session_search")
 	explore := []string{"read", "glob", "grep"}
-	webResearch := []string{"read", "glob", "grep", "web_search", "fetch_url", "browser", "memory", "progress", "read_tool_result", "todo_write", "task"}
+	webResearch := []string{"read", "glob", "grep", "web_search", "fetch_url", "browser", "memory", "progress", "read_tool_result", "todo_write", "generate_image", "task"}
 	bugBountyReview := []string{"read", "glob", "grep", "session_search", "memory", "progress", "read_tool_result", "todo_write", "engagement", "evidence_bundle", "http_probe", "web_search", "fetch_url", "browser", "task"}
 	browser := append(append([]string{}, coreRead...), "browser", "web_search", "fetch_url")
 	unrestricted := append(append([]string{}, localCode...), "web_search", "fetch_url", "browser")
@@ -313,6 +316,29 @@ func defaultAgentPresets() map[string]AgentModePreset {
 
 // DefaultProfiles returns default model profiles tuned for RTX 3090 24 GB VRAM.
 func DefaultProfiles() ProfilesFile {
+	// Qwen3.8 official generation defaults. Local output stays capped at 8K
+	// because the verified RTX 3090 working context is 35K, not the model's
+	// much larger native/cloud context ceiling.
+	qwen38Thinking := GenerationParams{
+		Temperature:     1.0,
+		TopP:            0.95,
+		TopK:            20,
+		MinP:            0.0,
+		PresencePenalty: 0.0,
+		RepeatPenalty:   1.0,
+		MaxTokens:       8192,
+		Seed:            -1,
+	}
+	qwen38NoThink := GenerationParams{
+		Temperature:     0.7,
+		TopP:            0.8,
+		TopK:            20,
+		MinP:            0.0,
+		PresencePenalty: 1.5,
+		RepeatPenalty:   1.0,
+		MaxTokens:       8192,
+		Seed:            -1,
+	}
 	// Unsloth-recommended params per mode
 	thinkCoding := GenerationParams{
 		Temperature:     0.6,
@@ -358,14 +384,17 @@ func DefaultProfiles() ProfilesFile {
 	// Base Qwen3.6-27B config — tournament-winning UD-Q4_K_XL on the
 	// user's RTX 3090 at the verified 35K working context.
 	qwenBase := Profile{
-		Provider:      "inference-bridge",
-		ModelID:       "Qwen3.6-27B-UD-Q4_K_XL.gguf",
-		CtxTokens:     35000,
-		Thinking:      true,
-		PreserveThink: true,
-		ThinkGeneral:  thinkGeneral,
-		ThinkCoding:   thinkCoding,
-		NoThink:       noThink,
+		Provider:         "inference-bridge",
+		ModelID:          "Qwen3.6-27B-UD-Q4_K_XL.gguf",
+		CtxTokens:        35000,
+		Thinking:         true,
+		PreserveThink:    true,
+		KVCachePrecision: "f16",
+		KVCacheTypeK:     "f16",
+		KVCacheTypeV:     "f16",
+		ThinkGeneral:     thinkGeneral,
+		ThinkCoding:      thinkCoding,
+		NoThink:          noThink,
 	}
 
 	qwenThink := qwenBase
@@ -380,6 +409,26 @@ func DefaultProfiles() ProfilesFile {
 	qwenNoThink.Name = "qwen3.6-nothink"
 	qwenNoThink.Thinking = false
 	qwenNoThink.PreserveThink = false
+
+	qwen38 := Profile{
+		Name:             "qwen3.8-agent-stability",
+		Provider:         "inference-bridge",
+		ModelID:          "Qwen3.8-27B-Q4_K_M.gguf",
+		CtxTokens:        35000,
+		Thinking:         true,
+		PreserveThink:    true,
+		KVCachePrecision: "f16",
+		KVCacheTypeK:     "f16",
+		KVCacheTypeV:     "f16",
+		ThinkGeneral:     qwen38Thinking,
+		ThinkCoding:      qwen38Thinking,
+		NoThink:          qwen38NoThink,
+		SpecType:         "draft-mtp",
+		SpecDraftNMax:    2,
+	}
+	qwen38Uncensored := qwen38
+	qwen38Uncensored.Name = "qwen3.8-uncensored-agent-stability"
+	qwen38Uncensored.ModelID = "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
 
 	return ProfilesFile{
 		Providers: map[string]Provider{
@@ -416,19 +465,24 @@ func DefaultProfiles() ProfilesFile {
 			},
 		},
 		Profiles: map[string]Profile{
-			"qwen3.6-think":   qwenThink,
-			"qwen3.6-chat":    qwenChat,
-			"qwen3.6-nothink": qwenNoThink,
+			"qwen3.8-agent-stability":            qwen38,
+			"qwen3.8-uncensored-agent-stability": qwen38Uncensored,
+			"qwen3.6-think":                      qwenThink,
+			"qwen3.6-chat":                       qwenChat,
+			"qwen3.6-nothink":                    qwenNoThink,
 			"gemma4-26b-a4b-qat": {
-				Name:          "gemma4-26b-a4b-qat",
-				Provider:      "llamacpp-local",
-				ModelID:       "gemma-4-26B-A4B-it-QAT-Q4_0.gguf",
-				CtxTokens:     49152,
-				Thinking:      false,
-				PreserveThink: false,
-				ThinkGeneral:  gemma4NoThink,
-				ThinkCoding:   gemma4NoThink,
-				NoThink:       gemma4NoThink,
+				Name:             "gemma4-26b-a4b-qat",
+				Provider:         "llamacpp-local",
+				ModelID:          "gemma-4-26B-A4B-it-QAT-Q4_0.gguf",
+				CtxTokens:        49152,
+				Thinking:         false,
+				PreserveThink:    false,
+				KVCachePrecision: "f16",
+				KVCacheTypeK:     "f16",
+				KVCacheTypeV:     "f16",
+				ThinkGeneral:     gemma4NoThink,
+				ThinkCoding:      gemma4NoThink,
+				NoThink:          gemma4NoThink,
 			},
 		},
 	}

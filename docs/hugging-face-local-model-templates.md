@@ -1,6 +1,6 @@
 # Hugging Face local-model templates
 
-Updated: 2026-07-23
+Updated: 2026-08-17
 
 ## Outcome
 
@@ -8,6 +8,12 @@ Selecting a local or Hugging Face model in **Control Center > Providers** now as
 runtime registry for a model-family template before creating/updating the profile. A known model gets
 family sampling, context, thinking, tool-protocol, adapter, and chat-template metadata immediately.
 An unknown model keeps conservative generic settings and must be verified with **Benchmark LLM**.
+
+InferenceBridge profiles also carry their KV-cache launch precision end to end. New and legacy
+llama.cpp profiles resolve to **FP16** by default for the best quality/compatibility balance. The
+Profiles editor can select BF16, Q8_0, Q4_0, automatic, or separate custom key/value types. Q8_0 is
+the practical fallback when a model/context combination needs more VRAM headroom. The resolved
+choice is sent with `/v1/models/load` and recorded in `runtime-lock.json`.
 
 This does not change the persistent local default, download models, or send keys/model data to a new
 service.
@@ -30,6 +36,7 @@ References:
 
 | Template | Match | Default context | No-thinking sampling | Tool path |
 |---|---|---:|---|---|
+| `qwen3.8-27b` | official and installed Qwen3.8 27B GGUF aliases | 35,000 | temp 0.7, top-p 0.8, top-k 20, min-p 0, presence 1.5, repeat 1.0 | native OpenAI; thinking roles use temp 1/top-p 0.95 and preserved thinking |
 | `qwen3.6-27b-unsloth-ud-q4-k-xl` | exact Unsloth `Qwen3.6-27B-UD-Q4_K_XL` GGUF | 35,000 | temp 0.2, top-p 0.95, top-k 20, min-p 0, repeat 1.05 | native OpenAI; grammar probe still required |
 | `qwen3.6-27b-huihui-abliterated-mtp` | exact Huihui abliterated MTP GGUF names | 35,000 | temp 0.2, top-p 0.95, top-k 20, min-p 0, repeat 1.05 | native OpenAI |
 | `qwen3.6-27b-hauhaucs-aggressive` | exact HauhauCS Aggressive GGUF names | 40,000 | temp 0.2, top-p 0.95, top-k 20, min-p 0, repeat 1.05 | native OpenAI |
@@ -76,23 +83,44 @@ Sources:
 
 ## Default local model
 
-The built-in `qwen3.6-nothink` profile now defaults to the tournament-winning
-`Qwen3.6-27B-UD-Q4_K_XL.gguf` through the `inference-bridge` provider at 35,000 context tokens.
-This applies to fresh/default configurations. Existing named user profiles are not silently
-rewritten; the current installation explicitly uses its verified winner profile as the persistent
-local default.
+The built-in `qwen3.8-agent-stability` profile defaults to `Qwen3.8-27B-Q4_K_M.gguf` through the
+`inference-bridge` provider at 35,000 context tokens. The current installation and fresh/default
+configurations use the same profile. The older Qwen3.6 tournament winner remains available as a
+comparison/fallback profile.
 
-MTP remains artifact- and machine-specific. The built-in profile starts in auto/off state until the
-GGUF probe confirms native MTP heads. On the current RTX 3090, the UI tuner selected `n=3` but rounded
-to `1.00x` versus MTP-off, so no material speculative-decoding speedup is claimed.
+Qwen3.8 thinking roles use temperature 1.0, top-p 0.95, top-k 20, min-p 0, presence penalty 0,
+repeat penalty 1.0, and preserved thinking. Direct tool/no-thinking turns use temperature 0.7,
+top-p 0.8, top-k 20, min-p 0, presence penalty 1.5, and repeat penalty 1.0. Mauler sends normalized
+reasoning effort using Qwen3.8's supported `low`, `medium`, and `xhigh` values; the familiar Mauler
+`high` choice maps to `xhigh`, while direct/no-thinking requests omit the field. It does not globally
+disable Qwen3.8 thinking merely because a tool is available.
 
-The 31B context is deliberately conservative for an RTX 3090. Q4/Q5-class profiles are supported;
-Q6 is not a default because it does not leave useful KV-cache headroom on 24 GB.
+The Chat Inspector adds an explicit run-level **Thinking** override. **Profile** preserves those
+template defaults and the bounded no-thinking recovery path. **On** selects the thinking sampler,
+preserves reasoning, and prevents adaptive recovery from switching the same run to direct mode;
+Reasoning Effort still chooses its depth. **Off** selects the direct sampler and disables preserved
+reasoning. Mauler only forces On for a template that declares thinking support, so an unknown or
+direct-only fine-tune is not given invented protocol capabilities.
+
+When preservation is enabled, Mauler now stores the model's separate `reasoning_content` beside the
+assistant turn and sends it back only through the local llama.cpp-compatible path. This is reasoning
+continuity, not a UI transcript setting. Older reasoning is included in token accounting and removed
+by bounded micro-compaction so a long task cannot accumulate an unbounded hidden trace.
+
+MTP remains artifact- and machine-specific. The Qwen3.8 profile starts conservatively with native
+draft-MTP `n=2`; it must be compared against MTP-off before any speedup is claimed. The previous
+Qwen3.6 UI tuner selected `n=3` but rounded to `1.00x` versus MTP-off.
+
+The official model advertises a native 262,144-token context, but the 35K local profile is deliberately
+conservative for this RTX 3090. Q4/Q5-class profiles are supported; Q6 is not a default because it
+does not leave useful KV-cache headroom on 24 GB. FP16 remains the quality/compatibility default;
+Q8_0 cache is the UI-selectable fallback when a larger measured context needs additional headroom.
 
 The exact Qwen aliases are sourced from the model repositories rather than guessed from display
 names:
 
 - [Unsloth Qwen3.6-27B GGUF](https://huggingface.co/unsloth/Qwen3.6-27B-GGUF)
+- [Qwen Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)
 - [Huihui Qwen3.6-27B abliterated MTP GGUF](https://huggingface.co/huihui-ai/Huihui-Qwen3.6-27B-abliterated-MTP-GGUF)
 - [HauhauCS Qwen3.6-27B Aggressive](https://huggingface.co/HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive)
 - [llmfan46 Qwen3.6-35B-A3B heretic Native-MTP GGUF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF)
@@ -115,10 +143,12 @@ Source: [HauhauCS Gemma4-26B-A4B QAT Balanced MTP model card](https://huggingfac
 1. Open **Control Center > Providers** and list the InferenceBridge models.
 2. Under **Profiles**, create/duplicate a profile, use **Pick** (or the UI Model ID field), then click
    **Apply model template**.
-3. Review context, thinking, repeat penalty, and any MTP draft path in the same UI.
-4. Run **Benchmark LLM**. Apply its recommendation only after checking the live context and protocol
+3. For a Qwen3.8 profile, use the guided setup card to check the thinking/direct samplers, preserved
+   reasoning, 35K local context, FP16 KV cache, reasoning depth, and provisional MTP state.
+4. Review context, thinking, repeat penalty, and any MTP draft path in the same UI.
+5. Run **Benchmark LLM**. Apply its recommendation only after checking the live context and protocol
    results.
-5. Make the profile the local default only if the benchmark is healthy. Cloud profiles remain
+6. Make the profile the local default only if the benchmark is healthy. Cloud profiles remain
    one-task boosts.
 
 Unknown or renamed fine-tunes may receive conservative family defaults, but remain benchmark-required

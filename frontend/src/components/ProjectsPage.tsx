@@ -14,11 +14,14 @@ import {
   type EngagementRecord,
   type EngagementSummary,
   type LabProfile,
+  type LabScopeTarget,
   type Settings,
   type VPNInterfaceInfo,
   type WorkspaceFolder,
 } from '../wailsjs/go'
 import { EngagementSetupWizard } from './EngagementSetupWizard'
+import { AuthorisedScopeEditor } from './AuthorisedScopeEditor'
+import { allowedScopeCount, normaliseScopeTargets, primaryScopeHostname, primaryScopeTarget, scopeKind } from './scopeTargets'
 import './ProjectsPage.css'
 
 interface Props {
@@ -92,16 +95,16 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
 
   const newProject = () => {
     const base = settings?.context.workspace_dir || cwd || 'C:/Users/richa/Documents/HTB_writeups'
-    const name = 'New HTB box'
-    const id = uniqueProjectId('new-box', projects)
+    const name = 'New client project'
+    const id = uniqueProjectId('new-client', projects)
     setSelectedId('')
     setDraft({
       ...blankProject(),
       id,
       name,
       workspace_dir: joinPath(base, id),
-      ops_profile: 'HTB / CTF',
-      evidence_policy: 'discovery_first',
+      ops_profile: 'Pentesting',
+      evidence_policy: 'research_assisted',
       access_preference: 'auto',
     })
     setEditing(true)
@@ -115,6 +118,11 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
   const saveProject = async (activate = false) => {
     if (!settings) return null
     const profile = cleanProfile(draft, settings.context.workspace_dir || cwd, projects)
+    const invalid = profile.scope_targets.find(entry => !entry.value.trim() || scopeKind(entry.value) === 'invalid')
+    if (invalid) {
+      showStatus(`Fix invalid scope target: ${invalid.value || 'empty row'}`)
+      return null
+    }
     const profiles = upsertProject(projects, profile)
     const next: Settings = {
       ...settings,
@@ -202,13 +210,13 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
       <header className="projects-header">
         <div>
           <span className="project-kicker">Start here</span>
-          <h1>Your boxes</h1>
-          <p>Resume an old box or create a clean workspace. Files and saved sessions are never deleted when you switch.</p>
+          <h1>Your projects</h1>
+          <p>Resume a lab or client engagement, including multi-target external and internal scope. Files and saved sessions are never deleted when you switch.</p>
         </div>
         <div className="projects-header-actions">
           {status && <span className="projects-status">{status}</span>}
           <button onClick={() => void load()}>Refresh</button>
-          <button className="project-new-box" onClick={newProject}>+ New HTB box</button>
+          <button className="project-new-box" onClick={newProject}>+ New project</button>
         </div>
       </header>
 
@@ -223,7 +231,7 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
               onClick={() => chooseProject(project.id)}
             >
               <span className="project-card-title">{project.name || project.id}{project.id === activeId ? '  • ACTIVE' : ''}</span>
-              <span>{[project.target, project.hostname, project.vpn_interface].filter(Boolean).join(' | ') || 'No target set'}</span>
+              <span>{projectScopeCardLabel(project)}</span>
               <span className="project-card-root">{project.workspace_dir || cwd}</span>
             </button>
           ))}
@@ -256,9 +264,9 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
             <div className="project-resume-dashboard">
               <div className="project-resume-cards">
                 <div>
-                  <span>Target</span>
+                  <span>Authorised scope</span>
                   <strong>{draft.target || 'Not set'}</strong>
-                  <code>{draft.hostname || 'No hostname'}</code>
+                  <code>{scopeCountLabel(draft.scope_targets)}</code>
                 </div>
                 <div>
                   <span>Environment</span>
@@ -304,9 +312,9 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
                     <div>
                       <span className="project-kicker">Engagement grid</span>
                       <strong>Start governed testing</strong>
-                      <small>{draft.target || draft.hostname ? 'Pins the reviewed workflow, checklist, and locked project scope.' : 'Set a target or hostname before creating a grid.'}</small>
+                      <small>{allowedScopeCount(draft.scope_targets) ? 'Pins the reviewed workflow, checklist, and complete locked project scope.' : 'Add at least one allowed target before creating a grid.'}</small>
                     </div>
-                    <button onClick={() => void startEngagement()} disabled={!draft.target && !draft.hostname}>Create Grid</button>
+                    <button onClick={() => void startEngagement()} disabled={!allowedScopeCount(draft.scope_targets)}>Create Grid</button>
                   </div>
                 ))}
                 {draft.notes && <div className="project-notes-preview"><span>Project note</span><p>{draft.notes}</p></div>}
@@ -329,14 +337,7 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
                 <button onClick={() => void pickRoot()}>Browse</button>
               </div>
             </label>
-            <label>
-              <span>Target IP / URL</span>
-              <input value={draft.target} onChange={e => setDraft(prev => ({ ...prev, target: e.target.value }))} placeholder="10.129.x.x or https://host" />
-            </label>
-            <label>
-              <span>Hostname</span>
-              <input value={draft.hostname} onChange={e => setDraft(prev => ({ ...prev, hostname: e.target.value }))} placeholder="boxname.htb" />
-            </label>
+            <AuthorisedScopeEditor value={draft.scope_targets} onChange={scopeTargets => setDraft(prev => scopeIntoProfile(prev, scopeTargets))} />
             <label>
               <span>VPN/interface</span>
               <select value={draft.vpn_interface} onChange={e => setDraft(prev => ({ ...prev, vpn_interface: e.target.value }))}>
@@ -411,6 +412,7 @@ function blankProject(): LabProfile {
     workspace_dir: '',
     target: '',
     hostname: '',
+    scope_targets: [],
     vpn_interface: '',
     latest_artifact: '',
     ops_profile: 'Pentesting',
@@ -435,12 +437,16 @@ function normaliseProfiles(settings: Settings): LabProfile[] {
 }
 
 function profileToDraft(profile: LabProfile, fallbackRoot: string): LabProfile {
+  const scopeTargets = normaliseScopeTargets(profile.scope_targets, profile.target, profile.hostname)
   return {
     ...blankProject(),
     ...profile,
     id: profile.id || slug(profile.name || 'project'),
     name: profile.name || profile.id || 'Project',
     workspace_dir: profile.workspace_dir || fallbackRoot,
+    target: primaryScopeTarget(scopeTargets),
+    hostname: primaryScopeHostname(scopeTargets),
+    scope_targets: scopeTargets,
     ops_profile: profile.ops_profile || 'Pentesting',
     evidence_policy: profile.evidence_policy || defaultEvidencePolicy(profile.ops_profile),
     access_preference: profile.access_preference || 'auto',
@@ -451,12 +457,16 @@ function cleanProfile(draft: LabProfile, fallbackRoot: string, existing: LabProf
   const wantedId = slug(draft.id || draft.name || 'project')
   const current = existing.find(item => item.id === draft.id)
   const id = current || existing.every(item => item.id !== wantedId) ? wantedId : uniqueProjectId(wantedId, existing)
+  const scopeTargets = normaliseScopeTargets(draft.scope_targets, draft.target, draft.hostname)
   return {
     ...blankProject(),
     ...draft,
     id,
     name: draft.name.trim() || id,
     workspace_dir: slashPath((draft.workspace_dir || joinPath(fallbackRoot, id)).trim()),
+    target: primaryScopeTarget(scopeTargets),
+    hostname: primaryScopeHostname(scopeTargets),
+    scope_targets: scopeTargets,
     ops_profile: draft.ops_profile || 'Pentesting',
     evidence_policy: draft.evidence_policy || defaultEvidencePolicy(draft.ops_profile),
     access_preference: draft.access_preference || 'auto',
@@ -474,6 +484,7 @@ function labFromProfile(profile: LabProfile) {
     name: profile.name,
     target: profile.target,
     hostname: profile.hostname,
+    scope_targets: profile.scope_targets,
     vpn_interface: profile.vpn_interface,
     latest_artifact: profile.latest_artifact,
     ops_profile: profile.ops_profile,
@@ -481,6 +492,30 @@ function labFromProfile(profile: LabProfile) {
     access_preference: profile.access_preference,
     notes: profile.notes,
   }
+}
+
+function scopeIntoProfile(profile: LabProfile, scopeTargets: LabScopeTarget[]): LabProfile {
+  return {
+    ...profile,
+    scope_targets: scopeTargets,
+    target: primaryScopeTarget(scopeTargets),
+    hostname: primaryScopeHostname(scopeTargets),
+  }
+}
+
+function scopeCountLabel(entries: LabScopeTarget[] | undefined): string {
+  const allowed = allowedScopeCount(entries)
+  const excluded = (entries || []).filter(entry => entry.excluded).length
+  if (!allowed) return 'No allowed targets'
+  return `${allowed} allowed target${allowed === 1 ? '' : 's'}${excluded ? ` · ${excluded} excluded` : ''}`
+}
+
+function projectScopeCardLabel(project: LabProfile): string {
+  const entries = normaliseScopeTargets(project.scope_targets, project.target, project.hostname)
+  const primary = primaryScopeTarget(entries)
+  const allowed = allowedScopeCount(entries)
+  const target = primary ? `${primary}${allowed > 1 ? ` +${allowed - 1} more` : ''}` : 'No target set'
+  return [target, project.vpn_interface].filter(Boolean).join(' | ')
 }
 
 function defaultEvidencePolicy(opsProfile: string): string {

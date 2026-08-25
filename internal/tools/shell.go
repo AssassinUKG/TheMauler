@@ -35,7 +35,7 @@ func (t *Shell) Description() string {
 	}
 	return fmt.Sprintf("Run a shell command in the current working directory using the %s backend. "+
 		"Use for short deterministic one-shot commands where exact output/exit code matters, including exact curl/wget flags, pipelines, scans, and local scripts. Use http_probe for repeatable HTTP/webshell probes when it can express the request. Prefer terminal_send/terminal_read only for interactive, prompt-driven, listener, REPL, SSH, msfconsole, connected-shell, or live-watched work. "+
-		"On Windows auto uses PowerShell; on Linux/WSL auto uses bash. If the backend is WSL, commands run inside the configured WSL distro with its /etc/hosts, VPN routing, and Kali tools. Use platform-native paths for the active backend. "+
+		"On Windows auto uses the configured backend. Set backend=powershell for Windows-host facts such as processes, services, windows, Task Manager state, or GPU state; do not wrap those commands in powershell.exe or send them through a WSL terminal. Set backend=wsl only for Linux/Kali commands that need the distro's /etc/hosts, VPN routing, and tools. Use platform-native paths for the selected backend. "+
 		"Write commands as plain text with literal operators (&, >, <, |, \"); never HTML-escape them (do not write &amp;, &gt;, &lt;, &quot;). "+
 		"For HTB/CTF enumeration, use realistic timeouts (120-300s) for nmap/gobuster/ffuf/hydra, save scan output with -oA/-oN/-oG or tee, then grep/read the saved file instead of rerunning. "+
 		"Do not pipe long scans through head because it can terminate the scan early and hide the real exit status. "+
@@ -50,6 +50,7 @@ func (t *Shell) Schema() json.RawMessage {
   "type": "object",
   "properties": {
     "command": {"type": "string", "description": "The command to run in the active shell"},
+	"backend": {"type": "string", "enum": ["auto", "powershell", "wsl", "cmd", "bash"], "description": "Per-call shell backend. Use powershell for Windows host/process/service/app/GPU inspection and wsl for Kali/Linux target work. Omit to use the configured default."},
     "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 300). Use 120-300 for long-running scans/enumeration."},
     "background": {"type": "boolean", "description": "Run the command detached and return a job id immediately instead of waiting. Use for long scans (nmap -p-, gobuster, hashcat)."},
     "job": {"type": "string", "description": "Poll a previously started background job by its id (e.g. \"j1\"). When set, omit command; returns the job's state and latest output. Respect the returned next-poll backoff instead of polling every turn."},
@@ -61,6 +62,7 @@ func (t *Shell) Schema() json.RawMessage {
 
 type shellParams struct {
 	Command    string `json:"command"`
+	Backend    string `json:"backend"`
 	Bash       string `json:"bash"`
 	Cmd        string `json:"cmd"`
 	PowerShell string `json:"powershell"`
@@ -82,7 +84,7 @@ func (t *Shell) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	if out, handled, err := runShellBackground(p); handled {
 		return out, err
 	}
-	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, "", p.Verbose)
+	return runShell(ctx, p.Command, p.Timeout, t.TimeoutSecs, p.Backend, p.Verbose)
 }
 
 func firstNonEmptyShellArg(values ...string) string {
@@ -110,6 +112,19 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 	}
 
 	backend := detectShellBackend(forcedBackend)
+	if err := validateShellBackend(backend); err != nil {
+		return "", err
+	}
+	// A nested powershell.exe invocation sent through WSL is parsed by bash first.
+	// Bash expands PowerShell variables such as $p and $_, corrupting the command
+	// before PowerShell sees it. A one-shot shell call does not need that boundary:
+	// execute the payload directly in native PowerShell and preserve it byte-for-byte.
+	if runtime.GOOS == "windows" {
+		if inner, ok := unwrapNestedPowerShellCommand(command); ok {
+			command = inner
+			backend = "powershell"
+		}
+	}
 	distro := ""
 	user := ""
 	if backend == "wsl" {
@@ -224,6 +239,44 @@ func runShell(ctx context.Context, command string, requestedTimeout, defaultTime
 		return result, fmt.Errorf("exit code %d", exitCode)
 	}
 	return result, nil
+}
+
+func validateShellBackend(backend string) error {
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "powershell", "pwsh", "cmd", "wsl", "bash":
+		return nil
+	default:
+		return fmt.Errorf("shell: unsupported backend %q", backend)
+	}
+}
+
+var nestedPowerShellCommandRE = regexp.MustCompile(`(?i)^\s*(?:powershell|pwsh)(?:\.exe)?(?:\s+[^\r\n]*?)?\s+-(?:command|c)\s+`)
+
+// UnwrapNestedPowerShellCommand returns the script payload from a one-shot
+// powershell.exe/pwsh -Command wrapper. It is exported so app-level routing can
+// keep such commands out of a WSL/shared terminal before execution.
+func UnwrapNestedPowerShellCommand(command string) (string, bool) {
+	return unwrapNestedPowerShellCommand(command)
+}
+
+func unwrapNestedPowerShellCommand(command string) (string, bool) {
+	trimmed := strings.TrimSpace(command)
+	loc := nestedPowerShellCommandRE.FindStringIndex(trimmed)
+	if loc == nil || loc[0] != 0 || loc[1] >= len(trimmed) {
+		return command, false
+	}
+	payload := strings.TrimSpace(trimmed[loc[1]:])
+	if len(payload) >= 2 {
+		quote := payload[0]
+		if (quote == '\'' || quote == '"') && payload[len(payload)-1] == quote {
+			payload = payload[1 : len(payload)-1]
+		}
+	}
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		return command, false
+	}
+	return payload, true
 }
 
 func PrepareShellCommand(command string) (string, error) {

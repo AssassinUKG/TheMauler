@@ -48,7 +48,7 @@ type engagementTool struct{ app *App }
 func (t *engagementTool) Name() string { return "engagement" }
 
 func (t *engagementTool) Description() string {
-	return "Read and update the active project Engagement Grid. Use available to find distinct parallel checks, or now/status for the single deterministic cursor, then claim -> test -> add_evidence -> observe -> finish. get_notes/set_notes share the compact project risk model with the operator. Evidence stores only hashed RunLedger/file provenance, never duplicated bodies. Vulnerable checks cannot finish without raw evidence; findings require reproducible raw evidence and report-ready screenshot/waiver gates. add_endpoint is locked to the operator-configured target scope."
+	return "Only for an explicitly requested project Engagement Grid workflow; it is not general task completion or ordinary file analysis. Read and update the active Grid. Use available to find distinct parallel checks, or now/status for the single deterministic cursor, then claim -> test -> add_evidence -> observe -> finish. get_notes/set_notes share the compact project risk model with the operator. Evidence stores only hashed RunLedger/file provenance, never duplicated bodies. Vulnerable checks cannot finish without raw evidence; findings require reproducible raw evidence and report-ready screenshot/waiver gates. add_endpoint is locked to the operator-configured target scope."
 }
 
 func (t *engagementTool) Schema() json.RawMessage {
@@ -595,30 +595,30 @@ func engagementWorkRef(args engagementToolArgs) (engagement.WorkRef, error) {
 }
 
 func lockedAuthoritativeScope(lab settings.LabContext, requested []string) ([]string, error) {
-	authoritative := []string{}
-	for _, value := range []string{lab.Target, lab.Hostname} {
-		value = strings.TrimSpace(value)
-		if value == "" || strings.EqualFold(value, "boxname.htb") {
-			continue
-		}
-		authoritative = append(authoritative, value)
-	}
-	if len(authoritative) == 0 {
+	authoritative := settings.LabScopeValues(lab)
+	if !settings.HasAllowedLabScope(lab) {
 		return nil, fmt.Errorf("configure the project target IP/URL or hostname before creating an engagement")
 	}
 	if len(requested) == 0 {
 		return authoritative, nil
 	}
-	allowed := map[string]bool{}
+	exact := map[string]bool{}
 	for _, value := range authoritative {
-		allowed[scopeAuthorityKey(value)] = true
+		exact[strings.ToLower(strings.TrimSpace(value))] = true
 	}
 	result := []string{}
 	seen := map[string]bool{}
 	for _, value := range requested {
 		value = strings.TrimSpace(value)
-		key := scopeAuthorityKey(value)
-		if value == "" || key == "" || !allowed[key] {
+		if value == "" {
+			return nil, fmt.Errorf("requested scope contains an empty entry")
+		}
+		key := strings.ToLower(value)
+		allowed := exact[key]
+		if !allowed && !strings.HasPrefix(value, "!") {
+			allowed = engagement.CheckTargetScope(authoritative, value).Allowed
+		}
+		if !allowed {
 			return nil, fmt.Errorf("requested scope %q does not match the operator-configured target/hostname", value)
 		}
 		if !seen[strings.ToLower(value)] {

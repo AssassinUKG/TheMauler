@@ -86,7 +86,7 @@ type EngagementTargetProbe struct {
 func (a *App) GetEngagementSetupPreview() EngagementSetupPreview {
 	cfg := a.GetSettings()
 	profiles := a.GetProfiles()
-	lab := cfg.Context.Lab
+	lab := normaliseAppLabContext(cfg.Context.Lab)
 	workspace := strings.TrimSpace(cfg.Context.WorkspaceDir)
 	if workspace == "" {
 		workspace = workspaceScope()
@@ -145,6 +145,13 @@ func (a *App) CheckEngagementTarget() EngagementTargetProbe {
 	target := strings.TrimSpace(lab.Target)
 	if target == "" {
 		target = strings.TrimSpace(lab.Hostname)
+	}
+	if _, _, cidrErr := net.ParseCIDR(strings.Trim(target, "[]")); cidrErr == nil {
+		return EngagementTargetProbe{
+			Target: target, Status: "warning",
+			Detail:     "The authorised primary target is a CIDR, so Mauler validated the scope rule without contacting every host. Run reachability against a specific in-scope host during the first claimed task.",
+			ScopeMatch: target, CheckedAt: checkedAt,
+		}
 	}
 	decision := engagement.CheckTargetScope(scope, target)
 	if !decision.Allowed {

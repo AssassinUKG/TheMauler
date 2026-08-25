@@ -46,7 +46,11 @@ include:
 - Chat agent/workspace menus remain visible above a tall bottom panel;
 - all workbench separators drag, collapsed edges reopen, and dimensions survive reload;
 - terminal starts in a real validated workspace and AI command output is not duplicated;
-- Telegram receives actual tool/final results, not only a completion status;
+- Telegram receives actual tool/final results, not only a completion status; direct actionable text
+  works without `/cmd`, current public facts require a real tool, raw tool protocol cannot complete a
+  run, natural multi-day weather wording routes to work, “route it” preserves the pending task, quiet
+  runs keep one timer-refreshed progress card, long final answers are not truncated, and same-chat
+  result follow-ups return the prior result;
 - context inspector/event provenance matches the packet actually sent.
 - Context Quality pass^5 reports 105/105 deterministic attempts and zero model calls; Agent Eval x5
   is treated as a separate, expensive live gate whose actual selected profile and result are named.
@@ -58,6 +62,87 @@ components. It is not green and must not be presented as passing. Frontend produ
 checking is the current gate unless a task explicitly scopes lint cleanup.
 
 ## Latest recorded baseline
+
+- 2026-08-24 multi-target authorised scope: Home now persists ordered allow/exclude rows for IP,
+  CIDR, hostname, host/port, and HTTP(S) URL/path scope. Existing comma-separated targets migrate
+  into separate rows; the first allowed row remains the compatibility primary target. Explicit
+  exclusions are evaluated before broad CIDR/host allows, model-requested path broadening is denied,
+  and relative endpoints inherit only the primary concrete target. Full Go tests, full vet, focused
+  settings/engagement/app/tools race suites, frontend type-drift/production build, scoped handwritten
+  diff check, and canonical Wails production build pass. Output is `build/bin/TheMauler.exe`. A native
+  visual two-IP create/reopen/Grid-preview smoke was not run, so no visual UX claim is added.
+
+- 2026-08-22 Telegram natural-range/heartbeat closure: the exact “weather over the next seven days”
+  wording routes to required external evidence, route confirmation is code-owned, quiet runs refresh
+  one live status card, and inaccessible settings no longer panic during `App.New`. All scoped
+  `TestTelegram*`, `TestDispatchChannel*`, channelbus, and Telegram package tests pass; focused race,
+  app/channel/Telegram vet, frontend production build, and Wails production build also pass. The
+  managed execution sandbox denied unrelated manifest `EvalSymlinks`, browser-fixture, and external
+  config/temp access, so the complete app suite and live Telegram-network smoke were not rerun in
+  this closure. Output remains `build/bin/TheMauler.exe`.
+
+- 2026-08-22 Telegram task/result repair: direct imperative and changing-data requests now enter the
+  queued project-work lane without requiring `/cmd`; current public facts require a narrowed real
+  tool set, and raw textual tool protocol blocks completion. Telegram final cards use structured
+  Markdownish formatting, retain long answers through the client’s multi-message path, replace stale
+  live cards for multi-part results, and bridge task/result pairs back into the same bounded Telegram
+  chat. Deterministic follow-ups return the exact prior result, with a claimant-scoped persisted-run
+  fallback after restart. Focused channel/app/Telegram tests, Context Quality pass^5 (105/105), the
+  full Go suite, vet, app/tools race suite, frontend type/production build, Wails production build,
+  and canonical native startup smoke all pass. Output remains `build/bin/TheMauler.exe`; no live
+  Telegram-network, live-model, or unattended Agent Eval result is claimed.
+
+- 2026-08-21 Windows-host shell and Chat Thinking repair: local process/game/app/service/window and
+  GPU/VRAM questions route to an isolated native PowerShell one-shot even when the shared target
+  terminal is WSL/Kali. Redundant nested PowerShell wrappers are removed without allowing bash to
+  expand `$` variables; explicit Kali/WSL work and genuine remote Windows sessions remain intact.
+  Inspector > Agent > Behaviour now provides a persisted Profile/On/Off Thinking override. On
+  enables supported model thinking plus preserved reasoning for the complete run, Off selects the
+  direct sampler and clears preserved reasoning, and Profile keeps the existing adaptive policy.
+  Settings migration/validation, request-level Qwen behavior, shell routing, wrapper preservation,
+  the 105-attempt deterministic context gate, full Go suite, vet, app/tools race suite, frontend
+  type/production build, Wails production build, and a short canonical native startup smoke pass.
+  The canonical output is
+  `build/bin/TheMauler.exe`; no live-model or unattended Agent Eval claim is added.
+
+- 2026-08-19 Chat attachment and read-only routing repair: native multi-file selection, copied
+  Explorer paths, dropped paths, bounded large-file access, and untrusted attachment boundaries pass
+  focused tests. The exact OpenAPI `POST, PUT, PATCH, DELETE` coverage prompt now receives a low-risk
+  read-only control contract, no mutation/listener/Engagement tools, and no project build verifier.
+  Stopped read-only runs also promote cleaned successful shell evidence into Chat when no assistant
+  checkpoint exists, while verifier output, mutation runs, and guarded content remain excluded.
+  Empty stopped-run memory and legacy reinjection regressions are covered. Context Quality returned
+  7/7 fixtures and 105/105 deterministic attempts. The full Go suite, vet, app/tools race suite,
+  frontend production build, generated bindings, and Wails production build pass. The temporary
+  side-by-side build name used while an older desktop process was open was retired on 2026-08-19;
+  the current verified production output is the canonical `build/bin/TheMauler.exe`. No live model
+  or unattended Agent Eval claim is added.
+
+- 2026-08-19 Terminal readability repair: run start preserves the persisted/user-resized bottom-panel
+  height; terminal text defaults to 14 px with persisted UI A-/A+ controls and improved contrast;
+  AI Command cards wrap commands across their full width and retain the draggable split/rail.
+
+- 2026-08-19 task-routing repair: answer-output wording (table/summary/report/count/plan) no longer
+  creates a Builder mutation contract by itself; mixed prompts with an explicit save/edit/update/fix
+  action retain mutation planning and verification. Chat shows the actual live route while running.
+
+- 2026-08-17 Qwen3.8 settings/UI follow-up: the local llama.cpp request path preserves separate
+  `reasoning_content` between turns, Qwen3.8 emits only supported `low`/`medium`/`xhigh` effort
+  values (mapping Mauler `high` to `xhigh` and omitting the field for direct mode), and old reasoning
+  is token-counted and micro-compacted. Profiles now includes the Qwen3.8 RTX 3090 setup card. Focused
+  backend/settings/history tests, the full Go suite, vet, app/tools race suite, frontend production
+  build, and Wails production build pass. A live model comparison was not run because InferenceBridge
+  was not active, so MTP remains provisional and no new unattended/pass^k claim is recorded.
+
+- 2026-08-16 Qwen3.8 default and control-loop hardening: fresh and live settings select
+  `qwen3.8-agent-stability` through InferenceBridge at 35K. Code-owned templates carry the official
+  thinking/no-thinking samplers, preserved thinking, normalized `none`-to-`xhigh` effort, and a
+  conservative draft-MTP `n=2` probe. Tool availability no longer disables thinking on the first
+  Qwen3.8 step; bounded recovery can still force no-thinking. The completion evidence rail is
+  blocking by default. The full Go suite, vet, app/tools race suite, frontend type/production build,
+  scoped diff check, and clean Wails production build pass. The rebuilt native desktop launches
+  responsively and visibly reports `qwen3.8-agent-stability`, backend `ok`, and the expected
+  35,000-token context.
 
 - 2026-07-23 repaired live Agent Eval closure: four diagnostic 12-fixture UI runs exposed and
   regression-closed alternate-valid-artifact scoring, accidental chunk overwrite, consecutive

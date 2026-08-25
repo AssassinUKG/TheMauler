@@ -22,16 +22,21 @@ type Provider struct {
 
 // Profile is a named model behaviour configuration.
 type Profile struct {
-	Name          string           `toml:"name" json:"name"`
-	Provider      string           `toml:"provider" json:"provider"`
-	ModelID       string           `toml:"model_id" json:"model_id"`
-	CtxTokens     int              `toml:"ctx_tokens" json:"ctx_tokens"`
-	Thinking      bool             `toml:"thinking" json:"thinking"`
-	PreserveThink bool             `toml:"preserve_thinking" json:"preserve_thinking"`
-	MMProj        string           `toml:"mmproj" json:"mmproj"` // path to vision projector .gguf
-	ThinkGeneral  GenerationParams `toml:"thinking_general" json:"thinking_general"`
-	ThinkCoding   GenerationParams `toml:"thinking_coding" json:"thinking_coding"`
-	NoThink       GenerationParams `toml:"nothinking" json:"nothinking"`
+	Name          string `toml:"name" json:"name"`
+	Provider      string `toml:"provider" json:"provider"`
+	ModelID       string `toml:"model_id" json:"model_id"`
+	CtxTokens     int    `toml:"ctx_tokens" json:"ctx_tokens"`
+	Thinking      bool   `toml:"thinking" json:"thinking"`
+	PreserveThink bool   `toml:"preserve_thinking" json:"preserve_thinking"`
+	MMProj        string `toml:"mmproj" json:"mmproj"` // path to vision projector .gguf
+	// InferenceBridge KV-cache launch controls. FP16 is the quality-first default;
+	// Q8_0 is available for profiles that need more context/VRAM headroom.
+	KVCachePrecision string           `toml:"kv_cache_precision" json:"kv_cache_precision"`
+	KVCacheTypeK     string           `toml:"kv_cache_type_k" json:"kv_cache_type_k"`
+	KVCacheTypeV     string           `toml:"kv_cache_type_v" json:"kv_cache_type_v"`
+	ThinkGeneral     GenerationParams `toml:"thinking_general" json:"thinking_general"`
+	ThinkCoding      GenerationParams `toml:"thinking_coding" json:"thinking_coding"`
+	NoThink          GenerationParams `toml:"nothinking" json:"nothinking"`
 	// MTP speculative decoding (llama.cpp b9180+): 1.4–2.2× faster generation.
 	// SpecType: "" (disabled) | "draft-mtp"
 	// SpecDraftNMax: number of draft tokens per step (2 is a safe default)
@@ -138,7 +143,8 @@ type AgentsConfig struct {
 	EscalationProfile     string                     `toml:"escalation_profile" json:"escalation_profile"`
 	RequirePlan           bool                       `toml:"require_plan" json:"require_plan"`
 	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (2)
-	ReasoningEffort       string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | minimal | low | medium | high
+	ReasoningEffort       string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | none | minimal | low | medium | high | xhigh
+	ThinkingMode          string                     `toml:"thinking_mode" json:"thinking_mode"`                         // auto | on | off; chat-level override for supported models
 	ReviewLoop            ReviewLoopConfig           `toml:"review_loop" json:"review_loop"`
 	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
 }
@@ -157,31 +163,45 @@ type WorkspacePreference struct {
 	AgentMode string `toml:"agent_mode" json:"agent_mode"`
 }
 
+// LabScopeTarget is one operator-owned project scope rule. Value accepts an
+// exact IP/host, CIDR, host:port, or URL (including a path prefix). Excluded
+// entries are explicit deny rules evaluated before all allow rules.
+type LabScopeTarget struct {
+	Value       string `toml:"value" json:"value"`
+	Kind        string `toml:"kind" json:"kind"`               // ip | cidr | hostname | url | invalid
+	Environment string `toml:"environment" json:"environment"` // auto | external | internal
+	Label       string `toml:"label" json:"label"`
+	Notes       string `toml:"notes" json:"notes"`
+	Excluded    bool   `toml:"excluded" json:"excluded"`
+}
+
 type LabContext struct {
-	ID               string `toml:"id" json:"id"`
-	Name             string `toml:"name" json:"name"`
-	Target           string `toml:"target" json:"target"`
-	Hostname         string `toml:"hostname" json:"hostname"`
-	VPNInterface     string `toml:"vpn_interface" json:"vpn_interface"`
-	LatestArtifact   string `toml:"latest_artifact" json:"latest_artifact"`
-	OpsProfile       string `toml:"ops_profile" json:"ops_profile"`
-	EvidencePolicy   string `toml:"evidence_policy" json:"evidence_policy"`     // discovery_first | research_assisted | reference_allowed | fastest_path
-	AccessPreference string `toml:"access_preference" json:"access_preference"` // auto | webshell | reverse_shell | bind_shell | none
-	Notes            string `toml:"notes" json:"notes"`
+	ID               string           `toml:"id" json:"id"`
+	Name             string           `toml:"name" json:"name"`
+	Target           string           `toml:"target" json:"target"`
+	Hostname         string           `toml:"hostname" json:"hostname"`
+	ScopeTargets     []LabScopeTarget `toml:"scope_targets" json:"scope_targets"`
+	VPNInterface     string           `toml:"vpn_interface" json:"vpn_interface"`
+	LatestArtifact   string           `toml:"latest_artifact" json:"latest_artifact"`
+	OpsProfile       string           `toml:"ops_profile" json:"ops_profile"`
+	EvidencePolicy   string           `toml:"evidence_policy" json:"evidence_policy"`     // discovery_first | research_assisted | reference_allowed | fastest_path
+	AccessPreference string           `toml:"access_preference" json:"access_preference"` // auto | webshell | reverse_shell | bind_shell | none
+	Notes            string           `toml:"notes" json:"notes"`
 }
 
 type LabProfile struct {
-	ID               string `toml:"id" json:"id"`
-	Name             string `toml:"name" json:"name"`
-	WorkspaceDir     string `toml:"workspace_dir" json:"workspace_dir"`
-	Target           string `toml:"target" json:"target"`
-	Hostname         string `toml:"hostname" json:"hostname"`
-	VPNInterface     string `toml:"vpn_interface" json:"vpn_interface"`
-	LatestArtifact   string `toml:"latest_artifact" json:"latest_artifact"`
-	OpsProfile       string `toml:"ops_profile" json:"ops_profile"`
-	EvidencePolicy   string `toml:"evidence_policy" json:"evidence_policy"`
-	AccessPreference string `toml:"access_preference" json:"access_preference"`
-	Notes            string `toml:"notes" json:"notes"`
+	ID               string           `toml:"id" json:"id"`
+	Name             string           `toml:"name" json:"name"`
+	WorkspaceDir     string           `toml:"workspace_dir" json:"workspace_dir"`
+	Target           string           `toml:"target" json:"target"`
+	Hostname         string           `toml:"hostname" json:"hostname"`
+	ScopeTargets     []LabScopeTarget `toml:"scope_targets" json:"scope_targets"`
+	VPNInterface     string           `toml:"vpn_interface" json:"vpn_interface"`
+	LatestArtifact   string           `toml:"latest_artifact" json:"latest_artifact"`
+	OpsProfile       string           `toml:"ops_profile" json:"ops_profile"`
+	EvidencePolicy   string           `toml:"evidence_policy" json:"evidence_policy"`
+	AccessPreference string           `toml:"access_preference" json:"access_preference"`
+	Notes            string           `toml:"notes" json:"notes"`
 }
 
 type EnvironmentConfig struct {
