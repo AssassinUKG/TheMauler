@@ -20,6 +20,9 @@ interface Props {
   workspaceVersion: number
   doctorFocusRequest: number
   workspaceBrowser: ReactNode
+  requestedTab?: InspectorTab
+  requestedTabVersion?: number
+  onClose: () => void
 }
 
 export function RightInspector({
@@ -31,6 +34,9 @@ export function RightInspector({
   workspaceVersion,
   doctorFocusRequest,
   workspaceBrowser,
+  requestedTab,
+  requestedTabVersion = 0,
+  onClose,
 }: Props) {
   const [tab, setTab] = useState<InspectorTab>('workspace')
   const [lab, setLab] = useState<LabStatus | null>(null)
@@ -69,6 +75,10 @@ export function RightInspector({
     if (doctorFocusRequest > 0) setTab('agent')
   }, [doctorFocusRequest])
 
+  useEffect(() => {
+    if (requestedTabVersion > 0 && requestedTab) setTab(requestedTab)
+  }, [requestedTab, requestedTabVersion])
+
   return (
     <aside className="right-inspector">
       <div className="inspector-head">
@@ -76,8 +86,11 @@ export function RightInspector({
           <span className="inspector-kicker">Inspector</span>
           <strong title={lab?.agent_root || rootPath}>{lab?.target || shortPath(rootPath) || 'Workspace'}</strong>
         </div>
-        {streaming && <span className="inspector-state-chip" title={runState?.detail || statusLabel(runState, streaming)}>{statusLabel(runState, streaming)}</span>}
-        <button onClick={() => void load()} title="Refresh inspector">Refresh</button>
+        <div className="inspector-head-actions">
+          {streaming && <span className="inspector-state-chip" title={runState?.detail || statusLabel(runState, streaming)}>{statusLabel(runState, streaming)}</span>}
+          <button onClick={() => void load()} title="Refresh inspector">Refresh</button>
+		  <button className="inspector-close" onClick={onClose} title="Close Inspector (Ctrl+Shift+B)" aria-label="Close Inspector">×</button>
+        </div>
       </div>
 
       <div className="inspector-tabs">

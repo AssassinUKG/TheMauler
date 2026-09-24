@@ -92,6 +92,12 @@ func normaliseSettings(s *Settings) {
 	if s.Tools.ActiveToolset == "" {
 		s.Tools.ActiveToolset = defaults.Tools.ActiveToolset
 	}
+	switch strings.ToLower(strings.TrimSpace(s.Tools.TaskRoutingMode)) {
+	case "selected":
+		s.Tools.TaskRoutingMode = "selected"
+	default:
+		s.Tools.TaskRoutingMode = defaults.Tools.TaskRoutingMode
+	}
 	s.Tools.ShellDistro = strings.TrimSpace(s.Tools.ShellDistro)
 	s.Tools.ShellUser = strings.TrimSpace(s.Tools.ShellUser)
 	if s.Tools.Toolsets == nil {
@@ -114,6 +120,7 @@ func normaliseSettings(s *Settings) {
 	if s.Agents.ModeOverride == "" {
 		s.Agents.ModeOverride = defaults.Agents.ModeOverride
 	}
+	s.Agents.DefaultConversationMode = normaliseConversationModeSetting(s.Agents.DefaultConversationMode, defaults.Agents.DefaultConversationMode)
 	if s.Agents.DefaultAutonomy == "" {
 		s.Agents.DefaultAutonomy = defaults.Agents.DefaultAutonomy
 	}
@@ -137,6 +144,7 @@ func normaliseSettings(s *Settings) {
 			}
 		}
 		migrateOpsPreset(s.Agents.Presets, defaults.Agents.Presets)
+		migratePentestPresetProfiles(s.Agents.Presets, defaults.Agents.Presets)
 		normaliseAgentPresetPermissions(s.Agents.Presets)
 	}
 	normaliseEnvironment(&s.Environment, defaults.Environment)
@@ -155,6 +163,13 @@ func normaliseSettings(s *Settings) {
 		)
 	}
 	s.Context.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(s.Context.WorkspaceDir))
+	s.Context.ScratchWorkspaceDir = filepath.ToSlash(strings.TrimSpace(s.Context.ScratchWorkspaceDir))
+	s.Context.ScratchWorkspaceName = strings.TrimSpace(s.Context.ScratchWorkspaceName)
+	if s.Context.ScratchWorkspaceDir == "" {
+		s.Context.ScratchWorkspaceName = ""
+		s.Context.ScratchWorkspaceCreatedUnix = 0
+		s.Context.ScratchWorkspaceReviewUnix = 0
+	}
 	s.Context.OpenFolders = normaliseWorkspaceFolders(s.Context.OpenFolders, s.Context.WorkspaceDir)
 	s.Context.WorkspacePreferences = normaliseWorkspacePreferences(s.Context.WorkspacePreferences)
 	s.Context.Lab = normaliseLabContext(s.Context.Lab, defaults.Context.Lab)
@@ -200,6 +215,18 @@ func normaliseSettings(s *Settings) {
 	}
 	if s.UI.PrimaryColor == "" {
 		s.UI.PrimaryColor = defaults.UI.PrimaryColor
+	}
+}
+
+func normaliseConversationModeSetting(value, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "adaptive", "direct", "agent":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		if fallback == "" {
+			return "adaptive"
+		}
+		return strings.ToLower(strings.TrimSpace(fallback))
 	}
 }
 
@@ -398,6 +425,25 @@ func migrateOpsPreset(presets, defaults map[string]AgentModePreset) {
 		!current.ToolPermissions["web_search"] &&
 		!current.ToolPermissions["fetch_url"] {
 		presets["Ops"] = next
+	}
+}
+
+// migratePentestPresetProfiles gives legacy security-agent presets the
+// dedicated local profile now shipped for authorised assessment work. An
+// explicit profile always wins; only the old empty "inherit the chat model"
+// value is backfilled.
+func migratePentestPresetProfiles(presets, defaults map[string]AgentModePreset) {
+	if presets == nil || defaults == nil {
+		return
+	}
+	for _, name := range []string{"Ops", "Bug Bounty Hunter"} {
+		current, ok := presets[name]
+		fallback, hasDefault := defaults[name]
+		if !ok || !hasDefault || strings.TrimSpace(current.Profile) != "" {
+			continue
+		}
+		current.Profile = strings.TrimSpace(fallback.Profile)
+		presets[name] = current
 	}
 }
 

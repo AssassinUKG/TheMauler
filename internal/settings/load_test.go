@@ -29,6 +29,9 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	if cfg.Agents.ThinkingMode != "auto" {
 		t.Fatalf("thinking_mode = %q, want auto", cfg.Agents.ThinkingMode)
 	}
+	if cfg.Agents.DefaultConversationMode != "adaptive" {
+		t.Fatalf("default_conversation_mode = %q, want adaptive", cfg.Agents.DefaultConversationMode)
+	}
 	if cfg.Memory.MaxInject == 0 || cfg.Memory.MaxEntryChars == 0 {
 		t.Fatalf("memory numeric defaults were not backfilled: %#v", cfg.Memory)
 	}
@@ -49,6 +52,41 @@ func TestNormaliseSettingsBackfillsNewDefaults(t *testing.T) {
 	}
 	if cfg.Tools.ActiveToolset != "run-lean" || len(cfg.Tools.Toolsets["unrestricted"]) == 0 || len(cfg.Tools.Toolsets["explore"]) == 0 {
 		t.Fatalf("toolset defaults were not backfilled: active=%q toolsets=%#v", cfg.Tools.ActiveToolset, cfg.Tools.Toolsets)
+	}
+	if cfg.Tools.TaskRoutingMode != "auto" {
+		t.Fatalf("task_routing_mode = %q, want auto", cfg.Tools.TaskRoutingMode)
+	}
+}
+
+func TestNormaliseSettingsPreservesConversationModeDefault(t *testing.T) {
+	for _, mode := range []string{"adaptive", "direct", "agent"} {
+		cfg := DefaultSettings()
+		cfg.Agents.DefaultConversationMode = mode
+		normaliseSettings(&cfg)
+		if cfg.Agents.DefaultConversationMode != mode {
+			t.Fatalf("conversation mode %q normalized to %q", mode, cfg.Agents.DefaultConversationMode)
+		}
+	}
+	cfg := DefaultSettings()
+	cfg.Agents.DefaultConversationMode = "unknown"
+	normaliseSettings(&cfg)
+	if cfg.Agents.DefaultConversationMode != "adaptive" {
+		t.Fatalf("invalid conversation mode normalized to %q", cfg.Agents.DefaultConversationMode)
+	}
+}
+
+func TestNormaliseSettingsPreservesSelectedTaskRouting(t *testing.T) {
+	cfg := DefaultSettings()
+	cfg.Tools.TaskRoutingMode = " SELECTED "
+	normaliseSettings(&cfg)
+	if cfg.Tools.TaskRoutingMode != "selected" {
+		t.Fatalf("task_routing_mode = %q, want selected", cfg.Tools.TaskRoutingMode)
+	}
+
+	cfg.Tools.TaskRoutingMode = "unknown"
+	normaliseSettings(&cfg)
+	if cfg.Tools.TaskRoutingMode != "auto" {
+		t.Fatalf("invalid task_routing_mode = %q, want auto", cfg.Tools.TaskRoutingMode)
 	}
 }
 
@@ -129,8 +167,27 @@ func TestNormaliseSettingsMigratesOldBudgetAndOpsDefaults(t *testing.T) {
 		t.Fatalf("old max tool calls was not migrated: %d", cfg.Agents.MaxToolCalls)
 	}
 	ops := cfg.Agents.Presets["Ops"]
-	if ops.Toolset != "ops-lean" || !ops.ToolPermissions["web_search"] || !ops.ToolPermissions["fetch_url"] || ops.ToolPermissions["bash"] {
+	if ops.Profile != "qwen3.8-uncensored-agent-stability" || ops.Toolset != "ops-lean" || !ops.ToolPermissions["web_search"] || !ops.ToolPermissions["fetch_url"] || ops.ToolPermissions["bash"] {
 		t.Fatalf("old Ops preset was not migrated: %#v", ops)
+	}
+}
+
+func TestNormaliseSettingsBackfillsPentestProfilesAndPreservesExplicitChoice(t *testing.T) {
+	cfg := DefaultSettings()
+	ops := cfg.Agents.Presets["Ops"]
+	ops.Profile = ""
+	cfg.Agents.Presets["Ops"] = ops
+	bounty := cfg.Agents.Presets["Bug Bounty Hunter"]
+	bounty.Profile = "my-security-model"
+	cfg.Agents.Presets["Bug Bounty Hunter"] = bounty
+
+	normaliseSettings(&cfg)
+
+	if got := cfg.Agents.Presets["Ops"].Profile; got != "qwen3.8-uncensored-agent-stability" {
+		t.Fatalf("Ops profile = %q, want uncensored local security profile", got)
+	}
+	if got := cfg.Agents.Presets["Bug Bounty Hunter"].Profile; got != "my-security-model" {
+		t.Fatalf("explicit Bug Bounty Hunter profile was overwritten: %q", got)
 	}
 }
 

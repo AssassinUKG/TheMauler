@@ -74,6 +74,14 @@ func DeleteDefaultSession(name, scope string) error {
 	return DeleteSession(path, name, scope)
 }
 
+func RenameDefaultSession(oldName, newName, scope string) error {
+	path, err := DefaultPath()
+	if err != nil {
+		return err
+	}
+	return RenameSession(path, oldName, newName, scope)
+}
+
 func ClearDefault() error {
 	path, err := DefaultPath()
 	if err != nil {
@@ -138,6 +146,62 @@ func (s *Store) StoreSession(name, scope, model string, messages []Message) erro
 			}
 		}
 		return nil
+	})
+}
+
+func RenameSession(dbPath, oldName, newName, scope string) error {
+	db, err := open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return NewStore(db).RenameSession(oldName, newName, scope)
+}
+
+// RenameSession changes a saved conversation's display name and identity while
+// preserving the message row IDs used by the full-text index. A missing source
+// row is not an error because legacy JSON sessions may predate recall indexing.
+func (s *Store) RenameSession(oldName, newName, scope string) error {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || newName == "" {
+		return fmt.Errorf("old and new session names are required")
+	}
+	oldID := sessionID(scope, oldName)
+	newID := sessionID(scope, newName)
+	if oldID == newID {
+		return nil
+	}
+
+	return withTx(s.db, func(tx *sql.Tx) error {
+		var exists int
+		if err := tx.QueryRow(`SELECT COUNT(1) FROM sessions WHERE id = ?`, newID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			return fmt.Errorf("session %q already exists", newName)
+		}
+
+		result, err := tx.Exec(`
+INSERT INTO sessions (id, name, scope, model, updated_at, message_count)
+SELECT ?, ?, scope, model, updated_at, message_count
+FROM sessions
+WHERE id = ?`, newID, newName, oldID)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE messages SET session_id = ? WHERE session_id = ?`, newID, oldID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`DELETE FROM sessions WHERE id = ?`, oldID)
+		return err
 	})
 }
 

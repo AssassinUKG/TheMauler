@@ -2,6 +2,7 @@ package app
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,21 +18,29 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 	defer db.Close()
 
 	run := TaskRun{
-		ID:            "task-1",
-		Prompt:        "do thing",
-		Mode:          "Builder",
-		Profile:       "qwen",
-		Model:         "model",
-		ClaimantID:    "channel:telegram:chat-1:msg-9",
-		ClaimantAlias: "operator",
-		Origin:        "telegram",
-		Status:        "done",
-		State:         "done",
-		StartedAt:     "2026-06-15T10:00:00+01:00",
-		EndedAt:       "2026-06-15T10:01:00+01:00",
-		Summary:       "first",
-		Tools:         []TaskToolEvent{{Name: "shell", Status: "done", Input: "{}", Result: "ok", Timestamp: "2026-06-15T10:00:30+01:00"}},
-		Events:        []TaskRunEvent{{Kind: "state", Message: "testing", Timestamp: "2026-06-15T10:00:20+01:00"}},
+		ID:                "task-1",
+		Generation:        1_800_000_000_001,
+		ConversationEpoch: 7,
+		ParentRunID:       "task-parent",
+		Prompt:            "do thing",
+		Mode:              "Builder",
+		Profile:           "qwen",
+		Model:             "model",
+		ClaimantID:        "channel:telegram:chat-1:msg-9",
+		ClaimantAlias:     "operator",
+		Origin:            "telegram",
+		Status:            "done",
+		State:             "done",
+		StartedAt:         "2026-06-15T10:00:00+01:00",
+		EndedAt:           "2026-06-15T10:01:00+01:00",
+		Summary:           "first",
+		FinalizedArtifacts: []FinalizedArtifact{{
+			Path: "missing-report.md", SHA256: strings.Repeat("a", 64), Size: 12,
+			RunID: "task-1", Generation: 1_800_000_000_001, ConversationEpoch: 7,
+			EvidenceID: "file_sha256:missing-report.md:" + strings.Repeat("a", 64), FinalizedAt: "2026-06-15T10:01:00Z",
+		}},
+		Tools:  []TaskToolEvent{{Name: "shell", Status: "done", Input: "{}", Result: "ok", Timestamp: "2026-06-15T10:00:30+01:00"}},
+		Events: []TaskRunEvent{{Kind: "state", Message: "testing", Timestamp: "2026-06-15T10:00:20+01:00"}},
 	}
 	contract, err := controlplane.NewTaskContract(controlplane.ContractInput{
 		RunID: run.ID, Objective: run.Prompt, WorkspaceRoot: t.TempDir(),
@@ -67,6 +76,18 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 	if runs[0].ClaimantID != run.ClaimantID || runs[0].ClaimantAlias != run.ClaimantAlias || runs[0].Origin != run.Origin {
 		t.Fatalf("claimant provenance did not round-trip: %#v", runs[0])
 	}
+	if runs[0].Generation != run.Generation {
+		t.Fatalf("run generation did not round-trip: got %d want %d", runs[0].Generation, run.Generation)
+	}
+	if runs[0].ConversationEpoch != run.ConversationEpoch {
+		t.Fatalf("conversation epoch did not round-trip: got %d want %d", runs[0].ConversationEpoch, run.ConversationEpoch)
+	}
+	if runs[0].ParentRunID != run.ParentRunID {
+		t.Fatalf("parent run id did not round-trip: got %q want %q", runs[0].ParentRunID, run.ParentRunID)
+	}
+	if len(runs[0].FinalizedArtifacts) != 1 || runs[0].FinalizedArtifacts[0].SHA256 != run.FinalizedArtifacts[0].SHA256 || runs[0].FinalizedArtifacts[0].Fresh || runs[0].FinalizedArtifacts[0].Freshness != "missing" {
+		t.Fatalf("finalized artifacts did not round-trip with derived freshness: %#v", runs[0].FinalizedArtifacts)
+	}
 	if runs[0].Contract == nil || runs[0].Control == nil || runs[0].Contract.Digest != contract.Digest || runs[0].Control.Phase != controlplane.PhaseIntake {
 		t.Fatalf("control plane did not round-trip: %#v", runs[0])
 	}
@@ -77,6 +98,9 @@ func TestStartTaskRunIDsAreUniqueWithinOneSecond(t *testing.T) {
 	second := startTaskRun("two", "Auto", "profile", "model")
 	if first.ID == second.ID {
 		t.Fatalf("sequential task runs reused id %q", first.ID)
+	}
+	if second.Generation <= first.Generation {
+		t.Fatalf("sequential task generations did not advance: first=%d second=%d", first.Generation, second.Generation)
 	}
 }
 

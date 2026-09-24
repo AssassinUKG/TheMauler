@@ -123,6 +123,21 @@ func TestRepairMessagesMergesConsecutiveSystemMessages(t *testing.T) {
 	}
 }
 
+func TestRepairMessagesMergesAssistantTextButPreservesStructuredContent(t *testing.T) {
+	msgs, actions := RepairMessages([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: "text", Text: "first"}, {Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,abc"}}}},
+		llm.NewTextMessage(llm.RoleAssistant, "second"),
+	})
+	if len(msgs) != 2 || !hasRepairAction(actions, "merge_consecutive_assistant") {
+		t.Fatalf("assistant messages were not merged: msgs=%#v actions=%#v", msgs, actions)
+	}
+	blocks, ok := msgs[1].Content.([]llm.ContentBlock)
+	if !ok || len(blocks) != 3 || blocks[1].ImageURL == nil || blocks[1].ImageURL.URL == "" {
+		t.Fatalf("structured assistant content was not preserved: %#v", msgs[1].Content)
+	}
+}
+
 func TestRepairMessagesStripsToolCallsWithoutResults(t *testing.T) {
 	msgs, actions := RepairMessages([]llm.Message{
 		llm.NewTextMessage(llm.RoleUser, "task"),
@@ -207,6 +222,62 @@ func TestRepairMessagesStripsTrailingToolCalls(t *testing.T) {
 	}
 	if !hasRepairAction(actions, "strip_trailing_tool_call") {
 		t.Fatalf("expected strip_trailing_tool_call action, got %#v", actions)
+	}
+}
+
+func TestRepairMessagesCollapsesOnlyExactControllerContinuation(t *testing.T) {
+	prompt := "Your response was cut off by the token limit. Continue from exactly where you left off."
+	msgs, report := RepairMessagesReport([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "real task"),
+		llm.NewTextMessage(llm.RoleAssistant, "partial"),
+		llm.NewTextMessage(llm.RoleUser, prompt),
+		llm.NewTextMessage(llm.RoleUser, prompt),
+	})
+	if !report.Valid || !hasRepairAction(report.Actions, "collapse_stale_continuation") {
+		t.Fatalf("exact continuation was not collapsed: %#v", report)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("repaired message count = %d, want 3: %#v", len(msgs), msgs)
+	}
+}
+
+func TestRepairMessagesDeduplicatesOnlySameIDAndPayload(t *testing.T) {
+	duplicate := testToolCall("call-1", "read")
+	distinctParallel := testToolCall("call-2", "read")
+	msgs, report := RepairMessagesReport([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleAssistant, Content: "reading", ToolCalls: []llm.ToolCallDef{duplicate, duplicate, distinctParallel}},
+		{Role: llm.RoleTool, ToolCallID: "call-1", Name: "read", Content: "one"},
+		{Role: llm.RoleTool, ToolCallID: "call-2", Name: "read", Content: "two"},
+	})
+	if !report.Valid || !hasRepairAction(report.Actions, "deduplicate_exact_tool_call") {
+		t.Fatalf("duplicate tool call was not reported: %#v", report)
+	}
+	if len(msgs) != 4 || len(msgs[1].ToolCalls) != 2 {
+		t.Fatalf("distinct parallel work was not preserved: %#v", msgs)
+	}
+}
+
+func TestRepairMessagesReportsRejectedWithoutUserInstruction(t *testing.T) {
+	_, report := RepairMessagesReport([]llm.Message{
+		llm.NewTextMessage(llm.RoleAssistant, "stale"),
+	})
+	if report.Valid || report.Status != "rejected" || !strings.Contains(report.Diagnostic, "no usable message") {
+		t.Fatalf("missing-user session report = %#v", report)
+	}
+}
+
+func TestRepairMessagesMarksEmptyToolResultWithoutInventingEvidence(t *testing.T) {
+	msgs, report := RepairMessagesReport([]llm.Message{
+		llm.NewTextMessage(llm.RoleUser, "task"),
+		{Role: llm.RoleAssistant, Content: "checking", ToolCalls: []llm.ToolCallDef{testToolCall("call-1", "read")}},
+		{Role: llm.RoleTool, ToolCallID: "call-1", Name: "read", Content: ""},
+	})
+	if !report.Valid || !hasRepairAction(report.Actions, "fill_empty_tool_result") {
+		t.Fatalf("empty tool result was not repaired: %#v", report)
+	}
+	if got := messageContentText(msgs[2]); !strings.Contains(got, "no evidence was produced") {
+		t.Fatalf("empty tool marker overclaimed evidence: %q", got)
 	}
 }
 

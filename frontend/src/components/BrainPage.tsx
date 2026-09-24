@@ -12,6 +12,7 @@ import {
   type MemoryEntry,
   type Skill,
 } from '../wailsjs/go'
+import { BrainRepositoryIndex } from './BrainRepositoryIndex'
 import './BrainPage.css'
 
 type KindFilter = 'all' | 'problems' | 'model' | 'tools' | 'memory' | 'subagents'
@@ -186,6 +187,8 @@ export function BrainPage({ version }: { version: number }) {
           {actionStatus && <span className="brain-action-status">{actionStatus}</span>}
         </div>
       </header>
+
+      <BrainRepositoryIndex version={version} />
 
       <section className="brain-kpis">
         <Metric label="Events" value={events.length.toLocaleString()} />

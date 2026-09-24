@@ -1432,6 +1432,17 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                     ))}
                   </select>
                 </Field>
+                <Field label="New chat mode">
+                  <select
+                    value={settings.agents.default_conversation_mode || 'adaptive'}
+                    onChange={e => updateSettings('agents', { ...settings.agents, default_conversation_mode: e.target.value })}
+                  >
+                    <option value="adaptive">Adaptive — direct questions, agent tasks</option>
+                    <option value="direct">Direct — one text response</option>
+                    <option value="agent">Agent — always use the full workflow</option>
+                  </select>
+                  <span className="field-hint">Applied only when a new conversation starts. Saved conversations retain their own Run mode.</span>
+                </Field>
                 <Field label="Default autonomy">
                   <select
                     value={settings.agents.default_autonomy || 'balanced'}
@@ -1975,6 +1986,16 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                   </select>
                   <span className="field-hint">{enabledToolNames.length} tools active for model prompts after this coarse gate.</span>
                 </Field>
+				<Field label="Per-task tool routing">
+				  <select value={settings.tools.task_routing_mode || 'auto'}
+					onChange={e => updateSettings('tools', { ...settings.tools, task_routing_mode: e.target.value })}>
+					<option value="auto">Automatic (recommended)</option>
+					<option value="selected">Use selected tools</option>
+				  </select>
+				  <span className="field-hint">
+					Automatic keeps model prompts compact and now preserves Write/Edit for explicit create/save requests. Use selected tools to advertise every enabled tool in the active toolset.
+				  </span>
+				</Field>
                 <Field label="Toolset contents">
                   <div className="toolset-summary-card">
                     <div className="toolset-summary-head">

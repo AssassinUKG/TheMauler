@@ -26,26 +26,28 @@ const (
 // User steering creates a new revision with ParentDigest pointing at the prior
 // contract rather than relying on conflicting instructions in chat history.
 type TaskContract struct {
-	Version             int               `json:"version"`
-	Revision            int               `json:"revision"`
-	ParentDigest        string            `json:"parent_digest,omitempty"`
-	RunID               string            `json:"run_id"`
-	Objective           string            `json:"objective"`
-	WorkspaceRoot       string            `json:"workspace_root"`
-	Deliverables        []Deliverable     `json:"deliverables,omitempty"`
-	Constraints         []string          `json:"constraints,omitempty"`
-	ProtectedResources  []string          `json:"protected_resources,omitempty"`
-	AllowedMutations    []PathRule        `json:"allowed_mutations,omitempty"`
-	AcceptanceChecks    []AcceptanceCheck `json:"acceptance_checks,omitempty"`
-	RequiredEvidence    []string          `json:"required_evidence,omitempty"`
-	Risk                RiskLevel         `json:"risk"`
-	InstructionRevision int               `json:"instruction_revision"`
-	PlanRequired        bool              `json:"plan_required"`
-	Budgets             RunBudgets        `json:"budgets"`
-	ApprovalPolicy      string            `json:"approval_policy"`
-	CompletionPolicy    string            `json:"completion_policy"`
-	CreatedAt           string            `json:"created_at"`
-	Digest              string            `json:"digest"`
+	Version             int                `json:"version"`
+	Revision            int                `json:"revision"`
+	ParentDigest        string             `json:"parent_digest,omitempty"`
+	RunID               string             `json:"run_id"`
+	Objective           string             `json:"objective"`
+	WorkspaceRoot       string             `json:"workspace_root"`
+	Deliverables        []Deliverable      `json:"deliverables,omitempty"`
+	Constraints         []string           `json:"constraints,omitempty"`
+	ProtectedResources  []string           `json:"protected_resources,omitempty"`
+	AllowedMutations    []PathRule         `json:"allowed_mutations,omitempty"`
+	ProtectedArtifacts  []ArtifactBoundary `json:"protected_artifacts,omitempty"`
+	RepairScope         []string           `json:"repair_scope,omitempty"`
+	AcceptanceChecks    []AcceptanceCheck  `json:"acceptance_checks,omitempty"`
+	RequiredEvidence    []string           `json:"required_evidence,omitempty"`
+	Risk                RiskLevel          `json:"risk"`
+	InstructionRevision int                `json:"instruction_revision"`
+	PlanRequired        bool               `json:"plan_required"`
+	Budgets             RunBudgets         `json:"budgets"`
+	ApprovalPolicy      string             `json:"approval_policy"`
+	CompletionPolicy    string             `json:"completion_policy"`
+	CreatedAt           string             `json:"created_at"`
+	Digest              string             `json:"digest"`
 }
 
 type Deliverable struct {
@@ -57,6 +59,16 @@ type Deliverable struct {
 type PathRule struct {
 	Root   string `json:"root"`
 	Access string `json:"access"`
+}
+
+// ArtifactBoundary identifies bytes handed off by an earlier verified run.
+// Later runs may inspect them, but mutation requires an explicit Fixer contract
+// whose RepairScope names the exact path.
+type ArtifactBoundary struct {
+	Path        string `json:"path"`
+	SHA256      string `json:"sha256"`
+	SourceRunID string `json:"source_run_id"`
+	Generation  uint64 `json:"generation"`
 }
 
 type AcceptanceCheck struct {
@@ -80,6 +92,8 @@ type ContractInput struct {
 	Constraints         []string
 	ProtectedResources  []string
 	AllowedMutations    []PathRule
+	ProtectedArtifacts  []ArtifactBoundary
+	RepairScope         []string
 	AcceptanceChecks    []AcceptanceCheck
 	RequiredEvidence    []string
 	Risk                RiskLevel
@@ -106,6 +120,8 @@ func NewTaskContract(input ContractInput) (TaskContract, error) {
 		Constraints:         uniqueStrings(input.Constraints),
 		ProtectedResources:  uniqueCleanPaths(input.ProtectedResources),
 		AllowedMutations:    normalizePathRules(input.AllowedMutations),
+		ProtectedArtifacts:  normalizeArtifactBoundaries(input.ProtectedArtifacts),
+		RepairScope:         uniqueCleanPaths(input.RepairScope),
 		AcceptanceChecks:    normalizeAcceptanceChecks(input.AcceptanceChecks),
 		RequiredEvidence:    uniqueStrings(input.RequiredEvidence),
 		Risk:                input.Risk,
@@ -203,6 +219,9 @@ func (c TaskContract) Validate() error {
 	if err := validatePathRules(c.AllowedMutations); err != nil {
 		return err
 	}
+	if err := validateArtifactBoundaries(c.ProtectedArtifacts, c.RepairScope); err != nil {
+		return err
+	}
 	if err := validateAcceptanceChecks(c.AcceptanceChecks); err != nil {
 		return err
 	}
@@ -282,6 +301,26 @@ func normalizePathRules(in []PathRule) []PathRule {
 	return out
 }
 
+func normalizeArtifactBoundaries(in []ArtifactBoundary) []ArtifactBoundary {
+	out := make([]ArtifactBoundary, 0, len(in))
+	seen := map[string]bool{}
+	for _, boundary := range in {
+		boundary.Path = cleanRoot(boundary.Path)
+		boundary.SHA256 = strings.ToLower(strings.TrimSpace(boundary.SHA256))
+		boundary.SourceRunID = strings.TrimSpace(boundary.SourceRunID)
+		key := strings.ToLower(boundary.Path)
+		if boundary.Path == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, boundary)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Path) < strings.ToLower(out[j].Path)
+	})
+	return out
+}
+
 func uniqueCleanPaths(in []string) []string {
 	out := make([]string, 0, len(in))
 	seen := map[string]bool{}
@@ -337,6 +376,34 @@ func validatePathRules(rules []PathRule) error {
 		case "write", "create", "delete":
 		default:
 			return fmt.Errorf("invalid mutation access %q", rule.Access)
+		}
+	}
+	return nil
+}
+
+func validateArtifactBoundaries(boundaries []ArtifactBoundary, repairScope []string) error {
+	protected := make(map[string]bool, len(boundaries))
+	for _, boundary := range boundaries {
+		if boundary.Path == "" || !filepath.IsAbs(boundary.Path) {
+			return errors.New("protected artifact paths must be absolute")
+		}
+		if boundary.SourceRunID == "" || boundary.Generation == 0 {
+			return errors.New("protected artifacts require source run and generation")
+		}
+		if len(boundary.SHA256) != 64 {
+			return errors.New("protected artifact SHA-256 must contain 64 hexadecimal characters")
+		}
+		if _, err := hex.DecodeString(boundary.SHA256); err != nil {
+			return fmt.Errorf("protected artifact SHA-256: %w", err)
+		}
+		protected[strings.ToLower(filepath.Clean(boundary.Path))] = true
+	}
+	for _, path := range repairScope {
+		if path == "" || !filepath.IsAbs(path) {
+			return errors.New("repair scope paths must be absolute")
+		}
+		if !protected[strings.ToLower(filepath.Clean(path))] {
+			return fmt.Errorf("repair scope path %q is not a protected finalized artifact", path)
 		}
 	}
 	return nil

@@ -73,6 +73,45 @@ func TestDeleteSessionRemovesIndexRows(t *testing.T) {
 	}
 }
 
+func TestRenameSessionPreservesIndexedMessages(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	scope := "/workspace/project"
+	if err := StoreSession(dbPath, "old-title", scope, "qwen3.6", []Message{{Role: "user", Content: "rename sentinel"}}); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := RenameSession(dbPath, "old-title", "new-title", scope); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	results, err := Search(dbPath, "rename sentinel", 5)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 || results[0].SessionName != "new-title" || results[0].SessionID != sessionID(scope, "new-title") {
+		t.Fatalf("renamed search result = %#v", results)
+	}
+}
+
+func TestRenameSessionRejectsIndexedNameCollision(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	scope := "/workspace/project"
+	if err := StoreSession(dbPath, "one", scope, "qwen3.6", []Message{{Role: "user", Content: "first sentinel"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := StoreSession(dbPath, "two", scope, "qwen3.6", []Message{{Role: "user", Content: "second sentinel"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenameSession(dbPath, "one", "two", scope); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("rename collision error = %v", err)
+	}
+	results, err := Search(dbPath, "first sentinel", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].SessionName != "one" {
+		t.Fatalf("collision changed source session: %#v", results)
+	}
+}
+
 func TestClearRemovesAllIndexedSessions(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "state.db")
 	if err := StoreSession(dbPath, "one", "/workspace/project", "qwen3.6", []Message{{Role: "user", Content: "alpha sentinel"}}); err != nil {

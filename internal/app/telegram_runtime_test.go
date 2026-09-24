@@ -519,6 +519,23 @@ func TestTelegramRunProgressMessageFormatsLoopGuard(t *testing.T) {
 	}
 }
 
+func TestTelegramRunProgressMessageFormatsRecoveredAnswerAsResult(t *testing.T) {
+	got := formatTelegramRunProgressMessageForTask("recovered", "TLS 1.0 was reported in the supplied scan files.", "Summarise the findings", 8*time.Second)
+	for _, want := range []string{
+		"\u2705 Mauler answer recovered",
+		"**Stage:** Answer delivered",
+		"**Result**\nTLS 1.0 was reported",
+		"**Finished in:** 8s",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recovered message missing %q:\n%s", want, got)
+		}
+	}
+	if !isRemoteRunDeliveryTerminalState("recovered") {
+		t.Fatal("recovered answer must complete remote delivery")
+	}
+}
+
 func TestTelegramRunCompletionSendsWhoamiResult(t *testing.T) {
 	run := TaskRun{
 		Prompt: "whoami",

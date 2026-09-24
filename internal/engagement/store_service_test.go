@@ -85,6 +85,22 @@ func TestServiceHashesWorkspaceEvidenceAndPersistsFinding(t *testing.T) {
 	if len(loaded.State.EvidenceOrder) != 1 || len(loaded.State.FindingOrder) != 1 || loaded.State.Steps[next.Work.Ref.Key()].Revision != claimed.Revision {
 		t.Fatalf("persisted engagement state = %#v", loaded.State)
 	}
+	if freshness := loaded.EvidenceFreshness[evidence.ID]; freshness.State != EvidenceFresh || freshness.CurrentSHA256 != evidence.SHA256 {
+		t.Fatalf("fresh evidence fingerprint = %#v", freshness)
+	}
+	if err := os.WriteFile(artifact, []byte("HTTP/1.1 500 Changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = service.Get(context.Background(), record.State.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freshness := loaded.EvidenceFreshness[evidence.ID]; freshness.State != EvidenceStale || freshness.CurrentSHA256 == evidence.SHA256 {
+		t.Fatalf("changed evidence fingerprint = %#v", freshness)
+	}
+	if _, err := service.ConfirmFinding(context.Background(), record.State.ID, finding.ID, "agent", finding.Revision, "", false, now.Add(3*time.Second)); err == nil || !strings.Contains(err.Error(), "attach fresh evidence") {
+		t.Fatalf("stale evidence confirmation error = %v", err)
+	}
 }
 
 func (r *recordingLedger) Record(event ledger.Event) (ledger.Event, error) {

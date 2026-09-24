@@ -58,9 +58,9 @@ func TestAgentSessionRegistryTracksListenerAndConnection(t *testing.T) {
 func TestRecordToolRoutingStateEmitsOnlyTransitions(t *testing.T) {
 	app := &App{ledger: ledger.New(filepath.Join(t.TempDir(), "ledger.jsonl"))}
 
-	app.recordToolRoutingState("run-1", "use the webshell to check id", "auto", nil, 0, 0, TerminalStateSnapshot{State: "ready"})
-	app.recordToolRoutingState("run-1", "use the webshell to check id", "auto", nil, 0, 0, TerminalStateSnapshot{State: "ready"})
-	app.recordToolRoutingState("run-1", "start a reverse shell listener", "auto", nil, 0, 0, TerminalStateSnapshot{State: "ready"})
+	app.recordToolRoutingState("run-1", "use the webshell to check id", "auto", "auto", nil, 0, 0, TerminalStateSnapshot{State: "ready"})
+	app.recordToolRoutingState("run-1", "use the webshell to check id", "auto", "auto", nil, 0, 0, TerminalStateSnapshot{State: "ready"})
+	app.recordToolRoutingState("run-1", "start a reverse shell listener", "auto", "auto", nil, 0, 0, TerminalStateSnapshot{State: "ready"})
 
 	events, err := app.ledger.List(10)
 	if err != nil {

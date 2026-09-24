@@ -86,6 +86,7 @@ type AgentDefinition struct {
 	Name            string `json:"name"`
 	Description     string `json:"description"`
 	Version         string `json:"version"`
+	DefaultProfile  string `json:"default_profile"`
 	DefaultToolset  string `json:"default_toolset"`
 	DefaultAutonomy string `json:"default_autonomy"`
 	PlanningOnly    bool   `json:"planning_only"`
@@ -120,6 +121,9 @@ func (a *App) ListAgentDefinitions() []AgentDefinition {
 	for i := range definitions {
 		seen[strings.ToLower(definitions[i].Name)] = true
 		if preset, ok := presets[definitions[i].Name]; ok {
+			if preset.Profile != "" {
+				definitions[i].DefaultProfile = preset.Profile
+			}
 			if preset.Toolset != "" {
 				definitions[i].DefaultToolset = preset.Toolset
 			}
@@ -145,6 +149,7 @@ func (a *App) ListAgentDefinitions() []AgentDefinition {
 			Name:            name,
 			Description:     "Configured Mauler agent preset.",
 			Version:         "custom",
+			DefaultProfile:  preset.Profile,
 			DefaultToolset:  preset.Toolset,
 			DefaultAutonomy: preset.Autonomy,
 		})

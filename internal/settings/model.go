@@ -87,6 +87,7 @@ type ToolsConfig struct {
 	ProtectedPaths           []string            `toml:"protected_paths" json:"protected_paths"`                         // never modify/delete through Mauler tools
 	RedactSecrets            bool                `toml:"redact_secrets" json:"redact_secrets"`                           // when true, redact keys/passwords from tool output before the model sees them (off by default; pentest workflows need recovered creds verbatim)
 	ActiveToolset            string              `toml:"active_toolset" json:"active_toolset"`
+	TaskRoutingMode          string              `toml:"task_routing_mode" json:"task_routing_mode"` // auto | selected; selected advertises every enabled tool in the active toolset
 	Toolsets                 map[string][]string `toml:"toolsets" json:"toolsets"`
 	EnabledTools             map[string]bool     `toml:"enabled_tools" json:"enabled_tools"`
 	SafeRules                []ToolSafeRule      `toml:"safe_rules" json:"safe_rules"`
@@ -135,18 +136,19 @@ type ReviewLoopConfig struct {
 
 // AgentsConfig holds auto-agent routing and safety settings.
 type AgentsConfig struct {
-	ModeOverride          string                     `toml:"mode_override" json:"mode_override"` // Auto | Manual | Builder | Fixer | Reviewer | Researcher | Planner | Bug Bounty Hunter
-	DefaultAutonomy       string                     `toml:"default_autonomy" json:"default_autonomy"`
-	OfflineOnly           bool                       `toml:"offline_only" json:"offline_only"`
-	MaxToolCalls          int                        `toml:"max_tool_calls" json:"max_tool_calls"`
-	MaxRunSeconds         int                        `toml:"max_run_seconds" json:"max_run_seconds"` // 0 = unlimited
-	EscalationProfile     string                     `toml:"escalation_profile" json:"escalation_profile"`
-	RequirePlan           bool                       `toml:"require_plan" json:"require_plan"`
-	NoThinkAfterToolCalls int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (2)
-	ReasoningEffort       string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | none | minimal | low | medium | high | xhigh
-	ThinkingMode          string                     `toml:"thinking_mode" json:"thinking_mode"`                         // auto | on | off; chat-level override for supported models
-	ReviewLoop            ReviewLoopConfig           `toml:"review_loop" json:"review_loop"`
-	Presets               map[string]AgentModePreset `toml:"presets" json:"presets"`
+	ModeOverride            string                     `toml:"mode_override" json:"mode_override"`                         // Auto | Manual | Builder | Fixer | Reviewer | Researcher | Planner | Bug Bounty Hunter
+	DefaultConversationMode string                     `toml:"default_conversation_mode" json:"default_conversation_mode"` // adaptive | direct | agent
+	DefaultAutonomy         string                     `toml:"default_autonomy" json:"default_autonomy"`
+	OfflineOnly             bool                       `toml:"offline_only" json:"offline_only"`
+	MaxToolCalls            int                        `toml:"max_tool_calls" json:"max_tool_calls"`
+	MaxRunSeconds           int                        `toml:"max_run_seconds" json:"max_run_seconds"` // 0 = unlimited
+	EscalationProfile       string                     `toml:"escalation_profile" json:"escalation_profile"`
+	RequirePlan             bool                       `toml:"require_plan" json:"require_plan"`
+	NoThinkAfterToolCalls   int                        `toml:"no_think_after_tool_calls" json:"no_think_after_tool_calls"` // 0 = use default (2)
+	ReasoningEffort         string                     `toml:"reasoning_effort" json:"reasoning_effort"`                   // auto | none | minimal | low | medium | high | xhigh
+	ThinkingMode            string                     `toml:"thinking_mode" json:"thinking_mode"`                         // auto | on | off; chat-level override for supported models
+	ReviewLoop              ReviewLoopConfig           `toml:"review_loop" json:"review_loop"`
+	Presets                 map[string]AgentModePreset `toml:"presets" json:"presets"`
 }
 
 type WorkspaceFolder struct {
@@ -161,6 +163,20 @@ type WorkspaceFolder struct {
 type WorkspacePreference struct {
 	Path      string `toml:"path" json:"path"`
 	AgentMode string `toml:"agent_mode" json:"agent_mode"`
+}
+
+// RepositoryIndexSource is an operator-selected, read-only corpus root. It
+// grants indexing authority only; it does not expand workspace or tool scope.
+type RepositoryIndexSource struct {
+	Path string `toml:"path" json:"path"`
+	Kind string `toml:"kind" json:"kind"` // file | folder
+}
+
+// RepositoryIndexSourceSet keeps extra corpus roots scoped to one workspace.
+type RepositoryIndexSourceSet struct {
+	Workspace string                  `toml:"workspace" json:"workspace"`
+	Sources   []RepositoryIndexSource `toml:"sources" json:"sources"`
+	Watch     bool                    `toml:"watch" json:"watch"`
 }
 
 // LabScopeTarget is one operator-owned project scope rule. Value accepts an
@@ -221,19 +237,24 @@ type EnvironmentConfig struct {
 
 // ContextConfig holds context window and compaction settings.
 type ContextConfig struct {
-	AutoInjectFile              bool                  `toml:"auto_inject_file" json:"auto_inject_file"`
-	AutoInjectCursor            bool                  `toml:"auto_inject_cursor" json:"auto_inject_cursor"`
-	CompactionAt                float64               `toml:"compaction_at" json:"compaction_at"` // fraction, default 0.85
-	ShowCompaction              bool                  `toml:"show_compaction" json:"show_compaction"`
-	MAULERMDPath                string                `toml:"mauler_md_path" json:"mauler_md_path"` // explicit single file; empty = layered auto-discover
-	ProjectDocMaxBytes          int                   `toml:"project_doc_max_bytes" json:"project_doc_max_bytes"`
-	ProjectDocFallbackFilenames []string              `toml:"project_doc_fallback_filenames" json:"project_doc_fallback_filenames"`
-	WorkspaceDir                string                `toml:"workspace_dir" json:"workspace_dir"`
-	OpenFolders                 []WorkspaceFolder     `toml:"open_folders" json:"open_folders"`
-	WorkspacePreferences        []WorkspacePreference `toml:"workspace_preferences" json:"workspace_preferences"`
-	Lab                         LabContext            `toml:"lab" json:"lab"`
-	ActiveLabProfile            string                `toml:"active_lab_profile" json:"active_lab_profile"`
-	LabProfiles                 []LabProfile          `toml:"lab_profiles" json:"lab_profiles"`
+	AutoInjectFile              bool                       `toml:"auto_inject_file" json:"auto_inject_file"`
+	AutoInjectCursor            bool                       `toml:"auto_inject_cursor" json:"auto_inject_cursor"`
+	CompactionAt                float64                    `toml:"compaction_at" json:"compaction_at"` // fraction, default 0.85
+	ShowCompaction              bool                       `toml:"show_compaction" json:"show_compaction"`
+	MAULERMDPath                string                     `toml:"mauler_md_path" json:"mauler_md_path"` // explicit single file; empty = layered auto-discover
+	ProjectDocMaxBytes          int                        `toml:"project_doc_max_bytes" json:"project_doc_max_bytes"`
+	ProjectDocFallbackFilenames []string                   `toml:"project_doc_fallback_filenames" json:"project_doc_fallback_filenames"`
+	WorkspaceDir                string                     `toml:"workspace_dir" json:"workspace_dir"`
+	OpenFolders                 []WorkspaceFolder          `toml:"open_folders" json:"open_folders"`
+	WorkspacePreferences        []WorkspacePreference      `toml:"workspace_preferences" json:"workspace_preferences"`
+	RepositoryIndexSourceSets   []RepositoryIndexSourceSet `toml:"repository_index_source_sets" json:"repository_index_source_sets"`
+	ScratchWorkspaceDir         string                     `toml:"scratch_workspace_dir" json:"scratch_workspace_dir"`
+	ScratchWorkspaceName        string                     `toml:"scratch_workspace_name" json:"scratch_workspace_name"`
+	ScratchWorkspaceCreatedUnix int64                      `toml:"scratch_workspace_created_unix" json:"scratch_workspace_created_unix"`
+	ScratchWorkspaceReviewUnix  int64                      `toml:"scratch_workspace_review_unix" json:"scratch_workspace_review_unix"`
+	Lab                         LabContext                 `toml:"lab" json:"lab"`
+	ActiveLabProfile            string                     `toml:"active_lab_profile" json:"active_lab_profile"`
+	LabProfiles                 []LabProfile               `toml:"lab_profiles" json:"lab_profiles"`
 }
 
 // MemoryConfig holds durable project-memory settings.

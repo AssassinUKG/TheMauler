@@ -268,10 +268,21 @@ func TestCircuitBreakerResetsAfterNovelOutcomeEvenWhenHistoricalRepeatRemains(t 
 
 func TestCircuitBreakerPromptIsActionable(t *testing.T) {
 	prompt := loopCircuitBreakerPrompt(LoopMetrics{StabilityScore: 0, RepeatedToolInputs: 3, ToolErrors: 1})
-	for _, want := range []string{"Loop-health is critical", "Stop repeating", "DIFFERENT action", "web_search/fetch_url", "methodology, not current evidence", "confirmed target IP", "Do not rerun"} {
+	for _, want := range []string{"Loop-health is critical", "Stop repeating", "evidence already gathered is sufficient", "call no more tools", "answer the original request directly", "DIFFERENT action", "web_search/fetch_url", "methodology, not current evidence", "confirmed target IP", "Do not rerun"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestRepeatedToolSkipCountIncludesCachedResults(t *testing.T) {
+	tools := []TaskToolEvent{
+		{Name: "read", Status: "done", Result: "fresh evidence"},
+		{Name: "read", Status: "cached", Result: "cached evidence"},
+		{Name: "read", Status: "done", Result: "[cached_tool_result] use prior evidence"},
+	}
+	if got := repeatedToolSkipCount(tools); got != 2 {
+		t.Fatalf("cached result count = %d, want 2", got)
 	}
 }
 

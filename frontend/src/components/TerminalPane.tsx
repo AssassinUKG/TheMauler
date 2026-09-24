@@ -8,6 +8,8 @@ import './TerminalPane.css'
 
 interface Props {
   visible: boolean
+  aiCommandsOpen: boolean
+  onAICommandsOpenChange: (open: boolean) => void
 }
 
 interface TerminalTab {
@@ -54,35 +56,71 @@ const TERM_THEME = {
   brightWhite: '#ffffff',
 }
 
-const AI_COMMANDS_DEFAULT_WIDTH = 520
+const AI_COMMANDS_DEFAULT_WIDTH = 420
 const AI_COMMANDS_DEFAULT_HEIGHT = 120
-const AI_COMMANDS_MIN_WIDTH = 340
-const AI_COMMANDS_MIN_HEIGHT = 64
-const TERMINAL_MIN_WIDTH = 320
-const TERMINAL_MIN_HEIGHT = 80
+const AI_COMMANDS_MIN_WIDTH = 300
+const AI_COMMANDS_MIN_HEIGHT = 88
+const TERMINAL_MIN_WIDTH = 480
+const TERMINAL_MIN_HEIGHT = 130
 const AI_COMMANDS_SPLITTER_SIZE = 10
 const TERMINAL_FONT_DEFAULT = 14
 const TERMINAL_FONT_MIN = 12
 const TERMINAL_FONT_MAX = 20
 
-export function TerminalPane({ visible }: Props) {
+export function TerminalPane({ visible, aiCommandsOpen, onAICommandsOpenChange }: Props) {
 	const [tabs, setTabs] = useState<TerminalTab[]>(() => [newTab(1)])
 	const [activeId, setActiveId] = useState(tabs[0].localId)
 	const [aiCommands, setAICommands] = useState<AICommandEvent[]>([])
-	const [showAICommands, setShowAICommands] = useState(() => loadAICommandsVisible())
 	const [aiCommandsWidth, setAICommandsWidth] = useState(() => loadAICommandsWidth())
 	const [aiCommandsHeight, setAICommandsHeight] = useState(() => loadAICommandsHeight())
 	const seq = useRef(1)
 	const stackRef = useRef<HTMLDivElement>(null)
-	const aiCommandsExpanded = showAICommands
+	const aiCommandsExpanded = aiCommandsOpen
+
+	useEffect(() => {
+		const revision = 'terminal-split-v2'
+		if (localStorage.getItem('mauler.terminalSplitRevision') === revision) return
+		setAICommandsWidth(AI_COMMANDS_DEFAULT_WIDTH)
+		setAICommandsHeight(AI_COMMANDS_DEFAULT_HEIGHT)
+		localStorage.setItem('mauler.aiCommandsWidth', String(AI_COMMANDS_DEFAULT_WIDTH))
+		localStorage.setItem('mauler.aiCommandsHeight', String(AI_COMMANDS_DEFAULT_HEIGHT))
+		localStorage.setItem('mauler.terminalSplitRevision', revision)
+	}, [])
+
+	useEffect(() => {
+		const stack = stackRef.current
+		if (!stack || !visible || !aiCommandsExpanded) return
+		const clampSplit = () => {
+			const rect = stack.getBoundingClientRect()
+			if (rect.width <= 0 || rect.height <= 0) return
+			const vertical = getComputedStyle(stack).flexDirection === 'column'
+			if (vertical) {
+				const max = Math.max(AI_COMMANDS_MIN_HEIGHT, Math.floor(rect.height - TERMINAL_MIN_HEIGHT - AI_COMMANDS_SPLITTER_SIZE))
+				setAICommandsHeight(current => {
+					const next = Math.min(max, Math.max(AI_COMMANDS_MIN_HEIGHT, current))
+					if (next !== current) localStorage.setItem('mauler.aiCommandsHeight', String(next))
+					return next
+				})
+				return
+			}
+			const max = Math.max(AI_COMMANDS_MIN_WIDTH, Math.floor(rect.width - TERMINAL_MIN_WIDTH - AI_COMMANDS_SPLITTER_SIZE))
+			setAICommandsWidth(current => {
+				const next = Math.min(max, Math.max(AI_COMMANDS_MIN_WIDTH, current))
+				if (next !== current) localStorage.setItem('mauler.aiCommandsWidth', String(next))
+				return next
+			})
+		}
+		clampSplit()
+		const observer = new ResizeObserver(clampSplit)
+		observer.observe(stack)
+		return () => observer.disconnect()
+	}, [aiCommandsExpanded, visible])
 
 	const setAICommandsVisible = useCallback((visible: boolean | ((value: boolean) => boolean)) => {
-		setShowAICommands(prev => {
-			const next = typeof visible === 'function' ? visible(prev) : visible
-			localStorage.setItem('mauler.aiCommandsVisible', next ? '1' : '0')
-			return next
-		})
-	}, [])
+		const next = typeof visible === 'function' ? visible(aiCommandsOpen) : visible
+		localStorage.setItem('mauler.aiCommandsVisible', next ? '1' : '0')
+		onAICommandsOpenChange(next)
+	}, [aiCommandsOpen, onAICommandsOpenChange])
 
   const addTab = useCallback(() => {
     seq.current += 1
@@ -123,7 +161,6 @@ export function TerminalPane({ visible }: Props) {
         status: 'running',
         startedAt: new Date().toISOString(),
       }
-			setAICommandsVisible(true)
       setAICommands(prev => [
         event,
         ...prev.filter(item => item.id !== id),
@@ -132,7 +169,6 @@ export function TerminalPane({ visible }: Props) {
     const offDone = EventsOn('mauler:terminal_command_done', (...args: unknown[]) => {
       const msg = args[0] as { id?: string; session?: string; exit_code?: string; duration_ms?: string; tool?: string; result?: string }
       const id = msg.id || `cmd-${Date.now()}`
-			setAICommandsVisible(true)
       setAICommands(prev => {
         const existing = prev.find(item => item.id === id)
         const exitCode = msg.exit_code || ''
@@ -170,7 +206,6 @@ export function TerminalPane({ visible }: Props) {
         status: 'running',
         startedAt: new Date().toISOString(),
       }
-			setAICommandsVisible(true)
       setAICommands(prev => [event, ...prev.filter(item => item.id !== id)].slice(0, 80))
     })
     const offToolResult = EventsOn('mauler:tool_result', (...args: unknown[]) => {
@@ -178,7 +213,6 @@ export function TerminalPane({ visible }: Props) {
       if (!isCommandLikeTool(msg.name)) return
       if (isTerminalTool(msg.name)) return
       const id = msg.id || `tool-${Date.now()}`
-			setAICommandsVisible(true)
       setAICommands(prev => {
         const existing = prev.find(item => item.id === id)
         const exitCode = exitCodeFromToolResult(msg.result || '')
@@ -320,6 +354,9 @@ function TerminalSession({
   const visibleRef = useRef(visible)
   const fitRafRef = useRef<number | null>(null)
   const lastFitRef = useRef({ cols: 0, rows: 0 })
+  const lastShellResizeRef = useRef({ cols: 0, rows: 0 })
+  const pendingShellResizeRef = useRef({ cols: 0, rows: 0 })
+  const shellResizeTimerRef = useRef<number | null>(null)
 
   useEffect(() => { sessionRef.current = tab.sessionId }, [tab.sessionId])
   useEffect(() => { visibleRef.current = visible }, [visible])
@@ -388,6 +425,19 @@ function TerminalSession({
     }
   }, [])
 
+  const queueShellResize = useCallback((cols: number, rows: number) => {
+    pendingShellResizeRef.current = { cols, rows }
+    if (shellResizeTimerRef.current != null) window.clearTimeout(shellResizeTimerRef.current)
+    shellResizeTimerRef.current = window.setTimeout(() => {
+      shellResizeTimerRef.current = null
+      const next = pendingShellResizeRef.current
+      if (next.cols === lastShellResizeRef.current.cols && next.rows === lastShellResizeRef.current.rows) return
+      lastShellResizeRef.current = next
+      const id = sessionRef.current
+      if (id) void ShellResize(id, next.cols, next.rows).catch(() => null)
+    }, 180)
+  }, [])
+
   const fitAndResize = useCallback(() => {
     const term = termRef.current
     const fit = fitRef.current
@@ -400,9 +450,9 @@ function TerminalSession({
     if (dims.cols === lastFitRef.current.cols && dims.rows === lastFitRef.current.rows) return
     try { fit.fit() } catch { return }
     lastFitRef.current = { cols: term.cols, rows: term.rows }
-    const id = sessionRef.current
-    if (id) void ShellResize(id, term.cols, term.rows).catch(() => null)
-  }, [])
+    term.refresh(0, Math.max(0, term.rows - 1))
+    queueShellResize(term.cols, term.rows)
+  }, [queueShellResize])
 
   const scheduleFit = useCallback(() => {
     if (fitRafRef.current != null) return
@@ -435,6 +485,10 @@ function TerminalSession({
       if (fitRafRef.current != null) cancelAnimationFrame(fitRafRef.current)
     }
   }, [scheduleFit])
+
+  useEffect(() => () => {
+    if (shellResizeTimerRef.current != null) window.clearTimeout(shellResizeTimerRef.current)
+  }, [])
 
   useEffect(() => {
     if (!visible) return
@@ -901,12 +955,6 @@ function loadAICommandsHeight() {
 	const raw = Number(localStorage.getItem('mauler.aiCommandsHeight') || '')
 	if (Number.isFinite(raw) && raw >= AI_COMMANDS_MIN_HEIGHT && raw <= 600) return raw
 	return AI_COMMANDS_DEFAULT_HEIGHT
-}
-
-function loadAICommandsVisible() {
-	const raw = localStorage.getItem('mauler.aiCommandsVisible')
-	if (raw === '0') return false
-	return true
 }
 
 function loadTerminalFontSize() {

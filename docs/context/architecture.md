@@ -29,6 +29,13 @@ tool-risk metadata. Go validates and persists those decisions.
 - `internal/ledger`: append-only UTF-8 JSONL event spine. New Brain/Ops/audit work should extend this
   spine instead of creating another partial logger.
 - `internal/store`: SQLite schema, checkpoints, FTS, and structured persistence.
+- `internal/repoindex`: code-owned repository roots/policy, streaming decode/chunk/hash manifests,
+  immutable SQLite FTS5 generations, activation, incremental refresh, and bounded search.
+  Incremental refresh copies chunks only after the current file SHA-256 matches the prior manifest;
+  changed files are re-extracted inside the replacement transaction. Repository text is always
+  untrusted; active pointers move only after a complete transaction commits. The app-owned watcher
+  polls metadata cheaply, then invokes that same hash-verifying replacement path when it detects a
+  candidate change.
 - `internal/settings`: defaults, migrations, TOML/JSON contracts, profiles/providers, and secret
   storage. Providers and profiles remain separate concepts.
 - `internal/engagement` and `internal/packlibrary`: authorised engagement objects, scope, evidence,
@@ -46,6 +53,13 @@ tool-risk metadata. Go validates and persists those decisions.
 5. Tool calls pass policy, confirmation, scope, promptware, secret, and postcondition handling.
 6. Observations and evidence are persisted; verification may repair, block, or permit completion.
 7. RunLedger and task logs describe the run; terminal control-plane state authorizes completion.
+
+Verified mutation handoffs also become inputs to the next task contract. Their normalized path and
+captured SHA-256 form an immutable boundary for ordinary continuations. Only an explicit Fixer task
+that names an exact protected path receives repair scope, and file tools plus shell, terminal and
+Python-orchestration paths pass the same guard before a new verifier-owned handoff is possible.
+Conversation epochs sit at the backend event boundary; retired emissions increment payload-free
+diagnostic telemetry instead of reaching the transcript.
 
 Keep these state types distinct:
 
@@ -102,3 +116,23 @@ budget, thinking mode, and sampling parameters. The client is constructed with a
 Go emits `mauler:*` events and Wails bindings. React listens with unknown argument arrays and validates
 shape locally. Do not bypass this boundary with hidden parallel state channels when an existing event
 spine or binding can be extended.
+
+Run-owned events preserve their established positional payload and append an owner containing
+`run_id`, a JavaScript-safe monotonic `generation`, a backend `conversation_epoch`, and the channel
+`origin`. React accepts compatibility events without an owner, but current production events are
+applied only when that owner matches the active run. Clearing, loading or switching the visible
+conversation advances the backend epoch and retires its frontend owner, so late deltas, errors,
+confirmations or terminal events cannot mutate the replacement view.
+Desktop Chat accepts desktop-origin owners only; channel work retains its separate delivery lane.
+
+## Session repair and resume
+
+`internal/agent` owns deterministic conversation normalization. Immediately before model transport
+it validates roles, removes invalid leading turns, safely merges same-role content, reconciles tool
+pairs, marks empty content without inventing evidence, removes unresolved calls, collapses exact
+stale controller continuations, and deduplicates only exact same-ID tool calls. Changes are reported
+as typed phase/actions and mirrored to RunLedger; unusable packets are rejected before transport.
+
+Saved-session inspection uses the same pipeline without mutation. Explicit repair retains a `.bak`
+and refreshes recall; ordinary Load repairs only its in-memory view. A checkpoint resume receives a
+new run ID/generation and persists the interrupted run as `parent_run_id`.

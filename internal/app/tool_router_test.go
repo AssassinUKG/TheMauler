@@ -1,12 +1,49 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"mauler/internal/llm"
 	"mauler/internal/settings"
 	"mauler/internal/tools"
 )
+
+func TestInteractiveAccountWorkflowsRouteToNativeBrowser(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	for _, prompt := range []string{
+		"Create an account on the supplied site and pause if a CAPTCHA appears",
+		"Log in to https://example.test and complete the MFA handoff",
+		"Fill in the registration form and wait for email verification",
+	} {
+		selected := selectToolsForTurn(cfg, prompt, 0, 0)
+		if !selected["browser"] {
+			t.Fatalf("interactive workflow did not route browser for %q: %#v", prompt, selected)
+		}
+		for _, notWant := range []string{"write", "edit", "terminal_send", "start_listener"} {
+			if selected[notWant] {
+				t.Fatalf("browser-only workflow routed %s for %q: %#v", notWant, prompt, selected)
+			}
+		}
+	}
+}
+
+func TestBrowserCapabilityBlockerIsHonestWhenToolsetDisablesBrowser(t *testing.T) {
+	app := New()
+	app.suppressEvents = true
+	prompt := app.buildExecutionStatePrompt(
+		"sign up for the supplied site",
+		"none",
+		[]llm.ToolDef{{Type: "function", Function: llm.ToolFunctionDef{Name: "read"}}},
+		TerminalStateSnapshot{},
+	)
+	for _, want := range []string{"browser blocker", "Browser in Inspector > Agent > Tools", "Do not pretend"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("browser blocker prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
 
 func TestOpsToolRouterKeepsFirstTurnLeanEvenWhenUnrestricted(t *testing.T) {
 	cfg := settings.DefaultSettings().Tools
@@ -113,6 +150,62 @@ func TestPublicCVELookupRoutesWebToolsInsteadOfMasterSkill(t *testing.T) {
 	}
 	if !toolCallAdvertised(defs, "web_search") || !toolCallAdvertised(defs, "fetch_url") || toolCallAdvertised(defs, "skill") {
 		t.Fatalf("bad public lookup definitions: %s", toolProtocolToolNames(defs))
+	}
+}
+
+func TestPublicArtifactLookupAndPlacementKeepsWriteTools(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	prompt := "Can you go online and get me the PoC for CVE-2025-29927? Leave it in the directory."
+
+	selected := selectToolsForTurn(cfg, prompt, 0, 0)
+	for _, want := range []string{"web_search", "fetch_url", "read", "write", "edit"} {
+		if !selected[want] {
+			t.Fatalf("public artifact placement route missing %s: %#v", want, selected)
+		}
+	}
+	if selected["skill"] {
+		t.Fatalf("public CVE/PoC lookup should not restore the broad master skill: %#v", selected)
+	}
+
+	registry := tools.New()
+	defs, _ := toolDefsAndChoiceForTurnWithState(registry, cfg, prompt, 0, 0, TerminalStateSnapshot{State: "ready"})
+	for _, want := range []string{"web_search", "fetch_url", "write", "edit"} {
+		if !toolCallAdvertised(defs, want) {
+			t.Fatalf("public artifact placement definitions missing %s: %s", want, toolProtocolToolNames(defs))
+		}
+	}
+}
+
+func TestFollowUpWritePoCAdvertisesWorkspaceTools(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	prompt := "Try to write the PoC now in the directory; you should be able to now."
+
+	registry := tools.New()
+	defs, _ := toolDefsAndChoiceForTurnWithState(registry, cfg, prompt, 0, 0, TerminalStateSnapshot{State: "ready"})
+	for _, want := range []string{"write", "edit", "web_search", "fetch_url"} {
+		if !toolCallAdvertised(defs, want) {
+			t.Fatalf("follow-up artifact route missing %s: %s", want, toolProtocolToolNames(defs))
+		}
+	}
+}
+
+func TestSelectedTaskRoutingAdvertisesEnabledActiveToolset(t *testing.T) {
+	cfg := settings.DefaultSettings().Tools
+	cfg.ActiveToolset = "unrestricted"
+	cfg.TaskRoutingMode = "selected"
+	cfg.EnabledTools["browser"] = false
+
+	registry := tools.New()
+	defs, _ := toolDefsAndChoiceForTurnWithState(registry, cfg, "summarise these notes", 0, 0, TerminalStateSnapshot{})
+	for _, want := range []string{"read", "write", "edit", "shell", "web_search", "fetch_url"} {
+		if !toolCallAdvertised(defs, want) {
+			t.Fatalf("selected routing definitions missing %s: %s", want, toolProtocolToolNames(defs))
+		}
+	}
+	if toolCallAdvertised(defs, "browser") {
+		t.Fatalf("selected routing bypassed a per-tool disable: %s", toolProtocolToolNames(defs))
 	}
 }
 

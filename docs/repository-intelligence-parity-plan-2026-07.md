@@ -1,11 +1,64 @@
 # Mauler Native Files & Knowledge Intelligence Plan
 
-Status: approved direction; implementation not started  
+Status: M0 and the first M1/M2/M3/M4 production slices implemented; OCR/7z, optional embeddings, and live hardening remain
 Date: 2026-07-15  
 Scope: TheMauler only; native Go backend and existing React/TypeScript desktop UI  
 Related: `docs/brain-memory-ledger-tracker.md`,
 `docs/mauler-agent-control-plane-improvement-plan-2026-07.md`,
 `docs/agentic-reliability-issues-2026-07.md`
+
+## Implementation checkpoint — 2026-09-15
+
+- `internal/repoindex` now streams supported text/code/config files, decodes UTF-8/UTF-16, hashes
+  files and bounded chunks, assigns stable line references, labels content untrusted, and produces a
+  deterministic manifest with explicit excluded/binary/unsupported/size/budget/decode/read/symlink
+  outcomes. The M0 fixture and manifest benchmark are present.
+- SQLite schema v17 stores immutable transactional generations and FTS5 chunks. Only a complete
+  committed generation becomes active; a cancelled/failed replacement cannot displace it. Search
+  joins only files whose final manifest status is `indexed`.
+- The compact `memory` tool exposes code-owned `index_workspace`, `index_status`, and
+  `search_workspace`. Search returns bounded excerpts with generation, manifest, file and chunk
+  evidence hashes; RunLedger receives metadata/provenance, never copied source bodies.
+- Chat has a first-class **Files** scan card for the authoritative current workspace. It can
+  index/rebuild, reports exact indexed/seen/chunk/byte totals and immutable generation provenance,
+  and exposes the explicit non-indexed notice list.
+- M4's first rich-format slice indexes readable PDFs and DOCX/PPTX/XLSX/ODS XML text through the
+  existing immutable chunks, while ZIP files contribute bounded inventory metadata without member
+  expansion. Extractor time, expanded bytes and archive entry counts are code-owned limits;
+  encrypted, corrupt, scanned/no-text and over-expanded inputs receive explicit non-coverage verdicts.
+- The 2026-09-24 M4 follow-up adds bounded TAR/TGZ inventory, SQLite schema-only metadata, and PE/ELF
+  structural metadata. Archive bodies and SQLite row values remain unread by these extractors;
+  corrupt and over-limit fixtures prove they cannot create false coverage.
+- Selected extra file/folder sources landed 2026-09-20: native pickers add explicit read-only roots,
+  persist them per workspace, display/remove them in Chat, and bind them into the policy digest.
+  A source change cannot reuse stale active-generation evidence.
+- Incremental refresh/watch landed 2026-09-21. Metadata polling detects candidate changes, while
+  replacement generations stream SHA-256 before reusing any prior file chunks. Changed/new files
+  are extracted normally, deletions are tracked, and only the complete transaction moves the active
+  pointer. Chat exposes manual refresh, persisted per-workspace Watch, health/last-check state, and
+  exact reused/changed/deleted counts. Still open: general-purpose `read_index_chunk`, index-chunk
+  drill-down/search in Memory/Brain, OCR/7z extractors, optional embeddings, and live pass^k.
+- Brain index health/actions landed 2026-09-23. `RepositoryIndexStatus` owns one code-defined health
+  verdict and explanation; Brain renders the active generation's coverage, policy/manifest
+  provenance, Watch state, progress, incremental reuse and explicit omissions, and invokes the same
+  refresh/watch/rebuild/cancel bindings as Chat. Still open: general-purpose `read_index_chunk`,
+  remaining extractors, optional embeddings, and live pass^k.
+- The deterministic M3 foundation landed 2026-09-23. `internal/repoindex` now derives stable,
+  size-balanced read-only shards from one complete immutable generation; seals each shard to the
+  manifest, exact file/chunk hashes and line ranges; and provides a controller-owned merge gate that
+  rejects narrative-only, stale-hash, out-of-shard, and out-of-range findings. Exact duplicate
+  claim/evidence pairs are merged, contradictory claims over the same evidence remain explicit
+  conflicts, and evidence validity is not mislabeled as independent proof of a claim. Brain can
+  preview shard balance/digests without receiving repository bodies or exact chunk IDs. On 2026-09-24
+  the sealed contracts were connected to a purpose-built bounded reviewer: it has an empty ambient
+  registry plus one shard-only evidence tool, runs conservatively one shard at a time, and feeds one
+  parent Brain progress/cancel/retry/merge card. Schema v18 now stores each parent contract, shard
+  attempt, submission, and merge decision; startup recovery labels abandoned work interrupted and
+  Resume revalidates the immutable generation and plan before running only unfinished shards. The
+  independent conflict stage landed 2026-09-24: code derives stable dispute contracts from exact
+  merged evidence, runs each in a fresh bounded context with only those immutable chunks, validates
+  strict adjudication verdicts against code-owned claim IDs, persists/replays the results, and shows
+  them in Brain without upgrading model agreement into proof. A supervised live-model case remains.
 
 ## Executive decision
 
@@ -203,14 +256,22 @@ they are never quietly treated as covered.
 
 ### M3 - Split review and evidence merge
 
-- Add deterministic manifest sharding over existing bounded tasks.
-- Show child progress inside one parent Chat card with pause/cancel/retry-shard controls.
+- Deterministic manifest sharding and evidence-owned merge validation landed 2026-09-23. Bounded
+  sealed execution plus one parent Brain progress/cancel/retry-shard card landed 2026-09-24. Durable
+  schema-v18 checkpoints, safe unfinished-shard resume, and sealed independent conflict adjudication
+  followed the same day. A compact Chat
+  projection can reuse the same parent state without exposing child chatter.
 - Merge/deduplicate findings and require chunk/file-hash evidence before calling a claim verified.
 - Keep mutation disabled until the user explicitly begins a repair revision.
 
 ### M4 - Rich extractors and optional embeddings
 
-- Land document/archive/binary metadata extractors behind fixtures and expansion/time limits.
+- First production slice landed 2026-09-20: readable PDF and OpenXML/ODS text plus safe ZIP
+  inventory extraction, all behind deterministic fixtures and expansion/time/entry limits.
+- Second production slice landed 2026-09-24: TAR/TGZ inventory, SQLite schema-only metadata, and
+  PE/ELF structural metadata use the same bounded untrusted chunks. Archive bodies and database row
+  values are excluded; row sampling remains deferred until an explicit privacy/redaction policy.
+- Continue with scanned-PDF OCR and bounded 7z support.
 - Add InferenceBridge embeddings, hybrid ranking, MMR, and embedding cache invalidation.
 - Keyword-only mode remains fully supported and tested.
 
@@ -239,9 +300,30 @@ they are never quietly treated as covered.
 3. Expose `index_workspace`, `index_status`, and `search_workspace` through the existing `memory`
    tool and RunLedger.
 4. Add the single Chat scan card and operator-visible omission/error list.
-5. Add deterministic read-only split review and evidence merge.
+5. Add deterministic read-only split review and evidence merge. (Foundation landed 2026-09-23;
+   bounded execution, durable restart/resume, and independent conflict checks landed 2026-09-24.)
 6. Add rich formats, then optional InferenceBridge embeddings.
 
 Do not begin with prompt rewrites or parallel free-form agents. The first useful increment is a
 deterministic, inspectable repository manifest and FTS index that can prove what it did and did not
 read.
+
+## 2026-09-15 implementation checkpoint
+
+- M0/M1 text-code indexing and immutable FTS5 activation are live.
+- The compact memory index/status/search actions and Chat Files card are live.
+- Replacement scans now expose metadata-only file/chunk progress outside SQLite, can be cancelled
+  from Chat, preserve the previous complete generation, block workspace switches while owned, and
+  settle before shutdown closes the database.
+- Doctor and Services now report not-indexed, active-scan, unavailable, and complete-index health.
+- Incremental changed-file refresh/watch mode landed 2026-09-21 with SHA-verified reuse, immutable
+  replacement activation, persisted workspace watch state, operator controls, and a live watcher
+  integration test. First-class Brain health/actions landed 2026-09-23 over the same authoritative
+  status and mutation bindings. The deterministic split-review planner, metadata-only Brain preview,
+  and strict evidence-owned merge gate landed 2026-09-23. The 2026-09-24 follow-up connects those sealed
+  contracts to bounded child tasks and one parent progress/cancel/retry/merge card. Schema-v18
+  checkpoint/replay, unfinished-shard resume, and exact-evidence independent conflict checks followed
+  the same day. The 2026-09-20 M4 first slice adds bounded
+  readable-PDF/OpenXML/ODS text and ZIP inventory extraction without making embeddings or archive
+  expansion a requirement. The 2026-09-24 follow-up adds TAR/TGZ inventory, SQLite schema-only
+  metadata, and PE/ELF structural metadata without indexing archive bodies or database rows.

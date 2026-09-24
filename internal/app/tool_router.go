@@ -7,6 +7,13 @@ import (
 )
 
 func selectToolsForTurn(cfg settings.ToolsConfig, firstUserText string, autoContinues int, totalToolCallsMade int) map[string]bool {
+	if usesSelectedToolRouting(cfg) {
+		// The user explicitly asked Mauler to advertise the capabilities selected
+		// in Inspector > Tools. EffectiveEnabledTools still applies the active
+		// toolset and per-tool switches, so this bypasses only semantic narrowing,
+		// never capability or policy gates.
+		return settings.EffectiveEnabledTools(cfg)
+	}
 	if autoContinues > 0 {
 		return broadenToolSelection(routeToolsForTask(cfg, firstUserText), cfg, firstUserText, totalToolCallsMade)
 	}
@@ -76,6 +83,13 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 	}
 
 	switch {
+	case explicitBrowserIntent(lower):
+		addBrowserTools(selected)
+		// Keep public navigation fallback available, but do not route account or
+		// form workflows into a file-only/code worker.
+		if hasAny(lower, "find the site", "look up the site", "search for the site") {
+			addResearchTools(selected)
+		}
 	case looksReportOrDocsTask(lower):
 		addOpsToolsForPhase(selected, "report")
 		if explicitWebResearchIntent(lower) {
@@ -109,6 +123,16 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 	}
 	if looksEngagementGridTask(lower) {
 		selected["engagement"] = true
+	}
+	browserOnlyMutation := explicitBrowserIntent(lower) &&
+		!promptAlsoRequestsWorkspaceMutation(lower) &&
+		!promptRequestsArtifactMutation(lower)
+	if promptExplicitlyRequestsMutation(lower) && !browserOnlyMutation {
+		// Research and operational routing happen before workspace-mutation
+		// classification. Preserve write/edit whenever the user also requests a
+		// concrete artifact (for example, "get the PoC and leave it in the
+		// directory") instead of silently reducing the turn to read-only research.
+		addWriteTools(selected)
 	}
 
 	if len(selected) < 6 {
@@ -343,6 +367,10 @@ func isUnrestrictedToolset(cfg settings.ToolsConfig) bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.ActiveToolset), "unrestricted")
 }
 
+func usesSelectedToolRouting(cfg settings.ToolsConfig) bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.TaskRoutingMode), "selected")
+}
+
 func looksResearchTask(lower string) bool {
 	return hasAny(lower,
 		"research", "compare", "source", "sources", "bibliography", "latest", "current",
@@ -353,7 +381,10 @@ func looksResearchTask(lower string) bool {
 func explicitBrowserIntent(lower string) bool {
 	return hasAny(lower,
 		"browser", "open page", "click", "screenshot", "visible page", "inspect page",
-		"use chrome", "use the browser", "web ui",
+		"use chrome", "use the browser", "web ui", "create an account", "create account",
+		"sign up", "signup", "register an account", "register account", "fill in the form",
+		"fill out the form", "complete the form", "log in", "login to", "sign in",
+		"email verification", "verify my email", "captcha", "mfa", "one-time code", "otp",
 	)
 }
 

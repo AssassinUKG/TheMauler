@@ -23,6 +23,7 @@ import (
 	"mauler/internal/llm"
 	"mauler/internal/llm/backends"
 	"mauler/internal/packlibrary"
+	"mauler/internal/repoindex"
 	"mauler/internal/runtimeprofile"
 	"mauler/internal/sessionstore"
 	"mauler/internal/settings"
@@ -31,12 +32,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 
@@ -70,6 +73,9 @@ type App struct {
 	configuredContextWindow int
 
 	loadMu sync.Mutex // serialises model-load/unload calls; never held alongside mu
+	// sessionLibraryMu serialises saved-chat metadata (for example user tags)
+	// independently from model/run state and transcript IO.
+	sessionLibraryMu sync.Mutex
 
 	agentRunning bool
 	evalRunning  bool
@@ -81,12 +87,42 @@ type App struct {
 	artifactRunning bool
 	cancelArtifact  context.CancelFunc
 
+	// Repository scans are independent of agent runs, but workspace ownership
+	// is still exclusive while a replacement generation is being built.
+	repositoryIndexMu      sync.Mutex
+	repositoryIndexCancel  context.CancelFunc
+	repositoryIndexDone    chan struct{}
+	repositoryIndexRunID   uint64
+	repositoryIndexRuntime RepositoryIndexStatus
+	repositoryWatchCancel  context.CancelFunc
+	repositoryWatchDone    chan struct{}
+	repositoryWatchID      uint64
+	repositoryWatchRoot    string
+	repositoryWatchState   string
+	repositoryWatchError   string
+	repositoryWatchChecked time.Time
+
+	// Repository split reviews own one sealed index generation and run bounded,
+	// read-only child reviewers behind a single parent status surface.
+	repositoryReviewMu          sync.Mutex
+	repositoryReviewCancel      context.CancelFunc
+	repositoryReviewDone        chan struct{}
+	repositoryReviewRunID       uint64
+	repositoryReviewRuntime     RepositoryReviewStatus
+	repositoryReviewPlan        repoindex.SplitReviewPlan
+	repositoryReviewSubmissions []repoindex.ReviewSubmission
+
 	autonomous bool
 
 	loadedModelKey string
 	currentMode    string
 	autoAgents     bool
 	modeOverride   string
+	// conversationMode is the current desktop chat preference. It is separate
+	// from agent mode: adaptive/direct/agent controls loop depth, while the
+	// agent router still chooses the appropriate specialist for real tasks.
+	conversationMode       string
+	activeConversationName string
 	// nextContextPacketClass is an ephemeral UI-selected override consumed by
 	// the next accepted desktop task. It is never persisted or applied to remote lanes.
 	nextContextPacketClass string
@@ -150,6 +186,22 @@ type App struct {
 	imageCapabilityMu sync.Mutex
 	imageCapability   imageCapabilities
 	imageCapabilityAt time.Time
+
+	// browserWorkflowOwner scopes the persistent native Chromium session to the
+	// current conversation. It is rotated on clear/load/workspace changes.
+	browserWorkflowOwner string
+
+	// conversationEpoch owns all asynchronous work for the active transcript.
+	// Clear/load/workspace transitions advance it so late goroutines cannot
+	// append UI events to a replacement conversation.
+	conversationEpoch atomic.Uint64
+
+	// Rejected run events are deliberately kept out of Chat. This separate
+	// diagnostic channel makes ownership races observable without turning stale
+	// deltas or completion events into transcript noise.
+	staleRunEventDrops atomic.Uint64
+	runEventDiagMu     sync.RWMutex
+	lastStaleRunEvent  StaleRunEventRejection
 }
 
 // bgJob is one detached command running in the shared terminal session, with its
@@ -196,18 +248,21 @@ func New() *App {
 	history := agent.NewHistory(active.CtxTokens)
 
 	app := &App{
-		cfg:           cfg,
-		profiles:      profiles,
-		history:       history,
-		rollback:      &agent.Rollback{},
-		registry:      tools.New(),
-		ledger:        runLedger,
-		db:            db,
-		autoAgents:    true,
-		agentSessions: make(map[string]AgentSession),
-		bgJobs:        make(map[string]*bgJob),
-		channelQueue:  channelbus.NewPersistentQueue(db),
+		cfg:                  cfg,
+		profiles:             profiles,
+		history:              history,
+		rollback:             &agent.Rollback{},
+		registry:             tools.New(),
+		ledger:               runLedger,
+		db:                   db,
+		autoAgents:           true,
+		conversationMode:     normalizeConversationMode(cfg.Agents.DefaultConversationMode),
+		browserWorkflowOwner: newBrowserWorkflowOwner(),
+		agentSessions:        make(map[string]AgentSession),
+		bgJobs:               make(map[string]*bgJob),
+		channelQueue:         channelbus.NewPersistentQueue(db),
 	}
+	app.conversationEpoch.Store(1)
 	if db != nil {
 		catalog, catalogErr := engagement.LoadEmbeddedCatalog()
 		if configDir, err := settings.ConfigDir(); err == nil {
@@ -290,6 +345,8 @@ func (a *App) OnStartup(ctx context.Context) {
 	cfg := *a.cfg
 	a.mu.Unlock()
 	configureWorkingDir(&cfg)
+	_ = a.restoreRepositoryReviewForWorkspace(a.GetWorkingDir())
+	a.restartRepositoryIndexWatcher()
 	_ = a.refreshEngagementCatalog()
 	a.restartTelegramRuntime(cfg.Telegram)
 	if cfg.Audio.Enabled && audioUsesKokoro(cfg.Audio.TTSEngine) {
@@ -305,7 +362,45 @@ func (a *App) OnDomReady(_ context.Context) {}
 
 // OnShutdown is called before the app exits.
 func (a *App) OnShutdown(_ context.Context) {
+	_, _ = tools.CloseBrowserWorkflow(a.browserWorkflowOwnerID())
 	audio.ShutdownWorkers()
+	a.repositoryIndexMu.Lock()
+	watchCancel := a.repositoryWatchCancel
+	watchDone := a.repositoryWatchDone
+	indexCancel := a.repositoryIndexCancel
+	indexDone := a.repositoryIndexDone
+	a.repositoryIndexMu.Unlock()
+	a.repositoryReviewMu.Lock()
+	reviewCancel := a.repositoryReviewCancel
+	reviewDone := a.repositoryReviewDone
+	a.repositoryReviewMu.Unlock()
+	if watchCancel != nil {
+		watchCancel()
+	}
+	if watchDone != nil {
+		select {
+		case <-watchDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if indexCancel != nil {
+		indexCancel()
+	}
+	if indexDone != nil {
+		select {
+		case <-indexDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if reviewCancel != nil {
+		reviewCancel()
+	}
+	if reviewDone != nil {
+		select {
+		case <-reviewDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
 	a.mu.Lock()
 	if a.cancelAgent != nil {
 		a.cancelAgent()
@@ -350,6 +445,8 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	}
 	profiles := *a.profiles
 	previousModeOverride := a.cfg.Agents.ModeOverride
+	previousTelegram := a.cfg.Telegram
+	previousAudio := a.cfg.Audio
 	a.mu.Unlock()
 	var workspaceChanged bool
 	oldWD, _ := os.Getwd()
@@ -407,6 +504,7 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	if err := settings.Save(&cfg); err != nil {
 		return err
 	}
+	var previousBrowserOwner string
 	a.mu.Lock()
 	previousKey := modelLoadKey(activeProfile(a.cfg, a.profiles))
 	*a.cfg = cfg
@@ -417,12 +515,16 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		a.history.Clear()
 		a.rollback.Clear()
 		a.currentMode = cfg.Agents.ModeOverride
+		a.conversationMode = a.defaultConversationModeLocked()
+		a.advanceConversationEpochLocked()
+		previousBrowserOwner = a.rotateBrowserWorkflowOwnerLocked()
 	}
 	if modelLoadKey(active) != previousKey {
 		a.loadedModelKey = ""
 	}
 	a.mu.Unlock()
 	if workspaceChanged {
+		_, _ = tools.CloseBrowserWorkflow(previousBrowserOwner)
 		_ = a.ClearTodos()
 		if a.ctx != nil {
 			a.emit("mauler:workspace_changed", cfg.Context.WorkspaceDir)
@@ -430,11 +532,17 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		}
 		_ = a.refreshEngagementCatalog()
 	}
+	if a.ctx != nil {
+		a.restartRepositoryIndexWatcher()
+	}
 	// Runtime workers are owned by the started Wails app. Headless App values
 	// used by tests and binding generation may update settings, but must not
 	// launch an asynchronous worker that inherits a temporary process cwd.
-	if a.ctx != nil {
+	telegramChanged, audioChanged := runtimeSettingsChanged(previousTelegram, cfg.Telegram, previousAudio, cfg.Audio)
+	if a.ctx != nil && telegramChanged {
 		a.restartTelegramRuntime(cfg.Telegram)
+	}
+	if a.ctx != nil && audioChanged {
 		if cfg.Audio.Enabled && audioUsesKokoro(cfg.Audio.TTSEngine) {
 			audio.WarmKokoro(os.Getenv("MAULER_KOKORO_PYTHON"), cfg.Audio.Voice)
 		} else {
@@ -447,6 +555,10 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		}
 	}
 	return nil
+}
+
+func runtimeSettingsChanged(previousTelegram, nextTelegram settings.TelegramConfig, previousAudio, nextAudio settings.AudioConfig) (bool, bool) {
+	return !reflect.DeepEqual(previousTelegram, nextTelegram), !reflect.DeepEqual(previousAudio, nextAudio)
 }
 
 // GetProfiles returns all profiles.
@@ -616,19 +728,115 @@ func (a *App) GetHistoryStats() HistoryStats {
 }
 
 // ClearHistory resets the conversation.
-func (a *App) ClearHistory() {
+func (a *App) ClearHistory() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	if a.agentRunning || a.evalRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("cannot clear conversation while an agent run or eval is active")
+	}
 	a.history.Clear()
 	a.rollback.Clear()
+	a.conversationMode = a.defaultConversationModeLocked()
+	a.activeConversationName = ""
+	a.advanceConversationEpochLocked()
+	previousBrowserOwner := a.rotateBrowserWorkflowOwnerLocked()
+	a.mu.Unlock()
+	_, _ = tools.CloseBrowserWorkflow(previousBrowserOwner)
+	return nil
+}
+
+const (
+	maxAutomaticConversationNameBytes = 80
+	legacyAutosaveSessionName         = "autosave"
+)
+
+// StartConversation gives a previously unnamed desktop chat a stable library
+// identity. The file is created by the normal end-of-run autosave, so opening
+// a blank chat never leaves empty history entries behind. Existing names are
+// never overwritten: a deterministic numeric suffix is added instead.
+func (a *App) StartConversation(title string) (string, error) {
+	a.mu.Lock()
+	if a.agentRunning || a.evalRunning {
+		a.mu.Unlock()
+		return "", fmt.Errorf("cannot start a conversation while an agent run or eval is active")
+	}
+	if current := strings.TrimSpace(a.activeConversationName); current != "" {
+		a.mu.Unlock()
+		return current, nil
+	}
+	a.mu.Unlock()
+
+	base, err := cleanSessionName(title)
+	if err != nil {
+		base = "New-chat"
+	}
+	if strings.EqualFold(base, legacyAutosaveSessionName) {
+		base = "New-chat"
+	}
+	if len(base) > maxAutomaticConversationNameBytes {
+		base = strings.Trim(base[:maxAutomaticConversationNameBytes], ".-_")
+	}
+	if base == "" {
+		base = "New-chat"
+	}
+
+	a.sessionLibraryMu.Lock()
+	defer a.sessionLibraryMu.Unlock()
+	dir, err := sessionsDir()
+	if err != nil {
+		return "", err
+	}
+	name := base
+	for suffix := 2; ; suffix++ {
+		_, statErr := os.Stat(filepath.Join(dir, name+".json"))
+		if os.IsNotExist(statErr) {
+			break
+		}
+		if statErr != nil {
+			return "", statErr
+		}
+		suffixText := fmt.Sprintf("-%d", suffix)
+		stemLimit := maxAutomaticConversationNameBytes - len(suffixText)
+		stem := strings.Trim(base[:min(len(base), stemLimit)], ".-_")
+		if stem == "" {
+			stem = "Chat"
+		}
+		name = stem + suffixText
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.agentRunning || a.evalRunning {
+		return "", fmt.Errorf("cannot start a conversation while an agent run or eval is active")
+	}
+	if current := strings.TrimSpace(a.activeConversationName); current != "" {
+		return current, nil
+	}
+	a.activeConversationName = name
+	return name, nil
 }
 
 // SessionChatMessage is the UI-safe representation returned when loading sessions.
 type SessionChatMessage struct {
 	Role        string           `json:"role"`
 	Content     string           `json:"content"`
+	Thinking    string           `json:"thinking,omitempty"`
+	ToolName    string           `json:"tool_name,omitempty"`
+	ToolCallID  string           `json:"tool_call_id,omitempty"`
 	Images      []string         `json:"images,omitempty"`
 	Attachments []ChatAttachment `json:"attachments,omitempty"`
+}
+
+// SessionSummary is lightweight saved-conversation metadata for navigation.
+// It is derived from the transcript file so legacy sessions remain compatible.
+type SessionSummary struct {
+	Name             string   `json:"name"`
+	UpdatedUnix      int64    `json:"updated_unix"`
+	MessageCount     int      `json:"message_count"`
+	SizeBytes        int64    `json:"size_bytes"`
+	Status           string   `json:"status"`
+	Tags             []string `json:"tags"`
+	ConversationMode string   `json:"conversation_mode"`
 }
 
 // ChatAttachment is a user-provided text/file attachment from the chat composer.
@@ -643,14 +851,23 @@ type ChatAttachment struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
-// SaveSession writes the current conversation history to disk.
+// SaveSession writes the current conversation history to disk and makes that
+// saved identity the owner of subsequent automatic saves.
 func (a *App) SaveSession(name string) error {
+	return a.saveSession(name, true)
+}
+
+func (a *App) saveSession(name string, activate bool) error {
 	name, err := cleanSessionName(name)
 	if err != nil {
 		return err
 	}
+	if activate && strings.EqualFold(name, legacyAutosaveSessionName) {
+		return fmt.Errorf("conversation name %q is reserved for recovery", name)
+	}
 	a.mu.Lock()
 	msgs := a.history.Messages()
+	conversationMode := normalizeConversationMode(a.conversationMode)
 	cfg := *a.cfg
 	profiles := *a.profiles
 	a.mu.Unlock()
@@ -668,16 +885,37 @@ func (a *App) SaveSession(name string) error {
 	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0o640); err != nil {
 		return err
 	}
+	// Conversation preferences are optional library metadata. A damaged
+	// metadata file must not make the authoritative transcript unsaveable.
+	_ = a.persistSessionConversationMode(name, conversationMode)
 	model := activeProfile(&cfg, &profiles).ModelID
 	if store := a.sessionStore(); store != nil {
-		return store.StoreSession(name, workspaceScope(), model, toSessionStoreMessages(msgs))
+		err = store.StoreSession(name, workspaceScope(), model, toSessionStoreMessages(msgs))
+	} else {
+		err = sessionstore.StoreDefaultSession(name, workspaceScope(), model, toSessionStoreMessages(msgs))
 	}
-	return sessionstore.StoreDefaultSession(name, workspaceScope(), model, toSessionStoreMessages(msgs))
+	if err != nil {
+		return err
+	}
+	if activate && !strings.EqualFold(name, legacyAutosaveSessionName) {
+		a.mu.Lock()
+		a.activeConversationName = name
+		a.mu.Unlock()
+	}
+	return nil
 }
 
-// autoSave silently overwrites the _autosave session after each agent run.
+// autoSave updates the active named conversation after every agent run. The
+// legacy _autosave file remains a hidden recovery fallback for callers that do
+// not participate in the desktop conversation lifecycle.
 func (a *App) autoSave() {
-	_ = a.SaveSession("_autosave")
+	a.mu.Lock()
+	name := strings.TrimSpace(a.activeConversationName)
+	a.mu.Unlock()
+	if name == "" {
+		name = legacyAutosaveSessionName
+	}
+	_ = a.saveSession(name, false)
 }
 
 // LoadSession restores a saved conversation and returns chat messages for the UI.
@@ -686,42 +924,248 @@ func (a *App) LoadSession(name string) ([]SessionChatMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(filepath.Join(mustSessionsDir(), name+".json"))
+	a.mu.Lock()
+	running := a.agentRunning || a.evalRunning
+	a.mu.Unlock()
+	if running {
+		return nil, fmt.Errorf("cannot load a conversation while an agent run or eval is active")
+	}
+	_, msgs, repairReport, err := loadSessionRepair(name)
 	if err != nil {
 		return nil, err
 	}
-	var msgs []llm.Message
-	if err := json.Unmarshal(data, &msgs); err != nil {
-		return nil, err
+	if !repairReport.Valid {
+		return nil, fmt.Errorf("saved conversation cannot be loaded safely: %s", repairReport.Diagnostic)
 	}
+	modes, _ := a.sessionModesSnapshot()
+	conversationMode := normalizeConversationMode(modes[name])
 	a.mu.Lock()
+	if a.agentRunning || a.evalRunning {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("cannot load a conversation while an agent run or eval is active")
+	}
 	a.history.Replace(msgs)
 	a.rollback.Clear()
+	a.conversationMode = conversationMode
+	a.activeConversationName = name
+	a.advanceConversationEpochLocked()
+	previousBrowserOwner := a.rotateBrowserWorkflowOwnerLocked()
 	a.mu.Unlock()
+	_, _ = tools.CloseBrowserWorkflow(previousBrowserOwner)
+	if len(repairReport.Actions) > 0 {
+		a.recordSessionRepairLedger(name, "loaded_repaired", repairReport)
+	}
 	return toSessionChatMessages(msgs), nil
 }
 
-// ListSessions returns saved session names without the .json extension.
-func (a *App) ListSessions() ([]string, error) {
+// ListSessionSummaries returns saved conversations newest-first with navigation
+// metadata derived from each transcript. Malformed transcripts remain visible
+// and are marked for review instead of disappearing from the library.
+func (a *App) ListSessionSummaries() ([]SessionSummary, error) {
 	dir, err := sessionsDir()
 	if err != nil {
 		return nil, err
 	}
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
-		return []string{}, nil
+		return []SessionSummary{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	names := []string{}
+	// Tags are optional navigation metadata. A damaged metadata file must never
+	// hide otherwise valid saved transcripts from the conversation library.
+	tagsBySession, _ := a.sessionTagsSnapshot()
+	if tagsBySession == nil {
+		tagsBySession = map[string][]string{}
+	}
+	modesBySession, _ := a.sessionModesSnapshot()
+	if modesBySession == nil {
+		modesBySession = map[string]string{}
+	}
+	summaries := []SessionSummary{}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		names = append(names, strings.TrimSuffix(entry.Name(), ".json"))
+		if strings.EqualFold(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())), legacyAutosaveSessionName) {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		summary := SessionSummary{
+			Name:             strings.TrimSuffix(entry.Name(), ".json"),
+			UpdatedUnix:      info.ModTime().Unix(),
+			SizeBytes:        info.Size(),
+			Status:           "saved",
+			Tags:             []string{},
+			ConversationMode: normalizeConversationMode(modesBySession[strings.TrimSuffix(entry.Name(), ".json")]),
+		}
+		if tags := tagsBySession[summary.Name]; len(tags) > 0 {
+			summary.Tags = append([]string(nil), tags...)
+		}
+		messageCount, countErr := sessionMessageCount(filepath.Join(dir, entry.Name()))
+		if countErr != nil {
+			summary.Status = "needs-review"
+		} else {
+			summary.MessageCount = messageCount
+		}
+		summaries = append(summaries, summary)
+	}
+	sort.SliceStable(summaries, func(i, j int) bool {
+		if summaries[i].UpdatedUnix == summaries[j].UpdatedUnix {
+			return strings.ToLower(summaries[i].Name) < strings.ToLower(summaries[j].Name)
+		}
+		return summaries[i].UpdatedUnix > summaries[j].UpdatedUnix
+	})
+	return summaries, nil
+}
+
+func sessionMessageCount(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	start, err := decoder.Token()
+	if err != nil {
+		return 0, err
+	}
+	if delimiter, ok := start.(json.Delim); !ok || delimiter != '[' {
+		return 0, fmt.Errorf("saved conversation is not a JSON message array")
+	}
+	count := 0
+	for decoder.More() {
+		var message json.RawMessage
+		if err := decoder.Decode(&message); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	end, err := decoder.Token()
+	if err != nil {
+		return 0, err
+	}
+	if delimiter, ok := end.(json.Delim); !ok || delimiter != ']' {
+		return 0, fmt.Errorf("saved conversation has an invalid JSON message boundary")
+	}
+	return count, nil
+}
+
+// ListSessions returns saved session names without the .json extension.
+func (a *App) ListSessions() ([]string, error) {
+	summaries, err := a.ListSessionSummaries()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(summaries))
+	for _, summary := range summaries {
+		names = append(names, summary.Name)
 	}
 	return names, nil
+}
+
+// RenameSession changes a saved conversation title without modifying its
+// transcript. The session file and recall index are kept in sync; if recall
+// migration fails, the file rename is rolled back.
+func (a *App) RenameSession(oldName, newName string) error {
+	oldName, err := cleanSessionName(oldName)
+	if err != nil {
+		return err
+	}
+	newName, err = cleanSessionName(newName)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(newName, legacyAutosaveSessionName) {
+		return fmt.Errorf("conversation name %q is reserved for recovery", newName)
+	}
+	a.mu.Lock()
+	running := a.agentRunning || a.evalRunning
+	a.mu.Unlock()
+	if running {
+		return fmt.Errorf("cannot rename a conversation while an agent run or eval is active")
+	}
+
+	dir, err := sessionsDir()
+	if err != nil {
+		return err
+	}
+	source := filepath.Join(dir, oldName+".json")
+	destination := filepath.Join(dir, newName+".json")
+	if _, err := os.Stat(source); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("saved conversation %q does not exist", oldName)
+		}
+		return err
+	}
+	if oldName == newName {
+		return nil
+	}
+	if !strings.EqualFold(oldName, newName) {
+		if _, err := os.Stat(destination); err == nil {
+			return fmt.Errorf("saved conversation %q already exists", newName)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	rollbackFile := func() error { return os.Rename(destination, source) }
+	if strings.EqualFold(oldName, newName) {
+		temporary := filepath.Join(dir, fmt.Sprintf(".%s.rename-%d.tmp", oldName, time.Now().UnixNano()))
+		if err := os.Rename(source, temporary); err != nil {
+			return err
+		}
+		if err := os.Rename(temporary, destination); err != nil {
+			if rollbackErr := os.Rename(temporary, source); rollbackErr != nil {
+				return fmt.Errorf("rename conversation: %w (rollback failed: %v)", err, rollbackErr)
+			}
+			return err
+		}
+		rollbackFile = func() error {
+			if err := os.Rename(destination, temporary); err != nil {
+				return err
+			}
+			return os.Rename(temporary, source)
+		}
+	} else if err := os.Rename(source, destination); err != nil {
+		return err
+	}
+
+	scope := workspaceScope()
+	if store := a.sessionStore(); store != nil {
+		err = store.RenameSession(oldName, newName, scope)
+	} else {
+		err = sessionstore.RenameDefaultSession(oldName, newName, scope)
+	}
+	if err != nil {
+		if rollbackErr := rollbackFile(); rollbackErr != nil {
+			return fmt.Errorf("rename recall index: %w (file rollback failed: %v)", err, rollbackErr)
+		}
+		return fmt.Errorf("rename recall index: %w", err)
+	}
+	if err := a.renameSessionTags(oldName, newName); err != nil {
+		var recallRollbackErr error
+		if store := a.sessionStore(); store != nil {
+			recallRollbackErr = store.RenameSession(newName, oldName, scope)
+		} else {
+			recallRollbackErr = sessionstore.RenameDefaultSession(newName, oldName, scope)
+		}
+		fileRollbackErr := rollbackFile()
+		if recallRollbackErr != nil || fileRollbackErr != nil {
+			return fmt.Errorf("rename session tags: %w (recall rollback: %v; file rollback: %v)", err, recallRollbackErr, fileRollbackErr)
+		}
+		return fmt.Errorf("rename session tags: %w", err)
+	}
+	a.mu.Lock()
+	if a.activeConversationName == oldName {
+		a.activeConversationName = newName
+	}
+	a.mu.Unlock()
+	return nil
 }
 
 // DeleteSession removes a saved session file.
@@ -731,19 +1175,27 @@ func (a *App) DeleteSession(name string) error {
 		return err
 	}
 	err = os.Remove(filepath.Join(mustSessionsDir(), name+".json"))
-	if os.IsNotExist(err) {
-		if store := a.sessionStore(); store != nil {
-			return store.DeleteSession(name, workspaceScope())
-		}
-		return sessionstore.DeleteDefaultSession(name, workspaceScope())
-	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	var recallErr error
 	if store := a.sessionStore(); store != nil {
-		return store.DeleteSession(name, workspaceScope())
+		recallErr = store.DeleteSession(name, workspaceScope())
+	} else {
+		recallErr = sessionstore.DeleteDefaultSession(name, workspaceScope())
 	}
-	return sessionstore.DeleteDefaultSession(name, workspaceScope())
+	if recallErr != nil {
+		return recallErr
+	}
+	if err := a.deleteSessionTags(name); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.activeConversationName == name {
+		a.activeConversationName = ""
+	}
+	a.mu.Unlock()
+	return nil
 }
 
 func (a *App) SearchSessionRecall(query string, limit int) ([]sessionstore.SearchResult, error) {
@@ -855,11 +1307,13 @@ func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, at
 		return fmt.Errorf("agent is already running")
 	}
 	a.agentRunning = true
+	conversationEpoch := a.currentConversationEpoch()
 	cfg := *a.cfg
 	cloneToolsConfigRefs(&cfg.Tools)
 	profiles := *a.profiles
 	autonomous := a.autonomous
 	autoAgents := a.autoAgents
+	conversationMode := normalizeConversationMode(a.conversationMode)
 	a.mu.Unlock()
 
 	profile := activeProfile(&cfg, &profiles)
@@ -870,6 +1324,7 @@ func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, at
 		mode = manualAgentMode()
 	}
 	applyAgentPreset(&cfg, &profiles, mode, &profile, &autonomous)
+	runProfileName = cfg.ActiveProfile
 	if requested := strings.TrimSpace(profileOverride); requested != "" {
 		override, ok := profiles.Profiles[requested]
 		if !ok || strings.TrimSpace(override.ModelID) == "" {
@@ -931,6 +1386,9 @@ func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, at
 	memories := memorySelection.Entries
 	skills := relevantSkillsForSettings(cfg.Skills, cfg, messageText)
 	run := startTaskRun(messageText, mode.Name, runProfileName, profile.ModelID)
+	run.conversationMode = conversationMode
+	run.addEvent("conversation_mode", "Applied conversation run mode", conversationMode)
+	run.ConversationEpoch = conversationEpoch
 	run.ContextPacketClass = a.consumeNextContextPacketClass(origin)
 	run.ClaimantID = firstNonEmpty(strings.TrimSpace(claimantID), run.ID)
 	run.ClaimantAlias = firstNonEmpty(strings.TrimSpace(claimantAlias), mode.Name)
@@ -1584,6 +2042,12 @@ func (a *App) GetWorkingDir() string {
 func (a *App) SetWorkingDir(dir string) error {
 	processStateMu.Lock()
 	defer processStateMu.Unlock()
+	a.repositoryIndexMu.Lock()
+	indexing := a.repositoryIndexRuntime.Indexing
+	a.repositoryIndexMu.Unlock()
+	if indexing {
+		return fmt.Errorf("cannot change workspace while repository indexing is active; cancel the scan first")
+	}
 	a.mu.Lock()
 	if a.agentRunning || a.evalRunning {
 		a.mu.Unlock()
@@ -1615,6 +2079,12 @@ func (a *App) SetWorkingDir(dir string) error {
 		a.cfg.Agents.ModeOverride,
 	)
 	a.cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
+	if changed && !sameFilesystemPath(a.cfg.Context.ScratchWorkspaceDir, abs) {
+		a.cfg.Context.ScratchWorkspaceDir = ""
+		a.cfg.Context.ScratchWorkspaceName = ""
+		a.cfg.Context.ScratchWorkspaceCreatedUnix = 0
+		a.cfg.Context.ScratchWorkspaceReviewUnix = 0
+	}
 	a.cfg.Context.OpenFolders = mergeWorkspaceFolders(a.cfg.Context.OpenFolders, settings.WorkspaceFolder{
 		Path: filepath.ToSlash(abs),
 		Name: filepath.Base(abs),
@@ -1628,6 +2098,8 @@ func (a *App) SetWorkingDir(dir string) error {
 		cfg = *a.cfg
 		a.history.Clear()
 		a.rollback.Clear()
+		a.conversationMode = a.defaultConversationModeLocked()
+		a.advanceConversationEpochLocked()
 	}
 	a.mu.Unlock()
 	_ = settings.Save(&cfg)
@@ -1638,6 +2110,7 @@ func (a *App) SetWorkingDir(dir string) error {
 			a.emit("mauler:agent_mode", cfg.Agents.ModeOverride)
 		}
 		_ = a.refreshEngagementCatalog()
+		a.restartRepositoryIndexWatcher()
 	}
 	return nil
 }
@@ -2615,6 +3088,9 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		thinkingDetail += " note=active model template does not advertise thinking support; profile behaviour retained"
 	}
 	run.addEvent("thinking_mode", "Resolved Chat thinking override", thinkingDetail)
+	// Establish UI ownership before any run_state/error event. This makes the
+	// owner event the causal root even when control-plane initialization fails.
+	a.emitRun(&run, "mauler:stream_start", cfg.ActiveProfile)
 	a.setRunState(&run, "planning", "Initial prompt accepted and run context created.")
 	defer func() {
 		if ctx.Err() != nil {
@@ -2683,12 +3159,17 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 				run.addEvent("answer_fallback", "Recovered successful read-only tool evidence for Chat", "A later finalisation step stopped before producing a final assistant answer.")
 			}
 		}
+		recoveredAnswerHandoff := finalStatus == "stopped" && canHandOffRecoveredAnswer(run, finalSummary)
 		if finalStatus == "done" {
 			a.setRunState(&run, "done", telegramRunCompletionDetail(run, finalSummary))
 			run.addEvent("finish", "Run completed", "")
 		} else if finalStatus == "error" && run.StopReason != "" {
 			a.setRunState(&run, "failed", run.StopDetail)
 			run.addEvent("finish", "Run ended with error", run.StopDetail)
+		} else if recoveredAnswerHandoff {
+			detail := telegramRunCompletionDetail(run, finalSummary)
+			a.setRunState(&run, "recovered", detail)
+			run.addEvent("answer_handoff", "Delivered evidence-backed answer after loop guard stopped redundant work", run.StopReason)
 		} else if finalStatus == "stopped" {
 			terminalState := finalStoppedRunState(run.StopReason)
 			a.setRunState(&run, terminalState, run.StopDetail)
@@ -2704,7 +3185,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 				run.Response = finalSummary
 			}
 			if strings.TrimSpace(finalSummary) != "" && a.ctx != nil {
-				a.emit("mauler:delta", finalSummary)
+				a.emitRun(&run, "mauler:delta", finalSummary)
 			}
 		}
 		run.addEvent("loop_metrics", "Loop-health metrics", buildLoopMetrics(run).Detail())
@@ -2713,6 +3194,9 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.appendProgressUpdate(context.Background(), &run, "Run Finish", progressContentForRunFinish(run))
 		if ctx.Err() == nil {
 			a.deleteRunCheckpoint(run.ID)
+			if strings.TrimSpace(run.ParentRunID) != "" && !run.persistentCheckpoint {
+				a.deleteRunCheckpoint(run.ParentRunID)
+			}
 		}
 		_ = a.saveTaskRun(run, loggingConfigValue(&cfg.Logging))
 		if cfg.Memory.Enabled {
@@ -2721,7 +3205,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.autoDistillLearnings(&run, cfg.Memory)
 		tools.ReapBackgroundShellJobs() // free finished-but-unpolled standalone jobs
 		if a.ctx != nil {
-			a.emit("mauler:task_run", run)
+			a.emitRun(&run, "mauler:task_run", run)
 			if suggestion := buildLearningSuggestion(&run); suggestion != nil {
 				a.recordLedger(ledger.Event{
 					RunID:   run.ID,
@@ -2732,7 +3216,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 					Detail:  suggestion.Reason,
 					Output:  suggestion.Template,
 				})
-				a.emit("mauler:suggest_learning", suggestion)
+				a.emitRun(&run, "mauler:suggest_learning", suggestion)
 			}
 		}
 		a.mu.Lock()
@@ -2741,8 +3225,14 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.stopReason = ""
 		a.stopDetail = ""
 		a.mu.Unlock()
-		a.emit("mauler:stream_done", finalSummary, finalStatus, run.StopReason)
+		deliveryStatus := finalStatus
+		if recoveredAnswerHandoff {
+			deliveryStatus = "recovered"
+		}
+		// Persist the complete transcript before announcing stream completion so
+		// the sidebar refresh triggered by that event always sees this turn.
 		a.autoSave()
+		a.emitRun(&run, "mauler:stream_done", finalSummary, deliveryStatus, run.StopReason)
 		finalRun = run
 		a.drainChannelQueueAsync()
 	}()
@@ -2764,6 +3254,9 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	// context packet is the exact packet the model receives, even in a continued chat.
 	a.mu.Lock()
 	primarySystemPrompt := buildSystemPromptForTaskWithProjectInstructions(*cfg, mode, memories, skills, firstUserText, projectPacket.Prompt)
+	if normalizeConversationMode(run.conversationMode) == conversationModeDirect {
+		primarySystemPrompt += "\n\nCONVERSATION MODE — DIRECT: Give one useful text answer. No tools are available. Do not claim you inspected, changed, tested, browsed, or executed anything. If the request requires action, explain that Direct mode cannot perform it and tell the user to switch this conversation to Agent or Adaptive."
+	}
 	a.history.Replace(messagesWithPrimarySystemPrompt(a.history.Messages(), primarySystemPrompt))
 	if packet := controlPlanePrompt(run); packet != "" {
 		a.history.Append(llm.NewTextMessage(llm.RoleSystem, packet))
@@ -2773,15 +3266,13 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	}
 	a.mu.Unlock()
 
-	a.emit("mauler:stream_start", cfg.ActiveProfile)
-
 	client, err := buildClientForAgent(profile)
 	if err != nil {
 		finalStatus = "error"
 		finalSummary = err.Error()
 		run.stopTerminal("client_error", err.Error())
 		run.addEvent("error", "Client setup failed", err.Error())
-		a.emit("mauler:stream_error", err.Error())
+		a.emitRun(&run, "mauler:stream_error", err.Error())
 		return
 	}
 	a.setRunState(&run, "model_loading", modelLoadKey(profile))
@@ -2797,7 +3288,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		finalSummary = err.Error()
 		run.stopTerminal("model_load_error", err.Error())
 		run.addEvent("error", "Model load failed", err.Error())
-		a.emit("mauler:stream_error", err.Error())
+		a.emitRun(&run, "mauler:stream_error", err.Error())
 		return
 	}
 	modelLoadFlag := modelLoadFlagForCall(client, profile, modelKeyBeforeLoad)
@@ -2909,6 +3400,11 @@ agentLoop:
 		timeBudgetExhausted := agentTimeBudgetExhausted(cfg.Agents, startedAt, time.Now())
 		terminalState := a.GetSharedTerminalState()
 		toolDefs, toolChoice := toolDefsAndChoiceForTurnWithState(a.registry, cfg.Tools, firstUserText, autoContinues, totalToolCallsMade, terminalState)
+		browserStatus := tools.GetBrowserWorkflowStatus(a.browserWorkflowOwnerID())
+		if routedDefs, routedChoice, changed := applyActiveBrowserTurnRouting(a.registry, cfg.Tools, firstUserText, toolDefs, toolChoice, browserStatus); changed {
+			toolDefs, toolChoice = routedDefs, routedChoice
+			run.addEvent("browser_routing", "Active conversation browser added to this turn", fmt.Sprintf("state=%s visible=%t tool_choice=%s tools=%s", browserStatus.State, browserStatus.Visible, toolChoice, toolProtocolToolNames(toolDefs)))
+		}
 		if containsToolDef(toolDefs, generateImageToolName) && !a.imageGenerationAvailable(ctx) {
 			toolDefs = filterOutToolDef(toolDefs, generateImageToolName)
 			if len(toolDefs) == 0 && toolChoice == "required" {
@@ -2919,8 +3415,12 @@ agentLoop:
 			toolDefs, toolChoice = constrainedDefs, constrainedChoice
 			run.addEvent("control_tool_scope", "Planning phase restricted tools", fmt.Sprintf("tool_choice=%s tools=%s", toolChoice, toolProtocolToolNames(toolDefs)))
 		}
-		if a.recordToolRoutingState(run.ID, firstUserText, toolChoice, toolDefs, autoContinues, totalToolCallsMade, terminalState) {
-			run.addEvent("tool_routing", "Tool routing state", fmt.Sprintf("phase=%s\ntool_choice=%s\ntool_count=%d\nterminal_state=%s\ntools=%s", opsPhaseForTaskWithState(firstUserText, terminalState), toolChoice, len(toolDefs), terminalState.State, toolProtocolToolNames(toolDefs)))
+		if routedDefs, routedChoice, changed := applyConversationModeRouting(run.conversationMode, toolDefs, toolChoice); changed {
+			toolDefs, toolChoice = routedDefs, routedChoice
+			run.addEvent("conversation_mode_routing", "Direct conversation disabled tools for this turn", "tool_choice=none")
+		}
+		if a.recordToolRoutingState(run.ID, firstUserText, cfg.Tools.TaskRoutingMode, toolChoice, toolDefs, autoContinues, totalToolCallsMade, terminalState) {
+			run.addEvent("tool_routing", "Tool routing state", fmt.Sprintf("phase=%s\nrouting_mode=%s\ntool_choice=%s\ntool_count=%d\nterminal_state=%s\ntools=%s", opsPhaseForTaskWithState(firstUserText, terminalState), firstNonEmpty(cfg.Tools.TaskRoutingMode, "auto"), toolChoice, len(toolDefs), terminalState.State, toolProtocolToolNames(toolDefs)))
 		}
 		if len(pendingRepairToolDefs) > 0 && !toolBudgetExhausted && !timeBudgetExhausted {
 			toolDefs = pendingRepairToolDefs
@@ -2988,6 +3488,10 @@ agentLoop:
 			toolDefs = nil
 			toolChoice = "none"
 		}
+		// Direct is an explicit operator choice for this conversation. Re-apply it
+		// after every recovery/budget branch so no later agent-loop repair can
+		// silently re-enable tools.
+		toolDefs, toolChoice, _ = applyConversationModeRouting(run.conversationMode, toolDefs, toolChoice)
 		if totalToolCallsMade > 0 {
 			a.maybeReinjectMemory(&run, *cfg, injectedMemoryIDs, &memoryReinjections)
 		}
@@ -3010,7 +3514,7 @@ agentLoop:
 				needsCompact = a.applyMicrocompactStage(&run, cfg, toolDefs, "backend_token_pressure")
 			}
 			if needsCompact {
-				if compacted := a.doCompact(ctx, client, profile); compacted != nil {
+				if compacted := a.doCompact(ctx, client, profile, &run); compacted != nil {
 					contextDropped = true
 					run.addEvent("compaction", compacted.Message(), compacted.Detail())
 				}
@@ -3029,7 +3533,7 @@ agentLoop:
 				needsCompact = a.applyMicrocompactStage(&run, cfg, toolDefs, "threshold")
 			}
 			if needsCompact {
-				if compacted := a.doCompact(ctx, client, profile); compacted != nil {
+				if compacted := a.doCompact(ctx, client, profile, &run); compacted != nil {
 					contextDropped = true
 					run.addEvent("compaction", compacted.Message(), compacted.Detail())
 				}
@@ -3086,7 +3590,8 @@ agentLoop:
 			a.mu.Unlock()
 		}
 		a.mu.Lock()
-		repairActions := a.history.RepairStructure()
+		repairReport := a.history.RepairStructureReport()
+		repairActions := repairReport.Actions
 		if len(repairActions) > 0 {
 			msgs = a.history.Messages()
 		}
@@ -3107,6 +3612,22 @@ agentLoop:
 				},
 			})
 		}
+		if !repairReport.Valid {
+			finalStatus = "stopped"
+			detail := "Conversation repair rejected the model request: " + repairReport.Diagnostic
+			run.stop("session_repair_rejected", detail)
+			a.setRunState(&run, "blocked", detail)
+			run.addEvent("session_repair", "Rejected malformed conversation before model request", repairReport.Diagnostic)
+			a.recordLedger(ledger.Event{
+				RunID:   run.ID,
+				Kind:    "session_repair",
+				Source:  "agent_history",
+				Status:  "rejected",
+				Message: "Malformed conversation was not sent to the model",
+				Detail:  repairReport.Diagnostic,
+			})
+			return
+		}
 		if statePrompt := a.buildExecutionStatePrompt(firstUserText, toolChoice, toolDefs, terminalState); strings.TrimSpace(statePrompt) != "" {
 			msgs = append(msgs, llm.NewTextMessage(llm.RoleSystem, statePrompt))
 		}
@@ -3121,8 +3642,13 @@ agentLoop:
 		// Qwen3.8 is trained for thinking agent turns. Keep its first tool rounds
 		// coherent and only fall back to direct decoding after the configured
 		// threshold or a prose-only continuation stall.
-		forceNoThink := shouldForceNoThinking(profile, effectiveThinkingMode, totalToolCallsMade, noThinkThreshold, noToolContinues)
+		directAnswerTurn := directAnswerTurnForMode(run.conversationMode, firstUserText, toolChoice, totalToolCallsMade)
+		forceNoThink := shouldForceNoThinking(profile, effectiveThinkingMode, totalToolCallsMade, noThinkThreshold, noToolContinues) ||
+			(directAnswerTurn && normaliseThinkingMode(effectiveThinkingMode) != "on")
 		req := buildChatRequest(profile, msgs, toolDefs, toolChoice, forceNoThink, shouldUseCodingParams(firstUserText, mode), currentEffort)
+		if applyDirectAnswerResponseBudget(&req, directAnswerTurn) {
+			run.addEvent("response_budget", "Applied adaptive direct-answer output cap", fmt.Sprintf("max_tokens=%d", req.MaxTokens))
+		}
 		if applyExplicitNoToolResponseBudget(&req, firstUserText) {
 			run.addEvent("response_budget", "Applied explanation-only output cap", fmt.Sprintf("max_tokens=%d", req.MaxTokens))
 		}
@@ -3168,7 +3694,7 @@ agentLoop:
 			run.stopTerminal("chat_error", err.Error())
 			run.addEvent("error", "Chat request failed", err.Error())
 			if successfulReadOnlyToolAnswer(run) == "" {
-				a.emit("mauler:stream_error", err.Error())
+				a.emitRun(&run, "mauler:stream_error", err.Error())
 			}
 			return
 		}
@@ -3201,7 +3727,7 @@ agentLoop:
 				run.stopTerminal("stream_error", delta.Error.Error())
 				run.addEvent("error", "Stream failed", delta.Error.Error())
 				if successfulReadOnlyToolAnswer(run) == "" {
-					a.emit("mauler:stream_error", delta.Error.Error())
+					a.emitRun(&run, "mauler:stream_error", delta.Error.Error())
 				}
 				return
 			}
@@ -3211,7 +3737,7 @@ agentLoop:
 			}
 			if delta.Thinking != "" {
 				thinkBuf.WriteString(delta.Thinking)
-				a.emit("mauler:thinking", delta.Thinking)
+				a.emitRun(&run, "mauler:thinking", delta.Thinking)
 			}
 			if delta.Content != "" {
 				rawTextBuf.WriteString(delta.Content)
@@ -3221,7 +3747,7 @@ agentLoop:
 					emittedContentThinkingText = contentThinking
 					if thinkChunk != "" {
 						thinkBuf.WriteString(thinkChunk)
-						a.emit("mauler:thinking", thinkChunk)
+						a.emitRun(&run, "mauler:thinking", thinkChunk)
 					}
 				}
 				visible := sanitizeVisibleModelText(visibleRaw)
@@ -3231,11 +3757,11 @@ agentLoop:
 					chunk := visible[len(emittedVisibleText):]
 					emittedVisibleText = visible
 					if chunk != "" {
-						a.emit("mauler:delta", chunk)
+						a.emitRun(&run, "mauler:delta", chunk)
 					}
 				default:
 					emittedVisibleText = visible
-					a.emit("mauler:stream_replace", visible)
+					a.emitRun(&run, "mauler:stream_replace", visible)
 				}
 			}
 			if len(delta.ToolCalls) > 0 {
@@ -3285,8 +3811,8 @@ agentLoop:
 				}
 				a.setRunState(&run, "recovering", "Model emitted tool markup as text; converting to structured tool calls.")
 				run.addEvent("tool_protocol_repair", "Converted inline tool markup", toolProtocolDebugDetail(rawText, textBuf.String(), repaired, repairDefs))
-				a.emit("mauler:tool_protocol_repair")
-				a.emit("mauler:stream_replace", textBuf.String())
+				a.emitRun(&run, "mauler:tool_protocol_repair")
+				a.emitRun(&run, "mauler:stream_replace", textBuf.String())
 			}
 		}
 		if len(toolCalls) == 0 && req.JSONSchema != nil && len(toolDefs) == 1 && strings.TrimSpace(repairText) != "" {
@@ -3295,8 +3821,8 @@ agentLoop:
 				textBuf.Reset()
 				a.setRunState(&run, "recovering", "Backend returned constrained tool arguments as text; converting to a structured tool call.")
 				run.addEvent("tool_protocol_schema_repair", "Converted constrained JSON content to tool call", toolProtocolDebugDetail(rawText, textBuf.String(), repaired, toolDefs))
-				a.emit("mauler:tool_protocol_repair")
-				a.emit("mauler:stream_replace", "")
+				a.emitRun(&run, "mauler:tool_protocol_repair")
+				a.emitRun(&run, "mauler:stream_replace", "")
 			}
 		}
 		if toolBudgetExhausted && len(toolCalls) > 0 {
@@ -3318,13 +3844,13 @@ agentLoop:
 		if unrepairedToolMarkup {
 			a.setRunState(&run, "recovering", "Model emitted tool markup text that could not be converted.")
 			run.addEvent("tool_protocol_unrepaired", "Could not convert inline tool markup", toolProtocolDebugDetail(rawText, textBuf.String(), nil, toolDefs))
-			a.emit("mauler:stream_replace", "")
+			a.emitRun(&run, "mauler:stream_replace", "")
 		}
 		hallucinatedToolResult := len(toolCalls) == 0 && containsHallucinatedToolResult(repairText) && !toolBudgetExhausted && !timeBudgetExhausted && toolChoice != "none"
 		if hallucinatedToolResult {
 			a.setRunState(&run, "recovering", "Model wrote a fake tool result without a real tool call.")
 			run.addEvent("tool_protocol_hallucinated_result", "Rejected hallucinated tool/system result", toolProtocolDebugDetail(rawText, textBuf.String(), nil, toolDefs))
-			a.emit("mauler:stream_replace", "")
+			a.emitRun(&run, "mauler:stream_replace", "")
 		}
 		protocolFailure := unrepairedToolMarkup || hallucinatedToolResult
 
@@ -3334,9 +3860,17 @@ agentLoop:
 		// executor receives (the per-call normalize below is then a no-op).
 		for i := range toolCalls {
 			toolCalls[i] = normalizeToolCallArguments(toolCalls[i])
+			if routed, note, changed := enforceTaskBrowserVisibility(toolCalls[i], firstUserText); changed {
+				toolCalls[i] = routed
+				run.addEvent("tool_rewrite", "Opened an explicitly visible browser", note)
+			}
 			if routed, note, changed := enforceTaskShellBackend(toolCalls[i], firstUserText); changed {
 				toolCalls[i] = routed
 				run.addEvent("tool_rewrite", "Routed Windows host inspection to native PowerShell", note)
+			}
+			if routed, note, changed := routeTerminalHTTPCommandToShell(toolCalls[i], toolDefs); changed {
+				toolCalls[i] = routed
+				run.addEvent("tool_rewrite", "Routed independent HTTP command away from the live terminal", note)
 			}
 		}
 
@@ -3344,7 +3878,7 @@ agentLoop:
 		if answerCheckpointCandidate(visibleText, toolCalls, protocolFailure) &&
 			len(visibleText) > len(bestAnswerCheckpoint) {
 			bestAnswerCheckpoint = visibleText
-			a.emit("mauler:answer_checkpoint", bestAnswerCheckpoint)
+			a.emitRun(&run, "mauler:answer_checkpoint", bestAnswerCheckpoint)
 		}
 		a.mu.Lock()
 		if !protocolFailure && (visibleText != "" || len(toolCalls) > 0) {
@@ -3373,7 +3907,13 @@ agentLoop:
 		}
 		// Emit the full thinking block so the UI can attach it to the message
 		if thinkBuf.Len() > 0 {
-			a.emit("mauler:thinking_done", thinkBuf.String())
+			a.emitRun(&run, "mauler:thinking_done", thinkBuf.String())
+		}
+		if visibleText != "" && !protocolFailure {
+			a.emitRun(&run, "mauler:assistant_turn", assistantTurnEvent{
+				Content: visibleText, Thinking: strings.TrimSpace(thinkBuf.String()),
+				Turn: modelCallTurn, ToolCalls: len(toolCalls),
+			})
 		}
 		if usage != nil {
 			run.setTokens(usage.PromptTokens, usage.CompletionTokens)
@@ -3381,7 +3921,7 @@ agentLoop:
 				backendUsagePressure = true
 				run.addEvent("context_pressure", "Backend prompt usage exceeded compaction threshold", fmt.Sprintf("prompt_tokens=%d\ncontext_window=%d\nthreshold=%.2f", usage.PromptTokens, a.contextWindow, cfg.Context.CompactionAt))
 			}
-			a.emit("mauler:usage", map[string]int{
+			a.emitRun(&run, "mauler:usage", map[string]int{
 				"prompt_tokens":     usage.PromptTokens,
 				"completion_tokens": usage.CompletionTokens,
 			})
@@ -3394,7 +3934,7 @@ agentLoop:
 			}
 			run.setTokens(promptBudget.TotalTokens, completionEstimate)
 			run.addEvent("usage_estimate", "Backend did not report usage; recorded local token estimate", fmt.Sprintf("prompt_tokens=%d\ncompletion_tokens=%d", promptBudget.TotalTokens, completionEstimate))
-			a.emit("mauler:usage", map[string]int{
+			a.emitRun(&run, "mauler:usage", map[string]int{
 				"prompt_tokens":     promptBudget.TotalTokens,
 				"completion_tokens": completionEstimate,
 			})
@@ -3586,6 +4126,33 @@ agentLoop:
 				a.history.Append(continueMsg)
 				a.mu.Unlock()
 				continue
+			}
+
+			// Conversational questions use the same Chat history and model, but
+			// finish after one clean direct response. They do not enter the agent's
+			// narration-repair or reviewer loop. Operational, workspace, live-data,
+			// and mutation requests never enter this lane because their opening
+			// tool choice is auto/required rather than none.
+			if directAnswerTurn && directAnswerAcceptedForMode(run.conversationMode, text) {
+				if normalizeConversationMode(run.conversationMode) == conversationModeDirect && directModeCannotCompleteTask(firstUserText) {
+					bestAnswerCheckpoint = text
+					finalSummary = text
+					run.Response = trimRunText(text)
+					finalStatus = "stopped"
+					detail := "Direct mode returned one text-only response and intentionally did not execute the requested task. Switch this conversation to Agent or Adaptive to use tools and evidence checks."
+					run.stopTerminal("direct_mode_text_only", detail)
+					run.addEvent("direct_answer", "Delivered text-only answer without executing task", detail)
+					return
+				}
+				if err := a.requestControlVerification(&run); err == nil {
+					verdicts := a.ensureControlVerification(ctx, &run, cfg, nil)
+					if len(blockingReviewVerdicts(verdicts)) == 0 {
+						if err := a.passControlVerification(&run, verdicts); err == nil {
+							run.addEvent("direct_answer", "Completed direct-answer turn", fmt.Sprintf("mode=%s; one model response; no tools, repair pass, or reviewer pass required.", normalizeConversationMode(run.conversationMode)))
+							return
+						}
+					}
+				}
 			}
 
 			// Auto-continue if the model looks like it stopped mid-task naturally
@@ -3793,7 +4360,7 @@ agentLoop:
 			a.setRunState(&run, stateForTool(tc.Function.Name), tc.Function.Name)
 			if isReasoningEffortTool(tc.Function.Name) {
 				run.addEvent("tool_call", tc.Function.Name, logInput(string(tc.Function.Arguments)))
-				a.emit("mauler:tool_call", map[string]string{
+				a.emitRun(&run, "mauler:tool_call", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "input": string(tc.Function.Arguments),
 				})
 				result, ok := applyReasoningEffortTool(&currentEffort, &reasoningEffortChanges, tc.Function.Arguments)
@@ -3810,7 +4377,7 @@ agentLoop:
 					status = "blocked"
 				}
 				run.addEvent("reasoning_effort", "Reasoning effort tool call", fmt.Sprintf("status=%s result=%s", status, result))
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": result,
 				})
 				continue
@@ -3822,7 +4389,7 @@ agentLoop:
 				run.stop("tool_budget_exhausted", result)
 				a.setRunState(&run, "blocked", result)
 				run.addEvent("blocked", "Agent tool-call budget exhausted", result)
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": result,
 				})
 				continue
@@ -3839,7 +4406,7 @@ agentLoop:
 					a.setRunState(&run, "recovering", result)
 					run.addEvent("tool_error", "Unadvertised tool call returned to model for recovery", result)
 				}
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": result,
 				})
 				continue
@@ -3853,7 +4420,7 @@ agentLoop:
 			if timeout := resolvedToolTimeout(cfg.Tools, tc); timeout > 0 {
 				toolCallPayload["timeout"] = strconv.Itoa(timeout)
 			}
-			a.emit("mauler:tool_call", toolCallPayload)
+			a.emitRun(&run, "mauler:tool_call", toolCallPayload)
 
 			tool, isKnown := a.registry.Get(tc.Function.Name)
 			if !cfg.Tools.Enabled || !toolEnabled(settings.EffectiveEnabledTools(cfg.Tools), tc.Function.Name) {
@@ -3869,7 +4436,7 @@ agentLoop:
 					a.setRunState(&run, decision.RunState, result)
 					run.addEvent("tool_error", decision.EventMessage, result)
 				}
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": result,
 				})
 				continue
@@ -3880,7 +4447,7 @@ agentLoop:
 				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "blocked", 0)
 				a.setRunState(&run, "blocked", result)
 				run.addEvent("policy_block", "Agent action-level policy blocked tool call", result)
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": result,
 				})
 				continue
@@ -3891,7 +4458,7 @@ agentLoop:
 				toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, result))
 				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "blocked", 0)
 				a.setRunState(&run, "planning", controlBlock)
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": result,
 				})
 				continue
@@ -3905,7 +4472,7 @@ agentLoop:
 					a.setRunState(&run, "blocked", result)
 					continue
 				}
-				confirmed := a.awaitConfirm(ctx, tc)
+				confirmed := a.awaitConfirm(ctx, &run, tc)
 				if err := a.leaveControlApproval(&run, confirmed, tc.Function.Name); err != nil {
 					confirmed = false
 					run.addEvent("control_transition_denied", "Could not leave approval state", err.Error())
@@ -3917,7 +4484,7 @@ agentLoop:
 					run.stop("tool_denied", fmt.Sprintf("%s was denied by the user.", tc.Function.Name))
 					a.setRunState(&run, "blocked", tc.Function.Name+" was denied by the user.")
 					run.addEvent("denied", "Tool confirmation denied", tc.Function.Name)
-					a.emit("mauler:tool_result", map[string]string{
+					a.emitRun(&run, "mauler:tool_result", map[string]string{
 						"id": tc.ID, "name": tc.Function.Name, "result": result,
 					})
 					continue
@@ -3934,7 +4501,7 @@ agentLoop:
 				if requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) && isBlockingStopReason(stopReason) {
 					docRecoveryRequested = true
 				}
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": blocked,
 				})
 				continue
@@ -3944,7 +4511,7 @@ agentLoop:
 				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(decision.Message), decision.ToolStatus, 0)
 				a.setRunState(&run, decision.RunState, decision.Message)
 				run.addEvent("tool_skip", decision.EventMessage, decision.Message)
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": decision.Message,
 				})
 				continue
@@ -3961,7 +4528,7 @@ agentLoop:
 					eventKind = "blocked"
 				}
 				run.addEvent(eventKind, decision.EventMessage, decision.Message)
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": decision.Message,
 				})
 				continue
@@ -3971,7 +4538,7 @@ agentLoop:
 				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(cached), "skipped", 0)
 				a.setRunState(&run, "recovering", cached)
 				run.addEvent("tool_skip", "Skipped repeated empty glob", cached)
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": cached,
 				})
 				continue
@@ -3990,7 +4557,7 @@ agentLoop:
 				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(cached), status, 0)
 				a.setRunState(&run, "recovering", cached)
 				run.addEvent(eventKind, eventMessage, fmt.Sprintf("%s: %s", tc.Function.Name, truncateLine(cached, 240)))
-				a.emit("mauler:tool_result", map[string]string{
+				a.emitRun(&run, "mauler:tool_result", map[string]string{
 					"id": tc.ID, "name": tc.Function.Name, "result": cached,
 				})
 				continue
@@ -4007,7 +4574,7 @@ agentLoop:
 					run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), "routed", 0)
 					a.setRunState(&run, "recovering", result)
 					run.addEvent("tool_state_machine", "Shell call routed before execution", result)
-					a.emit("mauler:tool_result", map[string]string{
+					a.emitRun(&run, "mauler:tool_result", map[string]string{
 						"id": tc.ID, "name": tc.Function.Name, "result": result,
 					})
 					continue
@@ -4030,15 +4597,22 @@ agentLoop:
 			var result string
 			var runErr error
 			sharedFallback := ""
+			toolCtx := withRunEventOwner(
+				withToolExecutionContext(withEngagementClaimant(ctx, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.ClaimantAlias, mode.Name)), tc.ID),
+				&run,
+			)
+			toolCtx = withRunControlContext(toolCtx, &run)
+			toolCtx = a.browserToolContextForRun(toolCtx, &run, tc)
 			if shouldUseSharedTerminal(cfg.Tools, tc.Function.Name) && !scanCallPrefersIsolated(tc) && !shellCallPrefersIsolatedBackend(tc) {
 				result, runErr = a.runSharedTerminalShell(ctx, tc.Function.Name, tc.Function.Arguments, cfg.Tools.BashTimeout)
 				if errors.Is(runErr, errSharedTerminalUnsupported) || errors.Is(runErr, errSharedTerminalBusy) {
 					sharedFallback = sharedTerminalFallbackNote(runErr, a.GetSharedTerminalState())
-					result, runErr = a.registry.Run(withToolExecutionContext(withEngagementClaimant(ctx, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.ClaimantAlias, mode.Name)), tc.ID), tc)
+					result, runErr = a.registry.Run(toolCtx, tc)
 				}
 			} else {
-				result, runErr = a.registry.Run(withToolExecutionContext(withEngagementClaimant(ctx, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.ClaimantAlias, mode.Name)), tc.ID), tc)
+				result, runErr = a.registry.Run(toolCtx, tc)
 			}
+			a.completeBrowserHandoff(&run, tc, runErr)
 			if sharedFallback != "" {
 				result = sharedFallback + result
 			}
@@ -4095,8 +4669,12 @@ agentLoop:
 			a.recordCategorizedToolLedger(run.ID, tc, status, result, toolDurMs)
 			if status == "done" {
 				a.recordPinnedEvidenceLedger(run.ID, tc, result)
+				if strings.Contains(result, "[browser_download_evidence]") {
+					run.addEvent("browser_artifact", "Browser download recorded with SHA-256 evidence", truncateLine(result, 600))
+					a.emitRun(&run, "mauler:workspace_files_changed", cfg.Context.WorkspaceDir)
+				}
 			}
-			a.emit("mauler:tool_result", map[string]string{
+			a.emitRun(&run, "mauler:tool_result", map[string]string{
 				"id": tc.ID, "name": tc.Function.Name, "result": result,
 			})
 		}
@@ -4118,13 +4696,13 @@ agentLoop:
 }
 
 // awaitConfirm blocks until the user responds or context is cancelled.
-func (a *App) awaitConfirm(ctx context.Context, tc llm.ToolCallDef) bool {
+func (a *App) awaitConfirm(ctx context.Context, run *TaskRun, tc llm.ToolCallDef) bool {
 	ch := make(chan bool, 1)
 	a.mu.Lock()
 	a.confirmCh = ch
 	a.mu.Unlock()
 
-	a.emit("mauler:confirm", map[string]string{
+	a.emitRun(run, "mauler:confirm", map[string]string{
 		"id":    tc.ID,
 		"name":  tc.Function.Name,
 		"input": string(tc.Function.Arguments),
@@ -4253,6 +4831,11 @@ func shouldRequestRecoveryReport(run TaskRun, alreadyRequested bool) bool {
 }
 
 func recoveryReportPrompt(run TaskRun) string {
+	if readOnlyRecoveryEvidenceReady(run) {
+		return strings.TrimSpace(`Answer handoff mode. Do not call tools. The loop guard stopped redundant work after useful read-only evidence had already been gathered.
+
+Answer the user's original request directly from the evidence already present. Do not lead with "What failed" and do not frame the whole result as a failure. Clearly distinguish observed findings from uncertain scanner claims or hypotheses. Prefer a concise Findings section, then Caveats and Recommended next steps only when they add value. Do not expose internal loop scores, counters, raw tool arguments, or long tool output.`)
+	}
 	var sb strings.Builder
 	sb.WriteString("Recovery mode. Do not call tools. The run hit a blocking tool/problem state, and you have one final text-only turn.\n\n")
 	fmt.Fprintf(&sb, "Stop reason: %s\n", firstNonEmpty(run.StopReason, "unknown"))
@@ -4409,7 +4992,7 @@ func (a *App) ensureRequestContextRoom(ctx context.Context, client llm.Client, p
 	afterTokens := a.history.TokenCount()
 	a.mu.Unlock()
 	if summary != "" && a.ctx != nil {
-		a.emit("mauler:compact", summary)
+		a.emitRun(run, "mauler:compact", summary)
 	}
 	if summary != "" {
 		a.rememberCompactionSummary(summary)
@@ -4429,7 +5012,7 @@ func (a *App) ensureRequestContextRoom(ctx context.Context, client llm.Client, p
 }
 
 // doCompact summarises old history.
-func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings.Profile) *compactionResult {
+func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings.Profile, run *TaskRun) *compactionResult {
 	a.mu.Lock()
 	msgs := a.history.Messages()
 	beforeTokens := a.history.TokenCount()
@@ -4479,7 +5062,7 @@ func (a *App) doCompact(ctx context.Context, client llm.Client, profile settings
 	afterTokens := a.history.TokenCount()
 	a.mu.Unlock()
 	if a.ctx != nil {
-		a.emit("mauler:compact", summary)
+		a.emitRun(run, "mauler:compact", summary)
 	}
 	a.rememberCompactionSummary(summary)
 	result := &compactionResult{
@@ -4801,7 +5384,7 @@ func (a *App) setRunState(run *TaskRun, state, detail string) {
 	if run.State == prev && strings.TrimSpace(detail) == "" {
 		return
 	}
-	a.emit("mauler:run_state", map[string]string{
+	a.emitRun(run, "mauler:run_state", map[string]string{
 		"id":     run.ID,
 		"state":  run.State,
 		"detail": strings.TrimSpace(detail),
@@ -5136,6 +5719,12 @@ var skipRecoveryRules = []skipRecoveryRule{
 		state:    "recovering",
 		event:    "Duplicate fetch_url skipped",
 		evaluate: duplicateFetchURLSkip,
+	},
+	{
+		status:   "skipped",
+		state:    "recovering",
+		event:    "Blocked browser host reopen skipped",
+		evaluate: duplicateBlockedBrowserOpenSkip,
 	},
 	{
 		status:   "skipped",
@@ -9466,16 +10055,28 @@ func toSessionChatMessages(msgs []llm.Message) []SessionChatMessage {
 		if role == llm.RoleSystem && len(out) == 0 {
 			continue
 		}
-		if role == llm.RoleTool {
-			role = "tool_result"
-		}
 		content, attachments := sessionMessageDisplay(msg)
-		out = append(out, SessionChatMessage{
-			Role:        role,
-			Content:     content,
-			Images:      messageImages(msg),
-			Attachments: attachments,
-		})
+		if role == llm.RoleTool {
+			out = append(out, SessionChatMessage{
+				Role: "tool_result", Content: content,
+				ToolName: msg.Name, ToolCallID: msg.ToolCallID,
+			})
+			continue
+		}
+		if strings.TrimSpace(content) != "" || role == llm.RoleUser || len(attachments) > 0 {
+			out = append(out, SessionChatMessage{
+				Role: role, Content: content, Thinking: msg.ReasoningContent,
+				Images: messageImages(msg), Attachments: attachments,
+			})
+		}
+		if role == llm.RoleAssistant {
+			for _, call := range msg.ToolCalls {
+				out = append(out, SessionChatMessage{
+					Role: "tool_call", Content: string(call.Function.Arguments),
+					ToolName: call.Function.Name, ToolCallID: call.ID,
+				})
+			}
+		}
 	}
 	return out
 }
@@ -9976,6 +10577,7 @@ func buildOpsModePrompt(cfg settings.Settings) string {
 		sb.WriteString("Ops profile: Pentesting. Assist authorised attack/testing and evidence capture only. Track assets, services, suspected vulnerabilities, requests/responses, PoC verification, screenshots, impact notes, and report-ready evidence. Do not perform remediation, patching, hardening, or client-system fixes unless the user explicitly changes the task. Do not frame objectives as user/root flags. ")
 	}
 	sb.WriteString(buildEvidencePolicyPrompt(cfg))
+	sb.WriteString("Out-of-band validation: an HTTP response or accepted request proves request acceptance only. Do not call XXE, SSRF, DNS/HTTP callbacks, or similar blind interactions confirmed, fired successfully, or validated unless an observed callback event from the configured listener/provider is captured as evidence. If callback evidence is unavailable, report the request as sent and tell the operator exactly what remains to check. ")
 	sb.WriteString("Ops mode: treat prior run memories, old writeups, CVE names, and public PoCs as hypotheses until live target evidence confirms them. First reconcile the requested target IP/hostname with the writeup and /etc/hosts, then verify services and versions from the target. Do not choose an exploit only because a memory or old note mentions it, and do not write or paste a large public exploit before a small proof check shows the endpoint and parameters match this host. ")
 	sb.WriteString("Ops mode: when a CVE, public exploit, or named product vulnerability is central and web research is allowed, do one fresh current-source pass before committing: search current year/date plus product/version/CVE, fetch a primary/high-quality source, and compare publication/update dates against target version. If web tools are unavailable, state that the exploit choice is based only on local evidence/memory. ")
 	if masterSkillRegistryHint() != "" {
@@ -10120,7 +10722,7 @@ func formatEnabledToolSummary(cfg settings.ToolsConfig) string {
 	if len(groups) == 0 {
 		return "No usable tools are enabled for this run; answer directly and say what permission is needed if implementation is required. "
 	}
-	return fmt.Sprintf("Enabled tools for this run let you %s. If the user asks you to implement, patch, write, edit, or run something and those tools are enabled, use a tool call instead of telling the user to copy/paste code. ", strings.Join(groups, ", "))
+	return fmt.Sprintf("Configured tool capabilities can let you %s. The fresh execution-state packet lists the narrower tools actually available to each model turn and is authoritative. If the user asks you to implement, patch, write, edit, or run something and the matching tool is available, use that tool instead of telling the user to copy/paste code. ", strings.Join(groups, ", "))
 }
 
 func buildEnvironmentRoutingPrompt(cfg settings.Settings) string {
@@ -12148,6 +12750,14 @@ func looksConversational(text string) bool {
 		return false
 	}
 
+	// A request to compose a command is still an answer-shaped Chat turn. The
+	// command may mention a target, exploit, payload, or callback URL without
+	// authorising Mauler to execute it. Explicit run/test/validate wording is
+	// rejected by promptClearlyRequestsCommandOutput and retains the agent lane.
+	if promptClearlyRequestsCommandOutput(lower) {
+		return true
+	}
+
 	// These strongly indicate a task that needs tools; bail out immediately.
 	taskPhrases := []string{
 		"write ", "create ", "make ", "build ", "implement ", "add ",
@@ -12211,7 +12821,7 @@ func looksConversational(text string) bool {
 // toolChoiceFor returns the tool_choice value to send with the next request.
 //
 //   - "none"  → conversational question on the FIRST turn where no tools have
-//     yet been called; tool definitions are still sent for KV-cache efficiency.
+//     yet been called; tool definitions are omitted for a lean direct answer.
 //   - "auto"  → model decides (default during any task turn or after tool use).
 //
 // Normal mid-task turns stay "auto". The agent loop can still apply a one-shot
@@ -12246,6 +12856,78 @@ func toolChoiceFor(firstUserText string, autoContinues int, totalToolCallsMade i
 		return "required"
 	}
 	return "auto"
+}
+
+const directAnswerMaxTokens = 2048
+
+// isDirectAnswerTurn identifies the lightweight lane inside normal Chat. It is
+// deliberately derived from the authoritative tool route: anything needing
+// workspace, browser, shell, live-data, or pentest action receives auto/required
+// and therefore keeps the full agent loop.
+func isDirectAnswerTurn(firstUserText, toolChoice string, totalToolCallsMade int) bool {
+	if totalToolCallsMade != 0 || !strings.EqualFold(strings.TrimSpace(toolChoice), "none") {
+		return false
+	}
+	return explicitlyForbidsToolUse(firstUserText) || looksConversational(firstUserText)
+}
+
+func applyConversationModeRouting(mode string, toolDefs []llm.ToolDef, toolChoice string) ([]llm.ToolDef, string, bool) {
+	if normalizeConversationMode(mode) != conversationModeDirect {
+		return toolDefs, toolChoice, false
+	}
+	changed := len(toolDefs) > 0 || !strings.EqualFold(strings.TrimSpace(toolChoice), "none")
+	return nil, "none", changed
+}
+
+func directAnswerTurnForMode(mode, firstUserText, toolChoice string, totalToolCallsMade int) bool {
+	switch normalizeConversationMode(mode) {
+	case conversationModeDirect:
+		return totalToolCallsMade == 0 && strings.EqualFold(strings.TrimSpace(toolChoice), "none")
+	case conversationModeAgent:
+		return false
+	default:
+		return isDirectAnswerTurn(firstUserText, toolChoice, totalToolCallsMade)
+	}
+}
+
+func directAnswerAcceptedForMode(mode, text string) bool {
+	if normalizeConversationMode(mode) == conversationModeDirect {
+		return strings.TrimSpace(stripVisibleThinkTags(text)) != ""
+	}
+	return directAnswerLooksComplete(text)
+}
+
+func directModeCannotCompleteTask(firstUserText string) bool {
+	if explicitlyForbidsToolUse(firstUserText) {
+		return false
+	}
+	return toolChoiceFor(firstUserText, 0, 0) != "none"
+}
+
+func applyDirectAnswerResponseBudget(req *llm.Request, direct bool) bool {
+	if req == nil || !direct {
+		return false
+	}
+	if req.MaxTokens <= 0 || req.MaxTokens > directAnswerMaxTokens {
+		req.MaxTokens = directAnswerMaxTokens
+		return true
+	}
+	return false
+}
+
+func directAnswerLooksComplete(text string) bool {
+	text = strings.TrimSpace(stripVisibleThinkTags(text))
+	if text == "" {
+		return false
+	}
+	if strings.HasSuffix(text, "...") || strings.HasSuffix(text, ":") {
+		return false
+	}
+	if looksFinished(text) {
+		return true
+	}
+	last := text[len(text)-1]
+	return last == '.' || last == '!' || last == '?' || strings.HasSuffix(text, "```")
 }
 
 func needsLiveSystemInfoTool(text string) bool {
@@ -12351,6 +13033,9 @@ func toolDefsAndChoiceForTurn(registry *tools.Registry, cfg settings.ToolsConfig
 }
 
 func shouldHideHostResearchTools(cfg settings.ToolsConfig, firstUserText string) bool {
+	if usesSelectedToolRouting(cfg) {
+		return false
+	}
 	if !looksShellCentricTask(firstUserText) || explicitWebResearchIntent(firstUserText) {
 		return false
 	}

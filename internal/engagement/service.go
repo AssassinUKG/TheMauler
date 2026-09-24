@@ -122,7 +122,12 @@ func (s *Service) Get(ctx context.Context, id string) (Record, error) {
 	if s == nil || s.store == nil {
 		return Record{}, fmt.Errorf("engagement service is not configured")
 	}
-	return s.store.Load(ctx, id)
+	record, err := s.store.Load(ctx, id)
+	if err != nil {
+		return Record{}, err
+	}
+	record.EvidenceFreshness = evaluateEvidenceFreshness(record)
+	return record, nil
 }
 
 func (s *Service) List(ctx context.Context, workspace string) ([]Summary, error) {
@@ -309,6 +314,7 @@ func (s *Service) AddEvidence(ctx context.Context, input EvidenceInput, now time
 		payload := firstNonEmptyEngagement(event.Output, event.Detail, event.Input, event.Message)
 		sum := sha256.Sum256([]byte(payload))
 		evidence.SHA256, evidence.Size = hex.EncodeToString(sum[:]), int64(len(payload))
+		evidence.FingerprintKind = FingerprintLedgerPayloadSHA256
 		evidence.AgentComposed = ledgerEventAgentComposed(event)
 		evidence.SourceKind = evidenceKindForEvent(event)
 		if evidence.Path == "" {
@@ -321,6 +327,7 @@ func (s *Service) AddEvidence(ctx context.Context, input EvidenceInput, now time
 			return Evidence{}, pathErr
 		}
 		evidence.Path, evidence.Size, evidence.SHA256 = relative, size, digest
+		evidence.FingerprintKind = FingerprintFileSHA256
 		matched, found := s.findLedgerEventForPath(path)
 		if found {
 			evidence.LedgerEventID = matched.ID
@@ -382,6 +389,13 @@ func (s *Service) ConfirmFinding(ctx context.Context, engagementID, findingID, c
 	if err != nil {
 		return Finding{}, err
 	}
+	finding := record.State.Findings[strings.TrimSpace(findingID)]
+	if finding == nil {
+		return Finding{}, fmt.Errorf("unknown finding %q", findingID)
+	}
+	if err := ensureFindingEvidenceFresh(record, finding); err != nil {
+		return Finding{}, err
+	}
 	expected := record.State.Revision
 	confirmed, err := record.State.ConfirmFinding(record.Workflow, findingID, claimantID, expectedRevision, operatorWaiver, allowWaiver, now)
 	if err != nil {
@@ -394,6 +408,72 @@ func (s *Service) ConfirmFinding(ctx context.Context, engagementID, findingID, c
 		"finding_id": confirmed.ID, "severity": confirmed.Severity, "operator_waiver": fmt.Sprintf("%t", confirmed.OperatorWaiver != ""),
 	})
 	return confirmed, nil
+}
+
+func evaluateEvidenceFreshness(record Record) map[string]EvidenceFreshness {
+	result := make(map[string]EvidenceFreshness)
+	if record.State == nil {
+		return result
+	}
+	for id, evidence := range record.State.Evidence {
+		if evidence == nil {
+			continue
+		}
+		result[id] = evaluateOneEvidenceFreshness(record.Workspace, evidence)
+	}
+	return result
+}
+
+func evaluateOneEvidenceFreshness(workspace string, evidence *Evidence) EvidenceFreshness {
+	if evidence == nil {
+		return EvidenceFreshness{State: EvidenceUnverifiable, Detail: "evidence record is missing"}
+	}
+	kind := strings.TrimSpace(evidence.FingerprintKind)
+	if kind == FingerprintLedgerPayloadSHA256 || (kind == "" && evidence.LedgerEventID != "" && filepath.IsAbs(evidence.Path)) {
+		return EvidenceFreshness{State: EvidenceImmutable, Detail: "RunLedger payload fingerprint is immutable"}
+	}
+	if strings.TrimSpace(evidence.Path) == "" {
+		if evidence.LedgerEventID != "" && evidence.SHA256 != "" {
+			return EvidenceFreshness{State: EvidenceImmutable, Detail: "RunLedger payload fingerprint is immutable"}
+		}
+		return EvidenceFreshness{State: EvidenceUnverifiable, Detail: "no file path is attached to this fingerprint"}
+	}
+	if strings.TrimSpace(evidence.SHA256) == "" {
+		return EvidenceFreshness{State: EvidenceUnverifiable, Detail: "stored SHA-256 fingerprint is missing"}
+	}
+	_, _, size, digest, err := hashWorkspaceEvidence(workspace, evidence.Path)
+	if err != nil {
+		return EvidenceFreshness{State: EvidenceStale, Detail: err.Error()}
+	}
+	current := EvidenceFreshness{CurrentSHA256: digest, CurrentSize: size}
+	if !strings.EqualFold(digest, evidence.SHA256) || size != evidence.Size {
+		current.State = EvidenceStale
+		current.Detail = "file bytes changed after evidence was attached"
+		return current
+	}
+	current.State = EvidenceFresh
+	current.Detail = "file fingerprint matches the attached evidence"
+	return current
+}
+
+func ensureFindingEvidenceFresh(record Record, finding *Finding) error {
+	if finding == nil {
+		return fmt.Errorf("finding is required")
+	}
+	freshness := record.EvidenceFreshness
+	if freshness == nil {
+		freshness = evaluateEvidenceFreshness(record)
+	}
+	for _, evidenceID := range finding.EvidenceIDs {
+		status, ok := freshness[evidenceID]
+		if !ok {
+			return fmt.Errorf("finding %q references missing evidence %q", finding.ID, evidenceID)
+		}
+		if status.State == EvidenceStale || status.State == EvidenceUnverifiable {
+			return fmt.Errorf("finding %q cannot be confirmed: evidence %q is %s (%s); attach fresh evidence for the current artifact bytes", finding.ID, evidenceID, status.State, status.Detail)
+		}
+	}
+	return nil
 }
 
 func (s *Service) findLedgerEvent(id string) (ledger.Event, error) {

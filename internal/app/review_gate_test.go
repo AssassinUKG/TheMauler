@@ -101,3 +101,53 @@ func TestAnswerAndExplicitWorkspaceChangeStillMutates(t *testing.T) {
 		}
 	}
 }
+
+func TestArtifactPlacementLanguageRequestsWorkspaceMutation(t *testing.T) {
+	for _, prompt := range []string{
+		"Can you go online and get me the PoC? Leave it in the directory.",
+		"Try to write the PoC now in the directory; you should be able to now.",
+		"Fetch the public checker and put it in this folder.",
+		"Find the script and save it in the workspace.",
+	} {
+		if !promptExplicitlyRequestsMutation(strings.ToLower(prompt)) || promptLooksReadOnly(prompt) {
+			t.Fatalf("artifact placement was not classified as mutation: %q", prompt)
+		}
+	}
+}
+
+func TestArtifactChatOnlyLanguageStaysReadOnly(t *testing.T) {
+	for _, prompt := range []string{
+		"Show me the PoC in chat; do not save it.",
+		"Paste the script in the chat so I can review it.",
+	} {
+		if promptExplicitlyRequestsMutation(strings.ToLower(prompt)) {
+			t.Fatalf("chat-only artifact request was classified as workspace mutation: %q", prompt)
+		}
+	}
+}
+
+func TestCommandOutputLanguageDoesNotAuthoriseExecution(t *testing.T) {
+	for _, prompt := range []string{
+		"Can you give me the curl command for this PoC and use this callback URL callback.example?",
+		"Show me a PowerShell one-liner for the check.",
+		"Provide the HTTP request in chat so I can review it.",
+	} {
+		if !promptClearlyRequestsCommandOutput(prompt) || !promptLooksReadOnly(prompt) {
+			t.Fatalf("command composition did not stay read-only: %q", prompt)
+		}
+	}
+}
+
+func TestExplicitCommandExecutionDoesNotUseAnswerOnlyRoute(t *testing.T) {
+	for _, prompt := range []string{
+		"Run this curl command against the authorised target.",
+		"Can you run the curl command against the authorised target?",
+		"Give me the curl command and then run it.",
+		"Create the HTTP request, validate it, and report the response.",
+		"Write the curl command into a workspace file.",
+	} {
+		if promptClearlyRequestsCommandOutput(prompt) {
+			t.Fatalf("explicit execution was classified as command composition: %q", prompt)
+		}
+	}
+}

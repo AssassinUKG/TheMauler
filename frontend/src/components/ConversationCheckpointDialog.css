@@ -1,0 +1,64 @@
+.conversation-checkpoint-overlay { z-index: 240; }
+
+.conversation-checkpoint-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 40px));
+  display: grid;
+  grid-template-rows: auto auto minmax(120px, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: var(--c-panel);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .58);
+}
+
+.conversation-checkpoint-dialog > header,
+.conversation-checkpoint-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--border);
+}
+
+.conversation-checkpoint-dialog > header > div { display: grid; gap: 3px; }
+.conversation-checkpoint-dialog > header span { color: var(--accent); font-size: 8px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.conversation-checkpoint-dialog > header strong { color: var(--text-bright); font-size: 16px; }
+.conversation-checkpoint-dialog > header button { width: 30px; height: 30px; padding: 0; }
+
+.conversation-checkpoint-create { display: grid; gap: 9px; padding: 14px 15px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 4%, var(--bg2)); }
+.conversation-checkpoint-create > div:first-child { display: grid; gap: 3px; }
+.conversation-checkpoint-create strong { color: var(--text-bright); font-size: 11px; }
+.conversation-checkpoint-create span,
+.conversation-checkpoint-create small { color: var(--text-muted); font-size: 9px; line-height: 1.45; }
+.conversation-checkpoint-create > div:nth-child(2) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.conversation-checkpoint-create input { min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg1); color: var(--text); }
+.conversation-checkpoint-create input:focus { outline: none; border-color: var(--accent); }
+
+.conversation-checkpoint-list { min-height: 0; display: grid; gap: 14px; overflow-y: auto; padding: 14px 15px; }
+.conversation-checkpoint-list > section { display: grid; gap: 7px; }
+.conversation-checkpoint-section-title { display: flex; align-items: center; justify-content: space-between; color: var(--text-dim); }
+.conversation-checkpoint-section-title strong { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.conversation-checkpoint-section-title span { min-width: 22px; padding: 2px 6px; border-radius: 999px; background: var(--bg3); color: var(--text-muted); font: 8px var(--font-mono); text-align: center; }
+.conversation-checkpoint-list > section > p { margin: 0; padding: 15px; border: 1px dashed var(--border); border-radius: 9px; color: var(--text-muted); font-size: 10px; text-align: center; }
+.conversation-checkpoint-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); }
+.conversation-checkpoint-list article > div:first-child { min-width: 0; display: grid; gap: 4px; }
+.conversation-checkpoint-list article strong,
+.conversation-checkpoint-list article span,
+.conversation-checkpoint-list article p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-checkpoint-list article strong { color: var(--text-bright); font-size: 11px; }
+.conversation-checkpoint-list article span { color: var(--text-muted); font: 8px var(--font-mono); }
+.conversation-checkpoint-list article p { margin: 0; color: var(--text-dim); font-size: 10px; }
+.conversation-checkpoint-list article > div:last-child { display: flex; gap: 6px; }
+.conversation-checkpoint-list article button { min-height: 31px; }
+.conversation-checkpoint-list article button.danger { color: #fca5a5; }
+
+.conversation-checkpoint-dialog > footer { border-top: 1px solid var(--border); border-bottom: 0; }
+.conversation-checkpoint-dialog > footer span { color: var(--text-muted); font-size: 9px; line-height: 1.4; }
+
+@media (max-width: 640px) {
+  .conversation-checkpoint-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .conversation-checkpoint-list article { grid-template-columns: 1fr; }
+  .conversation-checkpoint-list article > div:last-child { justify-content: flex-end; }
+}

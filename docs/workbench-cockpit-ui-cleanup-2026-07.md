@@ -52,9 +52,16 @@ The screenshot-driven continuation and implementation order for remaining polish
 - C1 done: Group consecutive similar AI Commands and make errors loud. Files: `frontend/src/components/TerminalPane.tsx`, `frontend/src/components/TerminalPane.css`.
 - C2 done: Create one authoritative status strip for profile, run state, context, target, VPN, shell, and workspace. Files: `frontend/src/components/StatusBar.tsx`, `frontend/src/App.tsx`, `frontend/src/components/ChatPane.tsx`, `frontend/src/components/RightInspector.tsx`.
 - C3 first pass done: Live runs auto-open and enlarge the bottom panel without switching away from the user's selected Terminal/Stream/Jobs tab. Continue later with a full focus-run layout if visual testing shows it is still cramped.
-- C4: Apply the three-tier type scale and contrast cleanup. Files: `frontend/src/index.css`, component CSS files.
+- C4 second pass done: primary navigation and title-bar context now use a clear label/detail
+  hierarchy, active destinations and sessions have a strong accent edge, and narrow windows shed
+  secondary title context before crowding daily controls. Continue typography cleanup only on
+  screenshot-proven dense pages. Files: `frontend/src/App.css`,
+  `frontend/src/components/HermesSidebar.css`.
 - C5 done: Promote target/VPN/shell identity into the inspector/status hierarchy. Files: `frontend/src/components/RightInspector.tsx`, `frontend/src/components/StatusBar.tsx`.
-- C6 first pass done: Profile no longer duplicates in the sidebar, Doctor opens the correct panel, session controls are grouped, and composer `Stop`/`Send` positions are stable. Continue later with iconography/compact topbar treatment if needed.
+- C6 second pass done: Profile no longer duplicates in the sidebar, Doctor opens the correct panel,
+  session controls are grouped, composer `Stop`/`Send` positions are stable, primary navigation uses
+  icon-and-label controls rather than ambiguous repeated text, and the title bar names the active
+  page plus current run/profile state.
 - C8 done: Doctor is a first-class center page/tab with its own run button, score cards, grouped check list, and persisted in-tab result while browsing the workbench. The topbar Doctor action opens/runs this page directly instead of hiding results inside Agent settings.
 - C7 done: Neutralize the bottom context bar and reserve saturated green for success states. Files: `frontend/src/components/StatusBar.css`.
 - C9 done: Restore first-class workbench resizing. Terminal and AI Commands now have a visible,

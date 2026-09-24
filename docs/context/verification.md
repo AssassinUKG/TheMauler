@@ -32,6 +32,7 @@ exercise WSL/relay portability rather than being replaced with a Windows-only ru
 - Manifest routing/security: `go test ./internal/app -run 'ManifestContext|ActiveManifest|InvalidManifest|ManifestRejects' -count=1`
 - Context Inspector/pinning: `go test ./internal/app -run 'ContextInspector|ContextPacketPin|MessagesWithPrimary|RepositoryContextDocuments' -count=1`
 - Context M5 deterministic/repeated harness: `go test ./internal/app -run 'ContextQuality|AgentEval|HashToolDefs|ShellRoutingDoesNotTreatKeeping' -count=1`
+- Repository intelligence: `go test -race ./internal/repoindex ./internal/store ./internal/app -run 'Repo|RepositoryIndex|MemoryTool|Store' -count=1`
 
 Run `gofmt` on changed Go files and `git diff --check` on the files in scope. Do not format or revert
 unrelated user work.
@@ -62,6 +63,349 @@ components. It is not green and must not be presented as passing. Frontend produ
 checking is the current gate unless a task explicitly scopes lint cleanup.
 
 ## Latest recorded baseline
+
+- 2026-09-24 repository-intelligence M4 metadata extractors: TAR/TGZ files contribute bounded,
+  deterministic inventories; SQLite contributes read-only schema/object/column metadata; and PE/ELF
+  files contribute structural header, section, and imported-library metadata. Archive member bodies
+  and SQLite row values are deliberately not indexed. Focused fixtures prove deterministic manifests,
+  bounded untrusted chunks, content non-leakage, and explicit corrupt/over-limit non-coverage. The
+  complete repoindex package, `go test ./... -count=1`, `go vet ./...`, required app/tools race tests,
+  frontend production type/build, and `wails build` passed. A 15-second hidden launch with an isolated
+  temporary `MAULER_CONFIG_DIR` stayed alive and left the user's persisted state untouched. Canonical
+  output is `build/bin/TheMauler.exe` (SHA-256
+  `1DD375D53F930D3A86982C9F4518C023A88437148C9A59154FC18AC7D2B93FA0`).
+
+- 2026-09-24 repository-review independent conflict checks: deterministic conflict contracts group
+  draft claims over exact canonical evidence and assign stable code-owned claim IDs. Each conflict
+  runs in a fresh bounded reviewer context with no child reasoning or ambient tools; `review_evidence`
+  exposes only the disputed sealed chunks. The controller strictly validates compatible/prefer/
+  unsupported/inconclusive verdicts, durable restore reconciles legacy pending conflicts, and corrupt
+  claim selections or contract drift fail replay. Brain renders check progress/verdicts with an
+  adjudication-not-proof caveat. Focused conflict/scope/persistence tests, complete repoindex/store/app
+  suites, `go test ./... -count=1`, `go vet ./...`, required app/tools race tests, frontend production
+  type/build, and `wails build` passed. Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `AC9614E0A23B07A02B508171C1BFB615C98764E99A84E84D968EFAC48BE9D21C`). A 15-second hidden startup
+  smoke with an isolated temporary `MAULER_CONFIG_DIR` kept the rebuilt process responsive and left
+  the user's existing instance/database untouched. The Computer Use provider exposed no native app
+  surface, so visual acceptance and a supervised live-model conflict case remain open.
+
+- 2026-09-20 Chat project creation and selected knowledge sources: Workspace can create/register a
+  named project under a native-picked parent and switch through the authoritative clean-context
+  lifecycle, optionally selecting Bug Bounty Hunter. Files can add/remove workspace-scoped,
+  read-only file or folder roots; roots participate in the immutable policy digest and exact files
+  are accepted by the bounded scanner without expanding tool scope. Focused lifecycle/scanner tests,
+  full `go test ./... -count=1`, `go vet ./...`, required app/tools race tests, and the frontend
+  production type/build gate passed. The production Wails build launched responsively in the hidden
+  startup smoke; `build/bin/TheMauler.exe` has SHA-256
+  `3EE3366F70C5C67C2B237A23A02B6CEF96D5310392FCA2799FBB51887A3F6EDA`.
+
+- 2026-09-17 named conversation checkpoint/resume: a shared Chat manager creates reusable named
+  transcript snapshots, distinguishes automatic recovery state, restores a UI-safe transcript with
+  the exact visible continuation turn, and resumes through the existing parent-linked generation
+  path. Named snapshots survive successful resume; create/resume/delete are locked during active
+  runs. Focused checkpoint tests, full `go test ./... -count=1`, `go vet ./...`, the required
+  `go test -race ./internal/app ./internal/tools -count=1`, and the frontend production type/build
+  gate passed. The Wails production build launched responsively as PID 34700 with SHA-256
+  `CBD1D6FF775AF32B0BC31623579C79D72239001AD08AEFDC22E42F23879B2F41`.
+- 2026-09-17 saved-conversation mode navigation: both conversation surfaces filter by Adaptive,
+  Direct, or Agent mode; the title-bar menu identifies the current chat's mode/message count; and
+  each saved row can change mode in place. A dedicated background-update binding prevents changing
+  another saved chat from mutating the active run mode. The focused lifecycle regression, full
+  `go test ./... -count=1`, full `go vet ./...`, frontend production type/build gate, scoped diff
+  check, Wails production build, and responsive rebuilt native launch passed. The launched binary
+  SHA-256 was `2D5B1D2D6541CB51BD6D88F441816847EF3A1291D6035B835FE6D5E39FA945ED`.
+- 2026-09-16 empty-plan render-crash repair: SQLite plan reads initialise an empty non-nil slice,
+  legacy JSON null items normalise to an empty slice, and JSON writes preserve the same array
+  contract. Chat independently normalises Wails results before state/render. The regression asserts
+  that a cleared plan marshals as `[]`; focused todo tests, full Go suite, vet, frontend type/
+  production build, scoped diff check, and Wails production build pass. Canonical output is
+  `build/bin/TheMauler.exe` (SHA-256
+  `8C0CAAFE3ECD755B0AD77B5922ECAA9D54BBBEF89755C1CDECB8C520A29B640F`) and is running responsively as
+  PID 42884.
+
+- 2026-09-16 readable task-menu pass: Plan, Tools, Workspace, Agent, and Run setup now use one
+  icon-led menu hierarchy with larger text/targets, readable status chips, plain-language sections,
+  wrapped plan steps, simplified connected-surface state, and responsive desktop/narrow layouts.
+  Frontend type/production build, scoped handwritten-source diff check, and the Wails production
+  build pass. Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `9EE21944149D1615C49572DC2EE5E370E4A7311762DF13454EF5B87781AC7E73`) and is running responsively as
+  PID 53096. The Computer Use provider exposed browser surfaces only, so native visual acceptance
+  remains for the operator and is not claimed here.
+
+- 2026-09-16 compact task controls/Clear Plan repair: Plan, Tools, Workspace, Agent, and Run setup
+  now form one labelled task bar above the composer; model routing and Supervised/Automatic mode
+  moved into the focused Run setup menu. Clear plan awaits the backend mutation, reports its result,
+  and synchronizes SQLite with the legacy JSON recovery copy so refresh cannot re-import a cleared
+  checklist. The stale-migration regression, focused tools tests, full Go suite, vet, frontend
+  production/type build, scoped handwritten-source diff check, and Wails production build pass.
+  Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `3A8ED74420A0EDC57672491309BBF1743376726877FD48611332ECB559F84F77`) and is running responsively as
+  PID 32728. Native visual acceptance remains for the operator.
+
+- 2026-09-16 persistent conversation tags/current hardening: saved chats accept up to six bounded
+  tags, render compact chips, match title-or-tag search, and expose shared one-click tag filters in
+  the sidebar and title-bar dialog. Edit tags is available for the current chat or any saved row;
+  rename transfers labels and delete clears them. Rename rolls transcript/recall back if tag
+  migration fails, while corrupted optional tag metadata cannot hide or block deletion of real
+  transcripts. Focused tag/summary/lifecycle tests, the full `internal/app`/`internal/sessionstore`
+  suites, package vet, frontend production/type build, generated Wails bindings, handwritten-source
+  diff check, and the Wails production build pass. Canonical output is `build/bin/TheMauler.exe`
+  (SHA-256 `D2E38A1133945EB233F007E2F0B79AB078C75AFB7302FBD3AD6FCAD184FD36E1`). Native visual acceptance
+  remains for the operator.
+
+- 2026-09-16 conversation-library metadata/actions: both saved-chat surfaces now use newest-first
+  backend summaries with last-updated age, streamed message count, and a Review badge for malformed
+  or unreadable transcripts. A shared row menu can Rename, Check/repair, or Delete any saved chat
+  without loading it over the active transcript; all actions retain the existing run guards,
+  confirmations, rollback, and repair flow. Focused summary/lifecycle tests, the full
+  `internal/app`/`internal/sessionstore` suites, package vet, frontend production/type build,
+  generated Wails bindings, handwritten-source diff check, and the Wails production build pass.
+  Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `3A11C2CC9A9A85AF622181EAE05E1A6E4A77B802C9E3F07D6918AF4778C83E58`). Native visual acceptance
+  remains for the operator.
+
+- 2026-09-16 safe conversation rename: the title-bar Conversation menu and chat sidebar now share
+  a guarded Rename action. The backend moves the JSON transcript and SQLite recall identity together,
+  preserves FTS message row IDs, rejects existing-title collisions, supports case-only Windows
+  renames, and rolls the file back if index migration fails. Focused rename/lifecycle tests, the full
+  `internal/sessionstore` and `internal/app` suites, package vet, frontend production/type build,
+  generated Wails bindings, scoped diff check, and the Wails production build pass. Canonical output
+  is `build/bin/TheMauler.exe` (SHA-256
+  `6715D8798410551CEC2EFC82D9CFF082CFBDF7EC985CDCF62F3792B7DA88F70A`). Native visual acceptance
+  remains for the operator.
+
+- 2026-09-16 task-oriented Chat actions: the welcome state now separates workspace review, recorded
+  run continuation, planning, and authorised security work into descriptive launch cards. The
+  composer More menu directly opens Security, repository files, and the native browser without
+  submitting a model message, while Undo/Clear are grouped separately and retain existing guards.
+  Frontend production/type build, scoped diff check, and the Wails production build pass. Canonical
+  output is `build/bin/TheMauler.exe` (SHA-256
+  `1796C4D5CFE8038DF53425B3F62F6DB52483E2B9402F20C191ACA06B6FD057E1`). Native visual acceptance
+  remains for the operator.
+
+- 2026-09-16 Inspector/open-command repair: the Chat Inspector overlay and resize handle now span
+  the full workspace grid instead of inheriting its zero-width docked track, and every open route
+  recovers the persisted width into the supported 360–620 pixel range before mounting. Title-bar
+  panel controls and Chat's Tools/View/Run mode menus now use shared code-native SVG icons and
+  clearer active states. Saved-chat rows also open directly and both conversation navigation
+  surfaces share one guarded lifecycle action component. Frontend production/type build and scoped
+  diff check pass; the clean Wails production build produced `build/bin/TheMauler.exe` (SHA-256
+  `B2548323EFDF0E9B3B1563076F51982751EC8FC2B3FF11A978B1656330AA535A`). Native visual acceptance
+  remains for the operator and is not claimed here.
+
+- 2026-09-15 Chat canvas/work-surface redesign: the Chat route no longer reserves permanent grid
+  space for Inspector or Terminal. Inspector is a resizable floating right drawer; Terminal and AI
+  Commands are a resizable floating bottom drawer with a compact closed AI rail; simultaneous drawers
+  stack instead of overlap. Both close completely, the title bar provides direct Chats/Inspector/
+  Terminal controls, specialist pages preserve the docked IDE layout, and a one-time migration clears
+  stale open-panel state while retaining dimensions. A follow-up gives Terminal a 320-pixel default
+  and 280-pixel viewport-aware floor, narrows the initial AI Commands split, clamps both axes after
+  host-window changes, and debounces PTY resize notification so drag frames cannot repeatedly redraw
+  the shell prompt. Chat's content viewport now follows the live Terminal drawer height, keeping the
+  newest message, context bar, and composer above the drawer throughout opening and resizing. The
+  layout menu now uses task-oriented labels and grouped work-surface/behaviour commands. Chat's
+  former seven-button command strip is consolidated into Tools, View, and Run mode menus with the
+  same Security/index/browser, search/follow/transcript, and Agent/Fast Chat actions. Doctor and
+  Settings are grouped into the More Workbench menu, leaving only immediate surface toggles in the
+  title bar; the menu scrolls on short displays. The conversation sidebar now keeps its Workbench
+  disclosure state instead of snapping shut, dismisses action menus on outside click or Escape,
+  reports saved/filter-match counts, and uses a compact context footer. On Chat viewports at or below
+  900 pixels it overlays the conversation rather than squeezing it, then closes after navigation or
+  conversation selection. Chat's composer now has a model-labelled Thinking & Effort picker backed
+  by the same persisted settings as Inspector: Profile retains adaptive tool-loop recovery, Always
+  think pins preserved reasoning, and Direct is the hard no-thinking path. Qwen3.8 shows only its
+  supported Auto/Low/Medium/XHigh effort choices; its existing thinking/direct samplers match the
+  official model card. The focused app/settings Qwen and reasoning tests pass. Frontend
+  production/type build, full Go suite, scoped diff check, generated Wails bindings, and clean Wails
+  production build pass. `build.ps1 -SkipTests` now detects the optional local module index
+  incorrectly classifying present standard-library packages and scopes `GODEBUG=goindex=0` to the
+  Wails build; the fallback and direct source resolution passed end to end.
+  Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `519560C322AED7325803C1168B723821B5AA81829A9AE90EADFFDA6CA1323422`). Native visual acceptance
+  remains for the operator and is not claimed here.
+
+- 2026-09-16 per-conversation Chat depth: normal Chat now offers persisted Adaptive, Always direct,
+  and Always agent modes. Saved-session metadata follows rename/delete and legacy chats default to
+  Adaptive. Direct removes tool schemas after every recovery-routing branch, forces a single useful
+  text response, and cannot claim an action-shaped request completed; Agent suppresses the adaptive
+  one-answer shortcut. Focused backend persistence/routing tests and the frontend production/type
+  build pass. A follow-up adds readable mode badges to both conversation pickers and a validated,
+  round-tripped Settings > Agents default for new chats; legacy settings migrate to Adaptive and
+  clearing a chat restores the configured default without rewriting existing saved-chat choices.
+
+- 2026-09-15 repository-intelligence first production slice: M0 deterministic fixtures/benchmark,
+  streaming UTF-8/UTF-16 text/code chunking, explicit omission states, immutable SQLite v17 FTS5
+  generations, and cancellation-safe active replacement are implemented. The compact `memory` tool
+  exposes current-workspace index/status/search with bounded untrusted hash-cited excerpts and
+  metadata-only RunLedger events. Chat's first-class **Files** card exposes index/rebuild, exact
+  coverage, provenance and omission review. The follow-up lifecycle slice adds live metadata-only
+  file/chunk progress, responsive cancellation, workspace/shutdown ownership, and Doctor/Services
+  health reporting; a mid-scan cancellation regression proves the previous complete generation stays
+  active. Focused repoindex/app tests, the complete Go suite, vet, the app/tools/repoindex/store race
+  gate, generated Wails bindings, and the frontend production/type gate and Wails production build
+  pass. Canonical output is
+  `build/bin/TheMauler.exe` (SHA-256
+  `B9C9D1CA0A10748B09F14DA312B613419B803FF40E8C88036EACED95FB6EC230`). The native visual
+  smoke remains open because the verification environment exposed no controllable native-app
+  surface; it is not claimed here.
+
+- 2026-09-20 repository-intelligence M4 first rich-format slice: readable PDFs and
+  DOCX/PPTX/XLSX/ODS text now enter immutable bounded chunks; ZIP contributes sorted inventory
+  metadata without expanding member bodies. Code-owned expanded-byte, archive-entry and timeout
+  limits produce explicit `expansion_limit`/`extractor_timeout` verdicts, while encrypted, corrupt
+  and scanned/no-text inputs remain non-coverage. Deterministic manifest, no-ZIP-expansion and
+  SQLite/FTS evidence tests pass. Focused app/repoindex tests, `go test ./... -count=1`,
+  `go vet ./...`, app/tools/repoindex race tests, frontend type/production build, Wails production
+  build and a bounded hidden startup smoke pass. Canonical output is `build/bin/TheMauler.exe`
+  (SHA-256 `635CAB9362B64397AFED7E1CB69213DAC9A22E084F37D7077689EF289AB68C7F`).
+
+- 2026-09-21 repository incremental refresh/watch: replacement generations now stream SHA-256 for
+  every reusable indexed file, copy prior chunks only on an exact manifest hash match, re-extract
+  changed/new content, and account for deletions before atomically moving the active pointer. Chat's
+  Files card exposes manual **Refresh changes**, persisted per-workspace Watch, watcher state and
+  last-check time, plus reused/changed/deleted totals. Focused tests cover unchanged reuse,
+  same-size/same-mtime content replacement, deletion, prior-generation readability, metadata change
+  detection, and a live app watcher that activates an incremental generation after a file appears.
+  Focused tests, `go test ./... -count=1`, `go vet ./...`, the app/tools race gate, frontend
+  type/production build, generated Wails bindings, clean Wails production build, and a 15-second
+  hidden startup smoke pass. Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `FE4C7E8CA3B62FAA72B053AB0AF1FD58392DCBDF4CE810486A0513D5FDE7A2A3`). Native visual acceptance
+  remains for the operator and is not claimed here.
+
+- 2026-09-23 Brain repository-index operations: the shared backend status now derives one
+  healthy/indexing/not-indexed/attention/unavailable verdict and explanation. Brain shows current
+  workspace/policy/manifest provenance, coverage, chunks/bytes/sources, Watch health, incremental
+  reuse/change/deletion counts, bounded explicit omissions and live progress, and drives the same
+  Refresh/Watch/Rebuild/Cancel bindings as Chat. Cancellation remains available while the original
+  long-running Wails call is pending. Health-classification and watcher integration tests, the full
+  Go suite, vet, app/tools race gate, frontend type/production build, regenerated Wails bindings,
+  clean Wails production build, scoped diff check, and a 15-second hidden startup smoke pass.
+  Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `CA0A79F2CCF0BFC0817BFCDA26344064C37C896D9D9D86DDD2D88AAE4C83D823`). Native visual acceptance
+  remains for the operator and is not claimed here.
+
+- 2026-09-15 lifecycle/artifact ownership closure: the backend conversation epoch now records
+  payload-free stale-event rejection telemetry for Doctor/Services, with a concurrent epoch-rotation
+  regression proving retired owners cannot reopen current event ownership. New task contracts import
+  finalized file fingerprints as immutable boundaries; ordinary file, shell, terminal and Python
+  orchestration mutation paths are blocked, while an explicit Fixer request naming the exact file
+  receives a sealed repair scope and must produce fresh verification evidence. Focused control/run-
+  script/ownership tests, the full Go suite, vet, app/tools race gate, frontend production/type build,
+  generated bindings, scoped diff check, and Wails production build pass. Canonical output is
+  `build/bin/TheMauler.exe`. The native desktop/narrow-width lifecycle race and scoped-repair handoff
+  smokes remain open and are not claimed here.
+
+- 2026-09-18 lifecycle secondary-event/scoped-handoff closure: context-owned image progress and HTTP
+  artifact refresh now pass through the backend epoch boundary; Chat rejects stale task refresh,
+  workspace-file and learning-suggestion events. The integrated Fixer acceptance fixture changes one
+  explicitly scoped finalized artifact, proves an unscoped sibling remains immutable, requires fresh
+  verification, and confirms the replacement handoff uses canonical workspace identity and a new
+  SHA-256. Focused ownership/control-plane tests, `go test ./... -count=1`, `go vet ./...`, the
+  app/tools race gate, frontend production/type build, scoped diff check, generated bindings and the
+  Wails production build pass; a bounded hidden startup smoke kept the rebuilt process responsive.
+  Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `6380421B20FF22E173F62AF965BF7F8A58E5B0A8BFAAAD4AF35D150BEB2110AE`). The Computer Use
+  provider exposed browser surfaces but no callable native-app surface, so the desktop/narrow native
+  click-through smokes remain open and are not claimed.
+
+- 2026-09-14 visible-browser/follow-output repair: the inspected failed run made 19 browser calls,
+  including five repeated inputs and four identical outcomes, because its first compact open omitted
+  visibility and later revisited a Cloudflare-blocked host. Explicit browser-window wording now
+  forces `visible=true`, blocked-host reopens are skipped, Chat can restart a headless session
+  visibly, and persistent Follow/Paused scrolling prevents streaming output stealing the viewport.
+  Tool-bearing assistant prose is retained as Agent updates rather than repeated final replies.
+  Focused browser-policy tests, full Go suite, vet, app/tools race gate, frontend production/type
+  build, scoped diff check, and Wails production build pass. Canonical output remains
+  `build/bin/TheMauler.exe`.
+
+- 2026-09-14 first-class Chat browser control: Chat's primary header now exposes Browser status and
+  opens an in-chat visible-session launcher. The surface reports readiness, current URL/title, tab
+  count, and controller state, and provides Take over, controller-observed Resume, Stop, and refresh
+  without requiring Services. Model-issued handoffs open it automatically; ownership, typed-value
+  secrecy, and conversation cleanup remain code-owned. Frontend production/type build, scoped diff
+  check, and Wails production build pass. Canonical output is `build/bin/TheMauler.exe`.
+  A same-day routing repair makes the active UI session authoritative for model turns: sanitized
+  browser state is injected into the fresh execution packet, direct references to the open page
+  require a browser snapshot, and shell/http probes are reserved for explicit protocol checks.
+  Focused routing/redaction tests and their race gate pass; frontend and Wails production builds
+  pass. The manifest source reader now reserves a fair input share for every selected document, so a
+  growing earlier file cannot silently starve the final route-specific source. The deterministic
+  context gate passes 7/7 fixtures and 105/105 attempts; full Go, vet, and app/tools race gates pass.
+
+- 2026-09-14 conversation-first shell Slice 4: the left panel is now saved-chat history with New,
+  search, current selection, direct open, and a secondary collapsible Workbench. The window heading
+  follows the selected conversation; all reliable run controls live in one collapsed Context drawer;
+  the composer exposes attach, voice, run-only stop, overflow actions, and circular send without
+  removing file ingestion, rollback, model, agent, tool, or autonomy behavior. Closed panels remain
+  zero-width and View/keyboard commands remain authoritative. Frontend type/production build,
+  scoped diff check, and Wails production build pass. Canonical output is
+  `build/bin/TheMauler.exe`.
+  A follow-up native layout defect was fixed by assigning all five workbench children explicit grid
+  columns: hiding the zero-width chat sidebar can no longer auto-place Chat into a splitter column
+  and blank the centre surface. The frontend and Wails production builds pass after the repair, and
+  the rebuilt native process launches responsively.
+
+- 2026-09-14 chat-first panel command/declutter pass: the sidebar duplicate product identity and
+  conversation controls are removed; one View command menu governs Explorer, Inspector, bottom
+  panel tabs, AI Commands, Focus chat, and Default layout. Major panels have local close controls,
+  keyboard toggles remain available, hidden AI Commands do not reopen on tool events, and automatic
+  run-panel opening is opt-in. Frontend production/type build, scoped handwritten diff check, and
+  Wails production build pass; the immediately preceding full Go, vet, and app/tools race gates
+  remain green because this pass changes frontend presentation only.
+
+- 2026-09-14 zero-width/ChatGPT-style follow-up: closed Explorer and Inspector columns and disabled
+  splitters occupy zero pixels by default, while optional edge rails preserve the prior reopen path.
+  Chat now uses a centred reading/composer column, simplified welcome state, prompt starters, and one
+  Details menu for complete/replies and tool/status/browser visibility. Frontend production/type and
+  Wails production builds pass.
+
+- 2026-09-14 chat-first workbench Slice 2: explicit persistent conversation scratch attaches without
+  clearing history, drops inherited target scope, has an advisory seven-day review date, and promotes
+  into a durable workspace without moving/deleting files. The unified Conversation menu provides
+  title search and lifecycle actions; transcript presentation independently filters tools, run
+  milestones, and browser events; contextual Inspector suggestions do not force the panel open.
+  Focused scratch/settings tests, full Go suite, vet, app/tools race gate, frontend production/type
+  build, generated bindings, scoped handwritten diff check, and Wails production build pass.
+  Canonical output remains `build/bin/TheMauler.exe`.
+
+- 2026-09-14 chat-first transcript/UI Slice 1: every valid completed model response is emitted and
+  committed by run/turn identity before later tool/continuation output can replace the live buffer;
+  tool calls/results are typed transcript entries, terminal completion deduplicates the last turn,
+  and saved-session projection retains assistant/tool ordering plus bounded reasoning content.
+  Complete/Replies controls activity visibility without deletion. Chat is now the default entry
+  point and Projects are optional Workspaces. Focused transcript preservation, the 105-attempt
+  deterministic context suite, full Go suite, vet, app/tools race gate, frontend production/type
+  build, generated bindings, and the Wails production build pass. Canonical output is
+  `build/bin/TheMauler.exe`.
+
+- 2026-09-14 browser workflow assistant slice 3 and cockpit usability pass: stable conversation-owned
+  tab refs support open/list/switch/close without exposing CDP IDs; named workspace checkpoints retain
+  sanitized URL/title metadata only and explicitly do not restore credentials, cookies, form values,
+  query strings, or fragments. Pre-cancelled open/snapshot/click/type/extract/upload/download phases
+  return promptly with classified recovery. The title bar and primary sidebar now give clearer
+  page/run/profile/navigation hierarchy while retaining all existing resizers, rails, terminal
+  boundaries, and controls. Focused native-browser tests, the deterministic browser 5/5 gate, full
+  Go suite, vet, app/tools race tests, frontend production/type build, generated bindings, scoped
+  handwritten diff check, and Wails production build pass. Canonical output is
+  `build/bin/TheMauler.exe`.
+
+- 2026-09-14 browser workflow assistant slice 2: model-issued handoff blocks the same tool/run and
+  displays a run-owned Chat takeover card until resume/stop. Structured snapshots issue owner-scoped
+  element refs; uploads are confined to regular active-workspace files; controlled downloads are
+  stored below `.mauler/browser-downloads` with relative path, size, and SHA-256 evidence. Recovery
+  output classifies retryability, observation-first, and ambiguous outcomes. The deterministic native
+  browser reliability gate passed 5/5 fresh sessions covering stable refs, upload, download, and
+  hashes. Full Go tests, vet, app/tools race tests, frontend production build, and Wails production
+  build pass. Canonical output is `build/bin/TheMauler.exe`.
+
+- 2026-09-14 browser workflow assistant slice 1: interactive signup/login/form/verification wording
+  routes to the compact native browser; Chrome/Edge sessions are persistent and conversation-owned;
+  Services provides visible launch, status, pause/takeover, controller-observed resume, and stop.
+  Local fixtures pass for validation, cookies, redirects, simulated verification, paused automation,
+  owner isolation, credential-output hygiene, and a cancelled ambiguous submit executed exactly once.
+  The user-authorised `https://admin.clara.co/` smoke opened and snapshotted the login page without
+  credentials or submission. Full Go tests, vet, app/tools race tests, frontend production build,
+  generated bindings, and Wails production build pass. Output is `build/bin/TheMauler.exe`.
 
 - 2026-08-24 multi-target authorised scope: Home now persists ordered allow/exclude rows for IP,
   CIDR, hostname, host/port, and HTTP(S) URL/path scope. Existing comma-separated targets migrate

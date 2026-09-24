@@ -16,22 +16,41 @@ const (
 	FindingDraft     = "draft"
 	FindingConfirmed = "confirmed"
 	FindingRejected  = "rejected"
+
+	FingerprintFileSHA256          = "file_sha256"
+	FingerprintLedgerPayloadSHA256 = "ledger_payload_sha256"
+
+	EvidenceFresh        = "fresh"
+	EvidenceStale        = "stale"
+	EvidenceImmutable    = "immutable"
+	EvidenceUnverifiable = "unverifiable"
 )
 
 type Evidence struct {
-	ID            string    `json:"id"`
-	Work          WorkRef   `json:"work"`
-	FindingID     string    `json:"finding_id,omitempty"`
-	SourceKind    string    `json:"source_kind"`
-	LedgerEventID string    `json:"ledger_event_id,omitempty"`
-	Path          string    `json:"path,omitempty"`
-	SHA256        string    `json:"sha256,omitempty"`
-	Size          int64     `json:"size,omitempty"`
-	AgentComposed bool      `json:"agent_composed"`
-	Description   string    `json:"description"`
-	Run           int       `json:"run"`
-	CreatedBy     Claimant  `json:"created_by"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	Work            WorkRef   `json:"work"`
+	FindingID       string    `json:"finding_id,omitempty"`
+	SourceKind      string    `json:"source_kind"`
+	LedgerEventID   string    `json:"ledger_event_id,omitempty"`
+	Path            string    `json:"path,omitempty"`
+	SHA256          string    `json:"sha256,omitempty"`
+	Size            int64     `json:"size,omitempty"`
+	FingerprintKind string    `json:"fingerprint_kind,omitempty"`
+	AgentComposed   bool      `json:"agent_composed"`
+	Description     string    `json:"description"`
+	Run             int       `json:"run"`
+	CreatedBy       Claimant  `json:"created_by"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// EvidenceFreshness is derived on read. The stored SHA-256 remains the
+// authoritative fingerprint captured when evidence was attached; current_* is
+// only a comparison result and is never accepted as replacement evidence.
+type EvidenceFreshness struct {
+	State         string `json:"state"`
+	Detail        string `json:"detail,omitempty"`
+	CurrentSHA256 string `json:"current_sha256,omitempty"`
+	CurrentSize   int64  `json:"current_size,omitempty"`
 }
 
 type EvidenceInput struct {

@@ -2,12 +2,22 @@
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   background: var(--c-sidebar);
   color: var(--text);
   overflow: hidden;
   border-right: 1px solid var(--border);
 }
+
+.hermes-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--c-panel); }
+.hermes-panel-head > div { display: grid; gap: 2px; }
+.hermes-panel-head span { color: var(--accent); font-size: 9px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.hermes-panel-head strong { color: var(--text-bright); font-size: 12px; }
+.hermes-panel-head button { width: 27px; height: 27px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text-dim); font-size: 17px; line-height: 1; }
+.hermes-panel-head button:hover { border-color: var(--border); background: var(--bg3); color: var(--text-bright); }
+.hermes-sidebar-spacer { min-height: 0; }
+.hermes-sidebar-hint { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 10px; }
+.hermes-sidebar-hint kbd { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg2); font: 9px var(--font-mono); }
 
 .hermes-brand {
   display: flex;
@@ -51,10 +61,12 @@
 }
 
 .hermes-nav button {
-  height: 34px;
+  height: 44px;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 10px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -68,17 +80,29 @@
   color: var(--text-bright);
 }
 
+.hermes-nav button.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .hermes-nav button span {
-  min-width: 0;
+  min-width: 18px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 800;
 }
 
 .hermes-nav button strong {
-  display: none;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hermes-new-chat {
@@ -93,6 +117,7 @@
   padding: 0 14px;
 }
 .hermes-more-nav{height:34px;margin:0 10px 10px;padding:0 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);color:var(--text-dim);font-size:11px}
+.hermes-more-nav:hover,.hermes-more-nav:focus{border-color:color-mix(in srgb,var(--accent) 45%,var(--border));color:var(--text)}
 
 .hermes-session-filter {
   height: 34px;
@@ -130,6 +155,11 @@
 .hermes-session-list button.active {
   background: var(--c-sidebar-hover);
   border-color: var(--border);
+}
+
+.hermes-session-list button.active {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .hermes-session-list span {
@@ -185,7 +215,7 @@
 
 .hermes-session-actions {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 5px;
 }
 
@@ -202,3 +232,284 @@
 .hermes-settings {
   width: 100%;
 }
+
+/* Conversation-first shell. The workbench remains available, but chat history
+   owns the primary navigation column. */
+.hermes-sidebar {
+  grid-template-rows: auto auto minmax(90px, 1fr) auto auto;
+  gap: 5px;
+  padding: 8px;
+  background: var(--c-sidebar);
+}
+
+.hermes-panel-head {
+  min-height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.hermes-panel-head .hermes-new-conversation {
+  width: auto;
+  height: 38px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.hermes-panel-head .hermes-new-conversation span {
+  color: inherit;
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.hermes-panel-head .hermes-new-conversation:hover,
+.hermes-panel-head > button:last-child:hover {
+  border-color: var(--border);
+  background: var(--c-sidebar-hover);
+}
+
+.hermes-panel-head > button:last-child {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+}
+
+.hermes-chat-actions { position: relative; }
+.hermes-chat-actions > summary {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+.hermes-chat-actions > summary::-webkit-details-marker { display: none; }
+.hermes-chat-actions > summary:hover,
+.hermes-chat-actions[open] > summary { border-color: var(--border); background: var(--c-sidebar-hover); color: var(--text-bright); }
+.hermes-chat-actions > div {
+  position: absolute;
+  z-index: 40;
+  top: 39px;
+  right: 0;
+  width: 174px;
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--c-panel);
+  box-shadow: 0 14px 34px rgba(0,0,0,.42);
+}
+.hermes-chat-actions > div button {
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  text-align: left;
+}
+.hermes-chat-actions > div button:hover { border-color: var(--border); background: var(--bg3); }
+.hermes-chat-actions > div button.danger { color: #fca5a5; }
+
+.hermes-chat-search {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg2) 76%, transparent);
+  color: var(--text-muted);
+}
+
+.hermes-chat-search:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: var(--bg2);
+}
+
+.hermes-chat-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: 12px var(--font-ui);
+}
+
+.hermes-chat-search input::placeholder { color: var(--text-muted); }
+
+.hermes-conversations {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 7px 2px;
+  scrollbar-width: thin;
+}
+
+.hermes-section-label {
+  display: block;
+  padding: 7px 9px 5px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.hermes-conversations > button {
+  width: 100%;
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.hermes-conversations > button:hover,
+.hermes-conversations > button.active {
+  border-color: transparent;
+  background: var(--c-sidebar-hover);
+}
+
+.hermes-conversations > button.active {
+  color: var(--text-bright);
+}
+
+.hermes-conversations > button strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.hermes-conversations > button i {
+  color: var(--accent);
+  font-size: 8px;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.hermes-chat-mark { color: var(--text-muted); }
+.hermes-empty-sessions { padding: 14px 9px; color: var(--text-muted); font-size: 11px; }
+
+.hermes-workbench {
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+}
+
+.hermes-workbench > summary {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.hermes-workbench > summary::-webkit-details-marker { display: none; }
+.hermes-workbench > summary::after { content: '›'; margin-left: auto; font-size: 16px; transition: transform .15s ease; }
+.hermes-workbench[open] > summary::after { transform: rotate(90deg); }
+.hermes-workbench > summary:hover { background: var(--c-sidebar-hover); color: var(--text); }
+
+.hermes-workbench .hermes-nav {
+  grid-template-columns: 1fr;
+  gap: 1px;
+  padding: 3px 0 5px;
+}
+
+.hermes-workbench .hermes-nav button {
+  height: 33px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 9px;
+}
+
+.hermes-workbench .hermes-nav button.active { box-shadow: none; background: var(--c-sidebar-hover); color: var(--text-bright); }
+.hermes-workbench .hermes-nav button span { min-width: 17px; font-size: 12px; }
+.hermes-workbench .hermes-more-nav { width: 100%; height: 32px; margin: 2px 0 5px; }
+
+.hermes-context-card {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg2) 70%, transparent);
+}
+
+.hermes-context-card span { color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.hermes-context-card strong,
+.hermes-context-card small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hermes-context-card strong { color: var(--text-bright); font-size: 10px; }
+.hermes-context-card small { color: var(--text-muted); font: 9px var(--font-mono); }
+
+/* Sidebar reliability and compact conversation hierarchy. */
+.hermes-panel-head .hermes-chat-actions-trigger {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 9px;
+  font-size: 12px;
+}
+.hermes-chat-actions.open > .hermes-chat-actions-trigger {
+  border-color: var(--border);
+  background: var(--c-sidebar-hover);
+  color: var(--text-bright);
+}
+.hermes-section-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hermes-section-label small { color: var(--text-muted); font: 8px var(--font-mono); }
+.hermes-empty-sessions { display: grid; justify-items: start; gap: 8px; }
+.hermes-empty-sessions button { min-height: 27px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg2); color: var(--text-dim); font-size: 9px; }
+.hermes-empty-sessions button:hover { color: var(--text-bright); }
+.hermes-context-card {
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+}
+.hermes-context-card > span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+.hermes-context-card > div { min-width: 0; display: grid; gap: 2px; }
+.hermes-sidebar { grid-template-rows: auto auto auto minmax(90px, 1fr) auto auto; }

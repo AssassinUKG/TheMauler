@@ -108,6 +108,13 @@ func TestTodoClear(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("expected cleared todos, got %#v", items)
 	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("marshal cleared todos: %v", err)
+	}
+	if string(encoded) != "[]" {
+		t.Fatalf("empty todo contract must marshal as [], got %s", encoded)
+	}
 	db, cleanup, err := todoStore()
 	if err != nil {
 		t.Fatalf("todo store: %v", err)
@@ -154,6 +161,44 @@ func TestTodoMigratesLegacyJSONIntoSQLite(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".config", "mauler", "todos.json")); err != nil {
 		t.Fatalf("legacy todo file should remain available: %v", err)
+	}
+}
+
+func TestTodoClearDoesNotRemigrateLegacyRecoveryCopy(t *testing.T) {
+	withTempHome(t)
+	legacy := []TodoItem{
+		{ID: "todo-1", Text: "stale plan", Status: "in_progress", CreatedAt: "2026-06-15T10:00:00Z", UpdatedAt: "2026-06-15T10:00:00Z"},
+	}
+	if err := saveTodosJSON(legacy); err != nil {
+		t.Fatalf("legacy save: %v", err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	SetTodoDB(db)
+	t.Cleanup(func() { SetTodoDB(nil) })
+
+	if items, err := LoadTodos(); err != nil || len(items) != 1 {
+		t.Fatalf("load migrated plan: items=%#v err=%v", items, err)
+	}
+	if err := SaveTodos([]TodoItem{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	items, err := LoadTodos()
+	if err != nil {
+		t.Fatalf("reload cleared plan: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("stale JSON recovery copy resurrected cleared plan: %#v", items)
+	}
+	legacyItems, err := loadTodosJSON()
+	if err != nil {
+		t.Fatalf("load recovery copy: %v", err)
+	}
+	if len(legacyItems) != 0 {
+		t.Fatalf("recovery copy was not cleared: %#v", legacyItems)
 	}
 }
 

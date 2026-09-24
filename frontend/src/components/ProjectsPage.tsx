@@ -45,6 +45,9 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
   const [engagement, setEngagement] = useState<EngagementSummary | null>(null)
   const [engagementNext, setEngagementNext] = useState<EngagementNextAction | null>(null)
   const [setupOpen, setSetupOpen] = useState(false)
+  const [deleteCandidate, setDeleteCandidate] = useState<LabProfile | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   const load = async () => {
     const [nextSettings, nextCwd, interfaces, engagementItems] = await Promise.all([
@@ -68,6 +71,15 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
   useEffect(() => {
     void load()
   }, [version])
+
+  useEffect(() => {
+    if (!deleteCandidate) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !deleteBusy) setDeleteCandidate(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [deleteCandidate, deleteBusy])
 
   const projects = settings?.context.lab_profiles ?? []
   const activeId = settings?.context.active_lab_profile || settings?.context.lab.id || ''
@@ -149,31 +161,58 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
     return profile
   }
 
-  const deleteProject = async (id: string) => {
-    if (!settings) return
+  const requestDeleteProject = (id: string) => {
     const target = projects.find(item => item.id === id)
-    if (!target) return
-    if (!confirm(`Delete project "${target.name || target.id}" from the list? Files on disk are not deleted.`)) return
-    const profiles = projects.filter(item => item.id !== id)
-    const nextActive = settings.context.active_lab_profile === id ? (profiles[0]?.id || '') : settings.context.active_lab_profile
+    if (target) {
+      setDeleteError('')
+      setDeleteCandidate(target)
+    }
+  }
+
+  const deleteProject = async (target: LabProfile) => {
+    if (!settings) return
+    if (projects.length <= 1) {
+      showStatus('Create another project before removing the only active project')
+      return
+    }
+    setDeleteBusy(true)
+    setDeleteError('')
+    const profiles = projects.filter(item => item.id !== target.id)
+    const deletingActive = activeId === target.id
+    const nextActive = deletingActive ? profiles[0].id : activeId
     const nextActiveProfile = profiles.find(item => item.id === nextActive)
+    if (!nextActiveProfile) {
+      setDeleteBusy(false)
+      showStatus('Could not choose the next active project')
+      return
+    }
     const next: Settings = {
       ...settings,
       context: {
         ...settings.context,
         lab_profiles: profiles,
         active_lab_profile: nextActive,
-        lab: nextActiveProfile ? labFromProfile(nextActiveProfile) : settings.context.lab,
-        workspace_dir: nextActiveProfile?.workspace_dir || settings.context.workspace_dir,
-        open_folders: nextActiveProfile ? workspaceFoldersFor(nextActiveProfile.workspace_dir, defaultFolders) : settings.context.open_folders,
+        lab: deletingActive ? labFromProfile(nextActiveProfile) : settings.context.lab,
+        workspace_dir: deletingActive ? nextActiveProfile.workspace_dir : settings.context.workspace_dir,
+        open_folders: deletingActive ? workspaceFoldersFor(nextActiveProfile.workspace_dir, defaultFolders) : settings.context.open_folders,
       },
     }
-    await UpdateSettings(next)
-    setSettings(next)
-    setSelectedId(nextActive)
-    setDraft(profileToDraft(nextActiveProfile ?? blankProject(), settings.context.workspace_dir || cwd))
-    showStatus('Project removed')
-    if (settings.context.active_lab_profile === id && nextActiveProfile) onProjectChanged(nextActiveProfile, target.name || target.id)
+    try {
+      await withTimeout(UpdateSettings(next), 12_000, 'Project removal took too long. Nothing on disk was deleted; close this message and refresh Projects.')
+      setSettings(next)
+      setSelectedId(nextActive)
+      setDraft(profileToDraft(nextActiveProfile, next.context.workspace_dir || cwd))
+      setEditing(false)
+      setDeleteCandidate(null)
+      showStatus(`${target.name || target.id} removed from Mauler; workspace files preserved`)
+      if (deletingActive) onProjectChanged(nextActiveProfile, target.name || target.id)
+    } catch (error) {
+      const message = `Could not remove project: ${String(error)}`
+      setDeleteError(message)
+      showStatus(message)
+    } finally {
+      setDeleteBusy(false)
+    }
   }
 
   const selectedVPN = vpnItems.find(item => vpnValue(item) === draft.vpn_interface || item.name === draft.vpn_interface)
@@ -253,6 +292,7 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
                 </>
               ) : (
                 <>
+                  {selectedId && <button className="danger" onClick={() => requestDeleteProject(selectedId)}>Delete project</button>}
                   <button onClick={() => setEditing(true)}>Edit details</button>
                   <button className="primary project-resume-button" onClick={() => void saveProject(true)}>{selectedId === activeId ? 'Resume box' : 'Open box'}</button>
                 </>
@@ -390,10 +430,42 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
             <div><span>Selected VPN</span><strong>{selectedVPN ? `${selectedVPN.ip}/${selectedVPN.cidr} (${selectedVPN.name})` : draft.vpn_interface || 'not set'}</strong></div>
             <div><span>Open / resume</span><strong>switches root, starts a clean project chat, and preserves previous files and sessions</strong></div>
           </div>
-          {selectedId && <div className="project-danger-zone"><div><strong>Remove project from Mauler</strong><span>Files on disk are never deleted.</span></div><button className="danger" onClick={() => void deleteProject(selectedId)}>Delete project</button></div>}
+          {selectedId && <div className="project-danger-zone"><div><strong>Remove project from Mauler</strong><span>Files on disk are never deleted.</span></div><button className="danger" onClick={() => requestDeleteProject(selectedId)}>Delete project</button></div>}
           </>}
         </section>
       </div>
+      {deleteCandidate && (
+        <div className="project-delete-backdrop" onMouseDown={event => {
+          if (event.target === event.currentTarget && !deleteBusy) setDeleteCandidate(null)
+        }}>
+          <section className="project-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="project-delete-title">
+            <span className="project-kicker">Remove from Mauler</span>
+            <h2 id="project-delete-title">Delete {deleteCandidate.name || deleteCandidate.id}?</h2>
+            <p>
+              This removes the project from the Mauler project list. Its workspace files, evidence,
+              notes, and saved sessions remain on disk.
+            </p>
+            <code>{deleteCandidate.workspace_dir || settings?.context.workspace_dir || cwd}</code>
+            {deleteCandidate.id === activeId && projects.length > 1 && (
+              <div className="project-delete-note">The next saved project will become active and Chat will switch to its workspace.</div>
+            )}
+            {projects.length <= 1 && (
+              <div className="project-delete-note warning">Mauler needs one active project. Create another project first, then remove this one.</div>
+            )}
+            {deleteError && <div className="project-delete-note error">{deleteError}</div>}
+            <div className="project-delete-actions">
+              <button onClick={() => setDeleteCandidate(null)} disabled={deleteBusy}>{projects.length <= 1 ? 'Close' : 'Cancel'}</button>
+              {projects.length <= 1 ? (
+                <button className="primary" onClick={() => { setDeleteCandidate(null); newProject() }}>+ New project</button>
+              ) : (
+                <button className="danger" onClick={() => void deleteProject(deleteCandidate)} disabled={deleteBusy}>
+                  {deleteBusy ? 'Removing…' : 'Delete project'}
+                </button>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
       {setupOpen && <EngagementSetupWizard
         defaultName={draft.name}
         onClose={() => setSetupOpen(false)}
@@ -527,6 +599,20 @@ function workspaceFoldersFor(root: string, folders: string[]): WorkspaceFolder[]
     { path: slashPath(root), name: basename(root), role: 'root' },
     ...folders.map(name => ({ path: joinPath(root, name), name, role: folderRole(name) })),
   ]
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer = 0
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(message)), timeoutMs)
+      }),
+    ])
+  } finally {
+    window.clearTimeout(timer)
+  }
 }
 
 async function ensureProjectFolders(root: string, folders: string[]) {

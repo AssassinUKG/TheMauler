@@ -47,6 +47,20 @@ func (a *App) RunDoctor() DoctorResult {
 	var checks []DoctorCheck
 	add := func(c DoctorCheck) { checks = append(checks, c) }
 
+	// Repository intelligence is read-only here: Doctor reports the active or
+	// in-flight generation but never starts a potentially expensive scan.
+	if status, err := a.GetRepositoryIndexStatus(); err != nil {
+		add(DoctorCheck{Name: "Workspace index", Status: "warn", Message: "Repository index status could not be read", Detail: err.Error()})
+	} else if !status.Available {
+		add(DoctorCheck{Name: "Workspace index", Status: "warn", Message: "Repository index database is unavailable", Detail: status.Error})
+	} else if status.Indexing {
+		add(DoctorCheck{Name: "Workspace index", Status: "info", Message: fmt.Sprintf("Scan in progress: %d files seen, %d indexed", status.ProgressFilesSeen, status.ProgressIndexed), Detail: status.CurrentPath})
+	} else if !status.Active {
+		add(DoctorCheck{Name: "Workspace index", Status: "info", Message: "Current workspace has not been indexed", Detail: "Open Chat > Files to create a bounded searchable generation."})
+	} else {
+		add(DoctorCheck{Name: "Workspace index", Status: "ok", Message: fmt.Sprintf("%d files indexed into %d searchable chunks", status.FilesIndexed, status.ChunkCount), Detail: fmt.Sprintf("generation=%s\nmanifest=sha256:%s\nomissions=%d", status.GenerationID, status.ManifestDigest, status.OmissionCount)})
+	}
+
 	// -- 1. Active provider reachability --------------------------------------
 	activeProfile := profiles.Profiles[cfg.ActiveProfile]
 	if strings.TrimSpace(cfg.ActiveProfile) == "" {
@@ -360,6 +374,20 @@ func (a *App) RunDoctor() DoctorResult {
 
 	// -- 6. Shell backend -----------------------------------------------------
 	addRuntimeLockChecks(add)
+	eventDiagnostics := a.GetRunEventDiagnostics()
+	eventMessage := "No stale run events have crossed the active conversation boundary"
+	eventDetail := fmt.Sprintf("conversation_epoch=%d", eventDiagnostics.ConversationEpoch)
+	if eventDiagnostics.StaleEventsDropped > 0 {
+		eventMessage = fmt.Sprintf("%d stale run event(s) were safely rejected", eventDiagnostics.StaleEventsDropped)
+		eventDetail = fmt.Sprintf("conversation_epoch=%d last_event=%s last_run=%s run_epoch=%d rejected_at=%s",
+			eventDiagnostics.ConversationEpoch,
+			eventDiagnostics.LastRejection.Event,
+			eventDiagnostics.LastRejection.RunID,
+			eventDiagnostics.LastRejection.RunEpoch,
+			eventDiagnostics.LastRejection.RejectedAt,
+		)
+	}
+	add(DoctorCheck{Name: "Conversation event ownership", Status: "ok", Message: eventMessage, Detail: eventDetail})
 
 	shellBackend := cfg.Tools.ShellBackend
 	if shellBackend == "" {

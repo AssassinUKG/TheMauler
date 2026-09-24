@@ -405,16 +405,21 @@ type Browser struct{}
 func (t *Browser) Name() string      { return "browser" }
 func (t *Browser) Destructive() bool { return false }
 func (t *Browser) Description() string {
-	return "Drive the browser with action open, snapshot, click, type, extract, screenshot, close, or agent. Use task type research for heavy multi-step research."
+	return "Drive the persistent browser with open, snapshot, click, type, extract, upload, download, screenshot, tabs, new_tab, switch_tab, close_tab, checkpoint, resume_checkpoint, status, pause, takeover, resume, close, or agent. Snapshot issues stable element refs; prefer ref over CSS. Tab refs and sessions are conversation-owned. Named checkpoints persist only sanitized URL/title/visibility, never credentials or cookies. For any request to open/show/launch a browser, and for login/signup/CAPTCHA/MFA/verification workflows, open with visible=true. Use takeover for human steps; it waits for the user to continue from Chat. Uploads are workspace-scoped and downloads are hashed evidence. Obey browser_recovery classification and never blindly repeat a page action."
 }
 func (t *Browser) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "enum": ["open", "snapshot", "click", "type", "extract", "screenshot", "close", "agent"]},
+	"action": {"type": "string", "enum": ["open", "snapshot", "click", "type", "extract", "upload", "download", "screenshot", "tabs", "new_tab", "switch_tab", "close_tab", "checkpoint", "resume_checkpoint", "status", "pause", "takeover", "resume", "close", "agent"]},
     "url": {"type": "string"},
+	"visible": {"type": "boolean", "description": "Set true whenever the user asks to open, show, or launch the browser window"},
+	"ref": {"type": "string", "description": "Stable element ref from the latest snapshot"},
     "selector": {"type": "string"},
     "text": {"type": "string"},
+	"path": {"type": "string", "description": "Workspace-contained file for upload"},
+	"tab_ref": {"type": "string", "description": "Stable conversation-owned tab ref"},
+	"name": {"type": "string", "description": "Named metadata-only browser checkpoint"},
     "submit": {"type": "boolean"},
     "max_chars": {"type": "integer"},
     "task": {"type": "string"},
@@ -428,8 +433,13 @@ func (t *Browser) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	var p struct {
 		Action      string `json:"action"`
 		URL         string `json:"url"`
+		Visible     bool   `json:"visible"`
+		Ref         string `json:"ref"`
 		Selector    string `json:"selector"`
 		Text        string `json:"text"`
+		Path        string `json:"path"`
+		TabRef      string `json:"tab_ref"`
+		Name        string `json:"name"`
 		Submit      bool   `json:"submit"`
 		MaxChars    int    `json:"max_chars"`
 		Task        string `json:"task"`
@@ -438,24 +448,87 @@ func (t *Browser) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("browser: bad params: %w", err)
 	}
-	switch strings.ToLower(strings.TrimSpace(p.Action)) {
-	case "open":
-		return (&BrowserOpen{}).Run(ctx, compactArgs(map[string]any{"url": p.URL}))
-	case "snapshot":
-		return (&BrowserSnapshot{}).Run(ctx, compactArgs(map[string]any{"max_chars": p.MaxChars}))
-	case "click":
-		return (&BrowserClick{}).Run(ctx, compactArgs(map[string]any{"selector": p.Selector}))
-	case "type":
-		return (&BrowserType{}).Run(ctx, compactArgs(map[string]any{"selector": p.Selector, "text": p.Text, "submit": p.Submit}))
-	case "extract":
-		return (&BrowserExtract{}).Run(ctx, compactArgs(map[string]any{"selector": p.Selector, "max_chars": p.MaxChars}))
-	case "screenshot":
-		return (&BrowserScreenshot{}).Run(ctx, compactArgs(map[string]any{}))
-	case "close":
-		return (&BrowserClose{}).Run(ctx, compactArgs(map[string]any{}))
-	case "agent":
-		return (&BrowserAgent{TimeoutSecs: 300}).Run(ctx, compactArgs(map[string]any{"task": p.Task, "timeout_secs": p.TimeoutSecs}))
-	default:
-		return "", fmt.Errorf("browser: invalid action %q", p.Action)
+	action := strings.ToLower(strings.TrimSpace(p.Action))
+	recoveryAction := action
+	if action == "type" && p.Submit {
+		recoveryAction = "type_submit"
 	}
+	var out string
+	var runErr error
+	switch action {
+	case "open":
+		out, runErr = (&BrowserOpen{}).Run(ctx, compactArgs(map[string]any{"url": p.URL, "visible": p.Visible}))
+	case "snapshot":
+		out, runErr = (&BrowserSnapshot{}).Run(ctx, compactArgs(map[string]any{"max_chars": p.MaxChars}))
+	case "click":
+		out, runErr = (&BrowserClick{}).Run(ctx, compactArgs(map[string]any{"ref": p.Ref, "selector": p.Selector}))
+	case "type":
+		out, runErr = (&BrowserType{}).Run(ctx, compactArgs(map[string]any{"ref": p.Ref, "selector": p.Selector, "text": p.Text, "submit": p.Submit}))
+	case "extract":
+		out, runErr = (&BrowserExtract{}).Run(ctx, compactArgs(map[string]any{"ref": p.Ref, "selector": p.Selector, "max_chars": p.MaxChars}))
+	case "upload":
+		out, runErr = (&BrowserUpload{}).Run(ctx, compactArgs(map[string]any{"ref": p.Ref, "selector": p.Selector, "path": p.Path}))
+	case "download":
+		out, runErr = (&BrowserDownload{}).Run(ctx, compactArgs(map[string]any{"ref": p.Ref, "selector": p.Selector, "timeout_secs": p.TimeoutSecs}))
+	case "screenshot":
+		out, runErr = (&BrowserScreenshot{}).Run(ctx, compactArgs(map[string]any{}))
+	case "tabs":
+		out, runErr = (&BrowserTabs{}).Run(ctx, compactArgs(map[string]any{}))
+	case "new_tab":
+		out, runErr = (&BrowserNewTab{}).Run(ctx, compactArgs(map[string]any{"url": p.URL}))
+	case "switch_tab":
+		out, runErr = (&BrowserSwitchTab{}).Run(ctx, compactArgs(map[string]any{"tab_ref": p.TabRef}))
+	case "close_tab":
+		out, runErr = (&BrowserCloseTab{}).Run(ctx, compactArgs(map[string]any{"tab_ref": p.TabRef}))
+	case "checkpoint":
+		out, runErr = (&BrowserCheckpoint{}).Run(ctx, compactArgs(map[string]any{"name": p.Name}))
+	case "resume_checkpoint":
+		out, runErr = (&BrowserResumeCheckpoint{}).Run(ctx, compactArgs(map[string]any{"name": p.Name}))
+	case "status":
+		status := GetBrowserWorkflowStatus(browserSessionOwner(ctx))
+		encoded, _ := json.Marshal(status)
+		out = string(encoded)
+	case "pause":
+		status, err := PauseBrowserWorkflow(browserSessionOwner(ctx), false)
+		if err != nil {
+			runErr = err
+			break
+		}
+		notifyBrowserHandoff(ctx, status)
+		status, runErr = WaitForBrowserWorkflowResume(ctx, browserSessionOwner(ctx))
+		if runErr == nil {
+			encoded, _ := json.Marshal(status)
+			out = "Browser pause completed by the user. Re-observe the page before the next action.\n" + string(encoded)
+		}
+	case "takeover":
+		status, err := PauseBrowserWorkflow(browserSessionOwner(ctx), true)
+		if err != nil {
+			runErr = err
+			break
+		}
+		notifyBrowserHandoff(ctx, status)
+		status, runErr = WaitForBrowserWorkflowResume(ctx, browserSessionOwner(ctx))
+		if runErr == nil {
+			encoded, _ := json.Marshal(status)
+			out = "User takeover completed. Browser automation may continue only after a fresh snapshot.\n" + string(encoded)
+		}
+	case "resume":
+		status, err := ResumeBrowserWorkflow(browserSessionOwner(ctx))
+		if err != nil {
+			runErr = err
+			break
+		}
+		encoded, _ := json.Marshal(status)
+		out = "Browser automation resumed. Re-observe the page before the next action.\n" + string(encoded)
+	case "close":
+		out, runErr = (&BrowserClose{}).Run(ctx, compactArgs(map[string]any{}))
+	case "agent":
+		out, runErr = (&BrowserAgent{TimeoutSecs: 300}).Run(ctx, compactArgs(map[string]any{"task": p.Task, "timeout_secs": p.TimeoutSecs}))
+	default:
+		runErr = fmt.Errorf("browser: invalid action %q", p.Action)
+	}
+	if runErr != nil {
+		return FormatBrowserRecovery(recoveryAction, runErr), runErr
+	}
+	return out, nil
 }

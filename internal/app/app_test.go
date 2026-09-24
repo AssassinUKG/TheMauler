@@ -1425,6 +1425,31 @@ func TestUpdateSettingsAppliesWorkspaceDir(t *testing.T) {
 	}
 }
 
+func TestRuntimeSettingsChangedIgnoresUnrelatedProjectChanges(t *testing.T) {
+	previous := settings.DefaultSettings()
+	next := previous
+	next.Context.LabProfiles = append([]settings.LabProfile(nil), previous.Context.LabProfiles...)
+	next.Context.LabProfiles = append(next.Context.LabProfiles, settings.LabProfile{ID: "second", Name: "Second"})
+
+	telegramChanged, audioChanged := runtimeSettingsChanged(previous.Telegram, next.Telegram, previous.Audio, next.Audio)
+	if telegramChanged || audioChanged {
+		t.Fatalf("project-only settings update restarted runtimes: telegram=%v audio=%v", telegramChanged, audioChanged)
+	}
+
+	next.Telegram.Enabled = !previous.Telegram.Enabled
+	telegramChanged, audioChanged = runtimeSettingsChanged(previous.Telegram, next.Telegram, previous.Audio, next.Audio)
+	if !telegramChanged || audioChanged {
+		t.Fatalf("telegram change detection = (%v, %v), want (true, false)", telegramChanged, audioChanged)
+	}
+
+	next = previous
+	next.Audio.Speed = previous.Audio.Speed + 0.1
+	telegramChanged, audioChanged = runtimeSettingsChanged(previous.Telegram, next.Telegram, previous.Audio, next.Audio)
+	if telegramChanged || !audioChanged {
+		t.Fatalf("audio change detection = (%v, %v), want (false, true)", telegramChanged, audioChanged)
+	}
+}
+
 func TestBuildSystemPromptIncludesAuthoritativeWorkspace(t *testing.T) {
 	project := t.TempDir()
 	if err := os.WriteFile(filepath.Join(project, "idea.md"), []byte("notes"), 0o644); err != nil {
@@ -1676,6 +1701,123 @@ func TestToolDefsOmittedForConversationalTurn(t *testing.T) {
 	defs, choice = toolDefsAndChoiceForTurn(registry, settings.DefaultSettings().Tools, "fix bug", 0, 0)
 	if choice != "auto" || len(defs) == 0 {
 		t.Fatalf("task turn should expose tools, choice=%q defs=%d", choice, len(defs))
+	}
+}
+
+func TestAdaptiveDirectAnswerLaneOnlyAcceptsCleanConversationalTurns(t *testing.T) {
+	for _, prompt := range []string{
+		"what is speculative decoding?",
+		"explain why this approach is useful",
+		"hello",
+		"Answer without tools: what does TLS mean?",
+		"Can you give me the curl command for this PoC and use callback.example as the callback URL?",
+		"Show me a PowerShell one-liner for this check.",
+	} {
+		choice := toolChoiceFor(prompt, 0, 0)
+		if !isDirectAnswerTurn(prompt, choice, 0) {
+			t.Fatalf("%q should use adaptive direct-answer lane (choice=%q)", prompt, choice)
+		}
+	}
+
+	for _, prompt := range []string{
+		"run nmap against the HTB target",
+		"read README.md",
+		"what time is it?",
+		"fix the code and run tests",
+		"Run this curl command against the authorised target",
+		"Can you run the curl command against the authorised target?",
+		"Give me the curl command and then run it",
+		"Create the HTTP request, validate it, and report the response",
+		"Write the curl command into a workspace file",
+	} {
+		choice := toolChoiceFor(prompt, 0, 0)
+		if isDirectAnswerTurn(prompt, choice, 0) {
+			t.Fatalf("%q must retain the full agent lane (choice=%q)", prompt, choice)
+		}
+	}
+
+	if isDirectAnswerTurn("what is TLS?", "none", 1) {
+		t.Fatal("a task that already used tools must not switch into direct-answer lane")
+	}
+}
+
+func TestCommandCompositionOmitsToolsEvenWhenSelectedRoutingIsEnabled(t *testing.T) {
+	registry := tools.New()
+	cfg := settings.DefaultSettings().Tools
+	cfg.Enabled = true
+	cfg.ActiveToolset = "unrestricted"
+	cfg.TaskRoutingMode = "selected"
+
+	prompt := "Can you give me the curl command for this PoC and use callback.example as the callback URL?"
+	defs, choice := toolDefsAndChoiceForTurn(registry, cfg, prompt, 0, 0)
+	if choice != "none" || len(defs) != 0 {
+		t.Fatalf("command composition exposed tools: choice=%q defs=%s", choice, toolProtocolToolNames(defs))
+	}
+}
+
+func TestOpsPromptRequiresObservedOutOfBandCallbackEvidence(t *testing.T) {
+	got := buildOpsModePrompt(settings.DefaultSettings())
+	for _, want := range []string{"Out-of-band validation", "observed callback event", "request acceptance"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ops prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestAdaptiveDirectAnswerBudgetAndCompletion(t *testing.T) {
+	req := llm.Request{MaxTokens: 8192}
+	if !applyDirectAnswerResponseBudget(&req, true) || req.MaxTokens != directAnswerMaxTokens {
+		t.Fatalf("direct answer budget = %d, want %d", req.MaxTokens, directAnswerMaxTokens)
+	}
+	if applyDirectAnswerResponseBudget(&req, false) {
+		t.Fatal("task lane must not receive direct-answer output cap")
+	}
+	for _, text := range []string{"Yes.", "That is the reason!", "Would you like an example?", "```go\nfmt.Println(1)\n```"} {
+		if !directAnswerLooksComplete(text) {
+			t.Fatalf("clean direct answer was not accepted: %q", text)
+		}
+	}
+	for _, text := range []string{"", "Let me explain:", "Still working..."} {
+		if directAnswerLooksComplete(text) {
+			t.Fatalf("incomplete direct answer was accepted: %q", text)
+		}
+	}
+}
+
+func TestConversationModeOverridesAdaptiveRouting(t *testing.T) {
+	defs := []llm.ToolDef{{Type: "function"}}
+	routed, choice, changed := applyConversationModeRouting(conversationModeDirect, defs, "required")
+	if !changed || choice != "none" || len(routed) != 0 {
+		t.Fatalf("direct routing = changed %v choice %q defs %d", changed, choice, len(routed))
+	}
+	if !directAnswerTurnForMode(conversationModeDirect, "run nmap", choice, 0) {
+		t.Fatal("Always Direct should use the one-response lane even for an action-shaped prompt")
+	}
+	if directAnswerTurnForMode(conversationModeAgent, "what is TLS?", "none", 0) {
+		t.Fatal("Always Agent must suppress the adaptive shortcut")
+	}
+	if !directAnswerTurnForMode(conversationModeAdaptive, "what is TLS?", "none", 0) {
+		t.Fatal("Adaptive should retain the conversational shortcut")
+	}
+	if !directAnswerAcceptedForMode(conversationModeDirect, "A useful answer without terminal punctuation") {
+		t.Fatal("Always Direct should accept the first non-empty response")
+	}
+	if directAnswerAcceptedForMode(conversationModeAdaptive, "Still working...") {
+		t.Fatal("Adaptive should continue rejecting obviously incomplete output")
+	}
+	if directModeCannotCompleteTask("what is TLS?") {
+		t.Fatal("a normal question should be completable in Direct mode")
+	}
+	if !directModeCannotCompleteTask("run nmap against the target") {
+		t.Fatal("an operational task must not be reported complete in Direct mode")
+	}
+	if directModeCannotCompleteTask("without tools, explain how nmap service detection works") {
+		t.Fatal("an explicitly explanation-only request should remain valid in Direct mode")
+	}
+
+	routed, choice, changed = applyConversationModeRouting(conversationModeAgent, defs, "required")
+	if changed || choice != "required" || len(routed) != 1 {
+		t.Fatalf("agent routing unexpectedly changed = changed %v choice %q defs %d", changed, choice, len(routed))
 	}
 }
 
@@ -3760,7 +3902,7 @@ func TestDoCompactCanBeCalledWithoutCallerHoldingLock(t *testing.T) {
 		app.history.Append(llm.NewTextMessage(llm.RoleUser, "important details"))
 	}
 
-	app.doCompact(context.Background(), &summaryClient{}, settings.Profile{})
+	app.doCompact(context.Background(), &summaryClient{}, settings.Profile{}, nil)
 
 	msgs := app.history.Messages()
 	joined := ""
@@ -3820,6 +3962,9 @@ func TestApplyBugBountyHunterPresetSelectsReviewToolset(t *testing.T) {
 	if cfg.Tools.ActiveToolset != "bug-bounty-review" {
 		t.Fatalf("toolset = %q, want bug-bounty-review", cfg.Tools.ActiveToolset)
 	}
+	if cfg.ActiveProfile != "qwen3.8-uncensored-agent-stability" || profile.ModelID != "Qwen3.8-27B-Uncensored-Q4_K_M.gguf" {
+		t.Fatalf("Bug Bounty Hunter profile route = %q / %q, want uncensored Qwen3.8", cfg.ActiveProfile, profile.ModelID)
+	}
 	effective := settings.EffectiveEnabledTools(cfg.Tools)
 	for _, name := range []string{"write", "edit", "shell", "terminal_send", "start_listener"} {
 		if effective[name] {
@@ -3836,7 +3981,7 @@ func TestBugBountyHunterBlocksStatefulBrowserActions(t *testing.T) {
 			t.Fatalf("browser %s policy error = %v, want planning-only block", action, err)
 		}
 	}
-	for _, action := range []string{"open", "snapshot", "extract", "screenshot", "close"} {
+	for _, action := range []string{"open", "snapshot", "extract", "screenshot", "status", "pause", "takeover", "resume", "close"} {
 		call := llm.ToolCallDef{Function: llm.FunctionCall{Name: "browser", Arguments: json.RawMessage(fmt.Sprintf(`{"action":%q}`, action))}}
 		if err := enforceAgentModeToolPolicy(mode, "bug-bounty-review", call); err != nil {
 			t.Fatalf("browser %s should be allowed: %v", action, err)

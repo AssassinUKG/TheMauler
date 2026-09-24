@@ -1,8 +1,12 @@
-import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 import { EventsOn } from './wailsjs/runtime'
 import { FileTree } from './components/FileTree'
 import { HermesSidebar } from './components/HermesSidebar'
 import { ChatPane } from './components/ChatPane'
+import { ConversationMenu } from './components/ConversationMenu'
+import { ConversationCheckpointDialog } from './components/ConversationCheckpointDialog'
+import { LayoutMenu } from './components/LayoutMenu'
+import { UiIcon } from './components/UiIcon'
 import { FileViewer, type OpenFile } from './components/FileViewer'
 import { AgentPanel } from './components/AgentPanel'
 import { RightInspector } from './components/RightInspector'
@@ -29,11 +33,25 @@ import {
   ClearHistory,
   ClearTodos,
   AddToolSafeRule,
+  CreateScratchWorkspace,
+  CreateWorkspaceProject,
   DeleteSession,
-  ListSessions,
+  DeleteResumableRun,
+  GetScratchWorkspaceStatus,
+  InspectSessionRepair,
+  ListSessionSummaries,
+  ListResumableRuns,
   LoadSession,
+  RenameSession,
+  RepairSession,
+  ResumeRun,
+  PromoteScratchWorkspace,
+  ResumeBrowserWorkflow,
   RespondConfirm,
   SaveSession,
+  StartConversation,
+  SaveConversationCheckpoint,
+  SetSessionTags,
   SetAutoAgents,
   SetAutonomous,
   GetAutoAgents,
@@ -46,15 +64,23 @@ import {
   GetProfiles,
   GetSettings,
   GetHistoryStats,
+  GetConversationMode,
   ListTodos,
   SendMessage,
   SendMessageWithProfile,
+  SetConversationMode,
+  SetSavedConversationMode,
   UpdateSettings,
   type ChatAttachment,
   StopAgent,
+  StopBrowserWorkflow,
   type ChatRole,
   type ProfilesFile,
   type SessionChatMessage,
+  type SessionSummary,
+  type SessionRepairReport,
+  type RunCheckpoint,
+  type ScratchWorkspaceStatus,
   type SkillSuggestion,
   type TodoItem,
   type AgentDefinition,
@@ -124,6 +150,13 @@ function cleanAssistantTranscriptText(text: string): string {
   return next
 }
 
+function automaticConversationTitle(text: string, images: string[], attachments: ChatAttachment[]): string {
+  const fallback = attachments[0]?.name || (images.length > 0 ? 'Image chat' : 'New chat')
+  const compact = (text.trim() || fallback).replace(/\s+/g, ' ')
+  const words = compact.split(' ').slice(0, 8).join(' ')
+  return (words || fallback).slice(0, 72)
+}
+
 function stripVisibleThinkTags(text: string): string {
   let next = text || ''
   while (true) {
@@ -147,7 +180,14 @@ export interface ChatMessage {
   attachments?: ChatAttachment[]
   queued?: boolean
   thinking?: string
+  runId?: string
+  modelTurn?: number
+  toolName?: string
+  toolCallId?: string
+  category?: 'reply' | 'tool' | 'status' | 'browser'
 }
+
+type InspectorFocus = 'agent' | 'workspace' | 'facts' | 'commands' | 'activity'
 
 interface PendingMessage {
   text: string
@@ -192,6 +232,71 @@ export interface RunStatePayload {
   detail?: string
 }
 
+function titlebarRunSummary(runState: RunStatePayload | null): string {
+  const detail = String(runState?.detail || '').trim()
+  if (detail.includes('tool_choice=')) {
+    const choice = detail.match(/tool_choice=([^\s]+)/)?.[1] || 'auto'
+    const toolCount = Number(detail.match(/tools=(\d+)/)?.[1] || 0)
+    const effort = detail.match(/effort=([^\s]+)/)?.[1]
+    const noThinking = detail.includes('no_think=true')
+    if (choice === 'none' && noThinking) return 'Direct answer'
+    const route = choice === 'none'
+      ? 'Text-only turn'
+      : toolCount === 1
+        ? '1 tool available'
+        : `${toolCount} tools available`
+    return effort ? `${route} · ${effort[0].toUpperCase()}${effort.slice(1)} effort` : route
+  }
+  if (detail) return detail
+  const state = String(runState?.state || 'working').replaceAll('_', ' ')
+  return `${state[0].toUpperCase()}${state.slice(1)}`
+}
+
+export interface BrowserHandoffPayload {
+  active: boolean
+  action: string
+  state: string
+  url?: string
+  title?: string
+  guidance?: string
+}
+
+interface RunEventOwner {
+  run_id: string
+  generation: number
+  conversation_epoch?: number
+  origin: string
+}
+
+function runEventOwner(args: unknown[]): RunEventOwner | null {
+  for (let i = args.length - 1; i >= 0; i -= 1) {
+    const value = args[i]
+    if (!value || typeof value !== 'object') continue
+    const candidate = value as { run_id?: unknown; generation?: unknown; conversation_epoch?: unknown; origin?: unknown }
+    const runID = String(candidate.run_id || '').trim()
+    const generation = Number(candidate.generation)
+    if (runID && Number.isSafeInteger(generation) && generation > 0) {
+      const conversationEpoch = Number(candidate.conversation_epoch)
+      return {
+        run_id: runID,
+        generation,
+        conversation_epoch: Number.isSafeInteger(conversationEpoch) && conversationEpoch > 0 ? conversationEpoch : undefined,
+        origin: String(candidate.origin || 'desktop').trim().toLowerCase(),
+      }
+    }
+  }
+  return null
+}
+
+function eventBelongsToActiveRun(args: unknown[], active: RunEventOwner | null): boolean {
+  const owner = runEventOwner(args)
+  if (!owner) return true // compatibility with events from an older running binary
+  return Boolean(active
+    && active.run_id === owner.run_id
+    && active.generation === owner.generation
+    && (!owner.conversation_epoch || !active.conversation_epoch || active.conversation_epoch === owner.conversation_epoch))
+}
+
 export interface ToolCountdown {
   id: string
   name: string
@@ -214,12 +319,22 @@ export interface BackgroundJob {
   updated_at_unix?: number
 }
 
-const LEFT_PANE_DEFAULT = 300
+const LEFT_PANE_DEFAULT = 272
 const LEFT_PANE_MIN = 180
 const LEFT_PANE_MAX = 520
 const RIGHT_PANE_DEFAULT = 460
-const RIGHT_PANE_MIN = 320
-const RIGHT_PANE_MAX = 840
+const RIGHT_PANE_MIN = 360
+const RIGHT_PANE_MAX = 620
+const TERMINAL_HEIGHT_DEFAULT = 320
+const TERMINAL_HEIGHT_MIN = 280
+const TERMINAL_HEIGHT_MAX = 600
+
+function clampTerminalHeight(value: number) {
+  const viewportMax = typeof window === 'undefined'
+    ? TERMINAL_HEIGHT_MAX
+    : Math.max(TERMINAL_HEIGHT_MIN, window.innerHeight - 230)
+  return Math.min(TERMINAL_HEIGHT_MAX, viewportMax, Math.max(TERMINAL_HEIGHT_MIN, value))
+}
 
 function loadStoredLayoutNumber(key: string, fallback: number, min: number, max: number) {
   const value = Number(localStorage.getItem(key) || '')
@@ -237,27 +352,54 @@ function storeLayoutNumber(key: string, value: number) {
   localStorage.setItem(key, String(Math.round(value)))
 }
 
+const workbenchPageLabels: Record<string, string> = {
+  projects: 'Workspaces', chat: 'Chat', ops: 'Run activity', engagement: 'Engagement grid',
+  services: 'Services', file: 'Editor', logs: 'Logs', memory: 'Memory', brain: 'Brain',
+  context: 'Context inspector', telegram: 'Telegram', benchmarks: 'Model lab', doctor: 'Doctor',
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
   const [streamBuffer, setStreamBuffer] = useState('')
   const answerCheckpointRef = useRef('')
   const streamErrorHandledRef = useRef(false)
+  const activeRunOwnerRef = useRef<RunEventOwner | null>(null)
+  const retiredRunGenerationRef = useRef(0)
   const [confirm, setConfirm] = useState<ConfirmPayload | null>(null)
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null)
   const [showSaveSession, setShowSaveSession] = useState(false)
   const [saveSessionDraft, setSaveSessionDraft] = useState('')
+  const [showRenameSession, setShowRenameSession] = useState(false)
+  const [renameSessionSource, setRenameSessionSource] = useState('')
+  const [renameSessionDraft, setRenameSessionDraft] = useState('')
+  const [showSessionTags, setShowSessionTags] = useState(false)
+  const [tagSessionName, setTagSessionName] = useState('')
+  const [sessionTagsDraft, setSessionTagsDraft] = useState('')
+  const [sessionRepairReport, setSessionRepairReport] = useState<SessionRepairReport | null>(null)
+  const [sessionRepairBusy, setSessionRepairBusy] = useState(false)
+  const [runCheckpoints, setRunCheckpoints] = useState<RunCheckpoint[]>([])
+  const [showConversationCheckpoints, setShowConversationCheckpoints] = useState(false)
+  const [checkpointDefaultName, setCheckpointDefaultName] = useState('')
+  const [checkpointBusy, setCheckpointBusy] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [statsVersion, setStatsVersion] = useState(0)
-  const [sessions, setSessions] = useState<string[]>([])
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [selectedSession, setSelectedSession] = useState('')
+  const [conversationMode, setConversationModeState] = useState<'adaptive' | 'direct' | 'agent'>('adaptive')
+  const [scratchWorkspace, setScratchWorkspace] = useState<ScratchWorkspaceStatus | null>(null)
   const [activeProfile, setActiveProfile] = useState('')
+  const [activeModelID, setActiveModelID] = useState('')
+  const [thinkingSupported, setThinkingSupported] = useState(false)
+  const [thinkingMode, setThinkingMode] = useState('auto')
+  const [reasoningEffort, setReasoningEffort] = useState('auto')
+  const [workspaceRootLabel, setWorkspaceRootLabel] = useState('')
   const [cloudRunProfiles, setCloudRunProfiles] = useState<RunProfileOption[]>([])
   const [runProfileOverride, setRunProfileOverride] = useState('')
   const [activeRunProfile, setActiveRunProfile] = useState('')
   const [autonomous, setAutonomousState] = useState(false)
   const [autoAgents, setAutoAgentsState] = useState(true)
-  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'engagement' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'context' | 'telegram' | 'benchmarks' | 'doctor'>('projects')
+  const [centerTab, setCenterTab] = useState<'chat' | 'ops' | 'projects' | 'engagement' | 'services' | 'file' | 'logs' | 'memory' | 'brain' | 'context' | 'telegram' | 'benchmarks' | 'doctor'>('chat')
   const [chatLane, setChatLane] = useState<'project' | 'quick'>('project')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
@@ -268,6 +410,10 @@ export default function App() {
   const [agentSelection, setAgentSelection] = useState('Auto')
   const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([])
   const [runState, setRunState] = useState<RunStatePayload | null>(null)
+  const [browserHandoff, setBrowserHandoff] = useState<BrowserHandoffPayload | null>(null)
+  const [inspectorFocus, setInspectorFocus] = useState<InspectorFocus>('workspace')
+  const [inspectorFocusRequest, setInspectorFocusRequest] = useState(0)
+  const runMilestonesRef = useRef<Set<string>>(new Set())
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [doctorRunRequest, setDoctorRunRequest] = useState(0)
   const [taskRunVersion, setTaskRunVersion] = useState(0)
@@ -279,6 +425,26 @@ export default function App() {
     const id = crypto.randomUUID()
     setToasts(prev => [...prev, { id, message, level }])
   }, [])
+
+  const handleReasoningControlChange = useCallback(async (nextThinkingMode: string, nextReasoningEffort: string) => {
+    try {
+      const current = await GetSettings()
+      await UpdateSettings({
+        ...current,
+        agents: {
+          ...current.agents,
+          thinking_mode: nextThinkingMode,
+          reasoning_effort: nextReasoningEffort,
+        },
+      })
+      setThinkingMode(nextThinkingMode)
+      setReasoningEffort(nextReasoningEffort)
+      setStatsVersion(value => value + 1)
+    } catch (error) {
+      pushToast(`Could not update thinking controls: ${String(error)}`, 'danger')
+      throw error
+    }
+  }, [pushToast])
 
   const persistTerminalHeight = useCallback(async (height: number) => {
     const settings = await GetSettings().catch(() => null)
@@ -294,21 +460,65 @@ export default function App() {
   const [pendingInterrupt, setPendingInterrupt] = useState<PendingMessage | null>(null)
   const pendingInterruptRef = useRef<PendingMessage | null>(null)
   const [leftOpen, setLeftOpen] = useState(() => loadStoredLayoutBoolean('mauler.layout.leftOpen', true))
-  const [rightOpen, setRightOpen] = useState(() => loadStoredLayoutBoolean('mauler.layout.rightOpen', true))
+  const [rightOpen, setRightOpen] = useState(() => loadStoredLayoutBoolean('mauler.layout.rightOpen', false))
+  const [closedPanelRails, setClosedPanelRails] = useState(() => loadStoredLayoutBoolean('mauler.layout.closedPanelRails', false))
   const [leftWidth, setLeftWidth] = useState(() => loadStoredLayoutNumber('mauler.layout.leftWidth', LEFT_PANE_DEFAULT, LEFT_PANE_MIN, LEFT_PANE_MAX))
   const [rightWidth, setRightWidth] = useState(() => loadStoredLayoutNumber('mauler.layout.rightWidth', RIGHT_PANE_DEFAULT, RIGHT_PANE_MIN, RIGHT_PANE_MAX))
   const [thinkingBuffer, setThinkingBuffer] = useState('')
   const pendingThinkingRef = useRef('')
   const [showTerminal, setShowTerminal] = useState(false)
-  const [terminalHeight, setTerminalHeight] = useState(220)
+  const [aiCommandsOpen, setAICommandsOpen] = useState(() => loadStoredLayoutBoolean('mauler.aiCommandsVisible', false))
+  const [autoOpenRunPanel, setAutoOpenRunPanel] = useState(() => loadStoredLayoutBoolean('mauler.layout.autoOpenRunPanel', false))
+  const [terminalHeight, setTerminalHeight] = useState(TERMINAL_HEIGHT_DEFAULT)
   const [bottomTab, setBottomTab] = useState<'terminal' | 'stream' | 'jobs'>('terminal')
   const [skillSuggestion, setSkillSuggestion] = useState<SkillSuggestion | null>(null)
   const [workspaceVersion, setWorkspaceVersion] = useState(0)
+  const [workspaceFilesVersion, setWorkspaceFilesVersion] = useState(0)
   const [toolCountdown, setToolCountdown] = useState<ToolCountdown | null>(null)
   const [showToolCountdown, setShowToolCountdown] = useState(false)
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [chatDraftRequest, setChatDraftRequest] = useState<{ id: string; text: string } | null>(null)
+
+	// One-time migration from the earlier cockpit layout. Existing dimensions
+	// remain intact, but Chat starts with auxiliary work surfaces dismissed.
+	useEffect(() => {
+		const revision = 'chat-canvas-v3'
+		if (localStorage.getItem('mauler.layout.revision') === revision) return
+		setRightOpen(false)
+		setShowTerminal(false)
+		setAICommandsOpen(false)
+		setClosedPanelRails(false)
+		localStorage.setItem('mauler.layout.rightOpen', '0')
+		localStorage.setItem('mauler.aiCommandsVisible', '0')
+		localStorage.setItem('mauler.layout.closedPanelRails', '0')
+		localStorage.setItem('mauler.layout.revision', revision)
+	}, [])
+
+	// Surface the automatic conversation library once when upgrading. After
+	// this one-time introduction, the operator's open/closed choice persists.
+	useEffect(() => {
+		const revision = 'automatic-conversation-library-v1'
+		if (localStorage.getItem('mauler.chat.libraryRevision') === revision) return
+		setLeftOpen(true)
+		localStorage.setItem('mauler.layout.leftOpen', '1')
+		localStorage.setItem('mauler.chat.libraryRevision', revision)
+	}, [])
+
+  const retireActiveRunUI = useCallback(() => {
+    const active = activeRunOwnerRef.current
+    if (active) retiredRunGenerationRef.current = Math.max(retiredRunGenerationRef.current, active.generation)
+    activeRunOwnerRef.current = null
+    answerCheckpointRef.current = ''
+    pendingThinkingRef.current = ''
+    streamErrorHandledRef.current = false
+    setStreaming(false)
+    setActiveRunProfile('')
+    setToolCountdown(null)
+    setStreamBuffer('')
+    setThinkingBuffer('')
+    setBrowserHandoff(null)
+  }, [])
 
   useEffect(() => {
     localStorage.setItem('mauler.layout.leftOpen', leftOpen ? '1' : '0')
@@ -317,6 +527,31 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('mauler.layout.rightOpen', rightOpen ? '1' : '0')
   }, [rightOpen])
+
+  useEffect(() => {
+    localStorage.setItem('mauler.layout.closedPanelRails', closedPanelRails ? '1' : '0')
+  }, [closedPanelRails])
+
+  useEffect(() => {
+    localStorage.setItem('mauler.aiCommandsVisible', aiCommandsOpen ? '1' : '0')
+  }, [aiCommandsOpen])
+
+  useEffect(() => {
+    const clampToViewport = () => setTerminalHeight(current => clampTerminalHeight(current))
+    window.addEventListener('resize', clampToViewport)
+    return () => window.removeEventListener('resize', clampToViewport)
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem('mauler.layout.autoOpenRunPanel', autoOpenRunPanel ? '1' : '0')
+  }, [autoOpenRunPanel])
+
+  useEffect(() => {
+    if (browserHandoff?.active) setInspectorFocus('activity')
+    else if (centerTab === 'file' || centerTab === 'projects') setInspectorFocus('workspace')
+    else if (centerTab === 'engagement') setInspectorFocus('facts')
+    else if (centerTab === 'ops') setInspectorFocus('activity')
+  }, [browserHandoff?.active, centerTab])
 
   const toggleTerminalPanel = useCallback(() => {
     if (showTerminal && bottomTab === 'terminal') {
@@ -327,15 +562,80 @@ export default function App() {
     setShowTerminal(true)
   }, [bottomTab, showTerminal])
 
+  const showBottomTab = useCallback((tab: 'terminal' | 'stream' | 'jobs') => {
+    setBottomTab(tab)
+    setShowTerminal(true)
+  }, [])
+
+  const setInspectorVisible = useCallback((open: boolean) => {
+    if (open) {
+      // Recover layouts saved by older builds before mounting the drawer.
+      const recovered = Math.min(RIGHT_PANE_MAX, Math.max(RIGHT_PANE_MIN, rightWidth || RIGHT_PANE_DEFAULT))
+      if (recovered !== rightWidth) setRightWidth(recovered)
+      storeLayoutNumber('mauler.layout.rightWidth', recovered)
+      setInspectorFocusRequest(value => value + 1)
+    }
+    setRightOpen(open)
+  }, [rightWidth])
+
+  const toggleInspector = useCallback(() => {
+    setInspectorVisible(!rightOpen)
+  }, [rightOpen, setInspectorVisible])
+
+  const focusChatLayout = useCallback(() => {
+    setLeftOpen(false)
+    setRightOpen(false)
+    setShowTerminal(false)
+    setClosedPanelRails(false)
+  }, [])
+
+  const restoreDefaultLayout = useCallback(() => {
+    setLeftOpen(true)
+    setRightOpen(false)
+    setShowTerminal(false)
+    setAICommandsOpen(false)
+    setClosedPanelRails(false)
+  }, [])
+
   const prepareEngagementRun = useCallback((prompt: string) => {
     setChatDraftRequest({ id: crypto.randomUUID(), text: prompt })
     setChatLane('project')
     setCenterTab('chat')
   }, [])
 
-  const refreshTodos = useCallback(() => {
-    void ListTodos().then(setTodos).catch(() => setTodos([]))
+  const refreshTodos = useCallback(async () => {
+    try {
+      const loaded = await ListTodos()
+      setTodos(Array.isArray(loaded) ? loaded : [])
+    } catch {
+      setTodos([])
+    }
   }, [])
+
+  const refreshSessions = useCallback(async () => {
+    const summaries = await ListSessionSummaries().catch(() => [] as SessionSummary[])
+    const names = summaries.map(summary => summary.name)
+    setSessions(summaries)
+    // A saved row is not the active transcript until the operator opens it.
+    // Starting the app therefore always presents an honest blank New chat.
+    setSelectedSession(previous => previous && names.includes(previous) ? previous : '')
+  }, [])
+
+  const handleClearPlan = useCallback(async () => {
+    if (streaming) {
+      pushToast('Stop the active run before clearing its plan.', 'warn')
+      return
+    }
+    try {
+      await ClearTodos()
+      await refreshTodos()
+      setTaskRunVersion(value => value + 1)
+      pushToast('Active plan cleared.', 'success')
+    } catch (error) {
+      pushToast(`Could not clear the active plan: ${String(error)}`, 'danger')
+      throw error
+    }
+  }, [pushToast, refreshTodos, streaming])
 
   useEffect(() => {
     const sendPendingMessage = (pending: PendingMessage) => {
@@ -348,15 +648,25 @@ export default function App() {
     }
     const offs = [
       EventsOn('mauler:stream_start', (...args: unknown[]) => {
+        const owner = runEventOwner(args)
+        if (owner) {
+          if (owner.origin !== 'desktop') return
+          if (owner.generation <= retiredRunGenerationRef.current) return
+          const active = activeRunOwnerRef.current
+          if (active && owner.generation < active.generation) return
+          activeRunOwnerRef.current = owner
+        }
         setStreaming(true)
         setActiveRunProfile(String(args[0] || ''))
         setRunStartedAt(Date.now())
         setRunState({ state: 'starting', detail: 'Preparing request' })
         setStreamBuffer('')
         setThinkingBuffer('')
+        setBrowserHandoff(null)
         answerCheckpointRef.current = ''
         streamErrorHandledRef.current = false
-        setShowTerminal(true)
+        runMilestonesRef.current.clear()
+		if (autoOpenRunPanel) setShowTerminal(true)
 		// Opening live activity must not discard the height the user chose with
 		// the visible terminal splitter. The previous 42%-of-window expansion
 		// produced a huge empty terminal for short commands.
@@ -366,75 +676,130 @@ export default function App() {
         setStatsVersion(v => v + 1)
       }),
       EventsOn('mauler:thinking', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const chunk = args[0] as string
         pendingThinkingRef.current += chunk
         setThinkingBuffer(prev => prev + chunk)
       }),
       EventsOn('mauler:thinking_done', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         // Store final thinking with the next assistant message
         pendingThinkingRef.current = args[0] as string
       }),
       EventsOn('mauler:delta', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const chunk = args[0] as string
         setStreamBuffer(prev => prev + chunk)
       }),
       EventsOn('mauler:stream_replace', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         setStreamBuffer(args[0] as string)
       }),
       EventsOn('mauler:answer_checkpoint', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const candidate = cleanAssistantTranscriptText(String(args[0] || ''))
         if (candidate.length > answerCheckpointRef.current.length) {
           answerCheckpointRef.current = candidate
         }
       }),
-      EventsOn('mauler:tool_protocol_repair', () => {
+      EventsOn('mauler:assistant_turn', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
+        const payload = (args[0] || {}) as { content?: unknown; thinking?: unknown; turn?: unknown; tool_calls?: unknown }
+        const content = cleanAssistantTranscriptText(String(payload.content || ''))
+        if (!content) return
+        const owner = runEventOwner(args)
+        const modelTurn = Number(payload.turn)
+        const toolCallCount = Number(payload.tool_calls)
+        const id = owner && Number.isSafeInteger(modelTurn) && modelTurn > 0
+          ? `${owner.run_id}:assistant:${modelTurn}`
+          : crypto.randomUUID()
+        setMessages(current => {
+          if (current.some(message => message.id === id)) return current
+          return [...current, {
+            id,
+            role: 'assistant',
+            content,
+            thinking: String(payload.thinking || '').trim() || undefined,
+            timestamp: Date.now(),
+            runId: owner?.run_id,
+            modelTurn: Number.isSafeInteger(modelTurn) ? modelTurn : undefined,
+            category: Number.isFinite(toolCallCount) && toolCallCount > 0 ? 'status' : 'reply',
+          }]
+        })
+        setStreamBuffer('')
+        setThinkingBuffer('')
+        pendingThinkingRef.current = ''
+      }),
+      EventsOn('mauler:tool_protocol_repair', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         setStreamBuffer('')
       }),
       EventsOn('mauler:stream_done', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
+        const owner = runEventOwner(args)
         setStreaming(false)
         setActiveRunProfile('')
         setToolCountdown(null)
+        setBrowserHandoff(null)
         if (streamErrorHandledRef.current) {
           streamErrorHandledRef.current = false
           answerCheckpointRef.current = ''
           setStreamBuffer('')
+          void refreshSessions()
+          if (owner) {
+            retiredRunGenerationRef.current = Math.max(retiredRunGenerationRef.current, owner.generation)
+            activeRunOwnerRef.current = null
+          }
           return
         }
         const terminalAnswer = cleanAssistantTranscriptText(String(args[0] || ''))
         const terminalStatus = String(args[1] || 'done')
         const stopReason = String(args[2] || '')
+        const answerDelivered = terminalStatus === 'done' || terminalStatus === 'recovered'
+        if (terminalStatus === 'recovered') {
+          setRunState({ state: 'recovered', detail: 'Answer delivered from gathered evidence after redundant work was stopped.' })
+        }
         setStreamBuffer(prev => {
           const current = cleanAssistantTranscriptText(prev)
           const checkpoint = cleanAssistantTranscriptText(answerCheckpointRef.current)
-          const visible = terminalStatus === 'done'
+          const visible = answerDelivered
             ? (terminalAnswer || current || checkpoint)
             : (checkpoint || terminalAnswer || current)
           answerCheckpointRef.current = ''
           if (visible) {
             const thinking = pendingThinkingRef.current || undefined
             pendingThinkingRef.current = ''
-            setMessages(m => [
-              ...m,
-              {
+            setMessages(m => {
+              const sameTurnAlreadyVisible = [...m].reverse().some(message =>
+                message.role === 'assistant' &&
+                (!owner || message.runId === owner.run_id) &&
+                cleanAssistantTranscriptText(message.content) === visible
+              )
+              return [
+                ...m,
+                ...(!sameTurnAlreadyVisible ? [{
                 id: crypto.randomUUID(),
-                role: 'assistant',
+                role: 'assistant' as const,
                 content: visible,
                 thinking,
                 timestamp: Date.now(),
-              },
-              ...(terminalStatus !== 'done' && stopReason ? [{
+                runId: owner?.run_id,
+              }] : []),
+              ...(!answerDelivered && stopReason ? [{
                 id: crypto.randomUUID(),
                 role: 'system' as const,
                 content: `The answer above was preserved, but run finalisation stopped: ${stopReason}`,
                 timestamp: Date.now(),
               }] : []),
-            ])
+              ]
+            })
           } else {
             pendingThinkingRef.current = ''
           }
           return ''
         })
         setStatsVersion(v => v + 1)
+        void refreshSessions()
         const pending = pendingInterruptRef.current
         if (pending) {
           pendingInterruptRef.current = null
@@ -449,13 +814,19 @@ export default function App() {
           }])
           sendPendingMessage(pending)
         }
+        if (owner) {
+          retiredRunGenerationRef.current = Math.max(retiredRunGenerationRef.current, owner.generation)
+          activeRunOwnerRef.current = null
+        }
       }),
       EventsOn('mauler:stream_error', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const err = args[0] as string
         streamErrorHandledRef.current = true
         setStreaming(false)
         setActiveRunProfile('')
         setToolCountdown(null)
+        setBrowserHandoff(null)
         setRunState({ state: 'failed', detail: err })
         setStreamBuffer(prev => {
           const checkpoint = cleanAssistantTranscriptText(answerCheckpointRef.current)
@@ -499,6 +870,7 @@ export default function App() {
         }
       }),
       EventsOn('mauler:tool_call', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const tc = args[0] as { id: string; name: string; input: string; timeout?: string }
         const nextItem: AgentActivity = {
           id: tc.id,
@@ -508,6 +880,16 @@ export default function App() {
           startTime: Date.now(),
         }
         setActivity(items => [nextItem, ...items].slice(0, 12))
+        const owner = runEventOwner(args)
+        setMessages(items => items.some(item => item.id === `${owner?.run_id || 'run'}:tool-call:${tc.id}`) ? items : [...items, {
+          id: `${owner?.run_id || 'run'}:tool-call:${tc.id}`,
+          role: 'tool_call',
+          content: tc.input,
+          toolName: tc.name,
+          toolCallId: tc.id,
+          runId: owner?.run_id,
+          timestamp: Date.now(),
+        }])
         const emittedTimeout = Number(tc.timeout)
         const timeoutSec = Number.isFinite(emittedTimeout) && emittedTimeout > 0
           ? Math.floor(emittedTimeout)
@@ -524,8 +906,19 @@ export default function App() {
         }
       }),
       EventsOn('mauler:tool_result', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const tr = args[0] as { id: string; name: string; result: string }
         setToolCountdown(prev => prev?.id === tr.id ? null : prev)
+        const owner = runEventOwner(args)
+        setMessages(items => items.some(item => item.id === `${owner?.run_id || 'run'}:tool-result:${tr.id}`) ? items : [...items, {
+          id: `${owner?.run_id || 'run'}:tool-result:${tr.id}`,
+          role: 'tool_result',
+          content: tr.result,
+          toolName: tr.name,
+          toolCallId: tr.id,
+          runId: owner?.run_id,
+          timestamp: Date.now(),
+        }])
         setActivity(items => {
           const next = items.map(item => item.id === tr.id
             ? { ...item, status: 'done' as const, result: tr.result, durationMs: Date.now() - item.startTime }
@@ -548,6 +941,7 @@ export default function App() {
         }
       }),
       EventsOn('mauler:image_progress', (...args: unknown[]) => {
+		if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const progress = args[0] as {
           tool_call_id?: string
           job_id?: string
@@ -582,9 +976,11 @@ export default function App() {
         void isNew
       }),
       EventsOn('mauler:confirm', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         setConfirm(args[0] as ConfirmPayload)
       }),
       EventsOn('mauler:compact', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const summary = args[0] as string
         const now = Date.now()
         setActivity(items => [{
@@ -600,10 +996,68 @@ export default function App() {
         setAgentMode((args[0] as string) || 'Auto')
       }),
       EventsOn('mauler:run_state', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const payload = args[0] as RunStatePayload
-        if (payload?.state) setRunState(payload)
+        if (payload?.state) {
+          setRunState(payload)
+          const state = String(payload.state).toLowerCase()
+          if (['recovering', 'blocked', 'recovered', 'failed'].includes(state)) {
+            const owner = runEventOwner(args)
+            const milestoneKey = `${owner?.run_id || 'run'}:${state}`
+            if (!runMilestonesRef.current.has(milestoneKey)) {
+              runMilestonesRef.current.add(milestoneKey)
+              setMessages(items => [...items, {
+                id: `${milestoneKey}:status`,
+                role: 'system',
+                category: 'status',
+                content: `${state[0].toUpperCase()}${state.slice(1)}${payload.detail ? ` — ${payload.detail}` : ''}`,
+                runId: owner?.run_id,
+                timestamp: Date.now(),
+              }])
+            }
+          }
+        }
       }),
-      EventsOn('mauler:task_run', () => {
+      EventsOn('mauler:browser_handoff', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
+        const raw = (args[0] || {}) as Record<string, unknown>
+        const active = raw.active === true || String(raw.active || '').toLowerCase() === 'true'
+        const owner = runEventOwner(args)
+        if (!active) {
+          setBrowserHandoff(null)
+          const id = `${owner?.run_id || 'run'}:browser:resumed`
+          setMessages(items => items.some(item => item.id === id) ? items : [...items, {
+            id,
+            role: 'system',
+            category: 'browser',
+            content: 'Browser takeover completed — the same run resumed from a fresh page observation.',
+            runId: owner?.run_id,
+            timestamp: Date.now(),
+          }])
+          return
+        }
+        const handoff = {
+          active: true,
+          action: String(raw.action || 'takeover'),
+          state: String(raw.state || 'waiting_user'),
+          url: String(raw.url || ''),
+          title: String(raw.title || ''),
+          guidance: String(raw.guidance || ''),
+        }
+        setBrowserHandoff(handoff)
+        setInspectorFocus('activity')
+        const id = `${owner?.run_id || 'run'}:browser:waiting`
+        setMessages(items => items.some(item => item.id === id) ? items : [...items, {
+          id,
+          role: 'system',
+          category: 'browser',
+          content: `Browser waiting for you${handoff.title ? ` — ${handoff.title}` : ''}${handoff.url ? `\n${handoff.url}` : ''}`,
+          runId: owner?.run_id,
+          timestamp: Date.now(),
+        }])
+      }),
+      EventsOn('mauler:task_run', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         setTaskRunVersion(v => v + 1)
         refreshTodos()
       }),
@@ -611,12 +1065,14 @@ export default function App() {
         setTaskRunVersion(v => v + 1)
       }),
       EventsOn('mauler:workspace_changed', () => {
+        retireActiveRunUI()
         setMessages([])
         setStreamBuffer('')
         setThinkingBuffer('')
         setRunProfileOverride('')
         setActiveRunProfile('')
         setSelectedSession('')
+        setScratchWorkspace(null)
         setConfirm(null)
         setConfirmAction(null)
         setOpenFiles(files => files.filter(file => !file.path))
@@ -627,7 +1083,31 @@ export default function App() {
         setWorkspaceVersion(v => v + 1)
         setStatsVersion(v => v + 1)
       }),
+      EventsOn('mauler:workspace_files_changed', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
+        // Artifacts created by tools should refresh Explorer/Inspector only.
+        // They are not workspace switches and must never clear Chat, its draft,
+        // the active stream, or the shared terminal while a run is working.
+        setWorkspaceFilesVersion(v => v + 1)
+      }),
+      EventsOn('mauler:workspace_attached', () => {
+        // Explicit scratch attachment changes the tool root but belongs to the
+        // same conversation. Preserve the transcript while refreshing all
+        // path-backed workspace surfaces.
+        setOpenFiles(files => files.filter(file => !file.path))
+        setActiveFileIdx(0)
+        setWorkspaceVersion(v => v + 1)
+        setStatsVersion(v => v + 1)
+        refreshTodos()
+        void GetScratchWorkspaceStatus().then(status => setScratchWorkspace(status.active ? status : null)).catch(() => {})
+      }),
+      EventsOn('mauler:scratch_workspace', (...args: unknown[]) => {
+        const status = args[0] as ScratchWorkspaceStatus
+        setScratchWorkspace(status?.active ? status : null)
+        setStatsVersion(v => v + 1)
+      }),
       EventsOn('mauler:suggest_learning', (...args: unknown[]) => {
+        if (!eventBelongsToActiveRun(args, activeRunOwnerRef.current)) return
         const suggestion = args[0] as SkillSuggestion
         if (suggestion) setSkillSuggestion(suggestion)
       }),
@@ -641,39 +1121,48 @@ export default function App() {
       }),
     ]
     return () => offs.forEach(off => off())
-  }, [refreshTodos])
+  }, [autoOpenRunPanel, refreshSessions, refreshTodos, retireActiveRunUI])
 
   useEffect(() => {
     refreshTodos()
   }, [refreshTodos, taskRunVersion])
 
-  const refreshSessions = useCallback(async () => {
-    const names = await ListSessions().catch(() => [] as string[])
-    setSessions(names)
-    setSelectedSession(prev => prev || names[0] || '')
+  const refreshRunCheckpoints = useCallback(async () => {
+    const checkpoints = await ListResumableRuns().catch(() => [] as RunCheckpoint[])
+    setRunCheckpoints(Array.isArray(checkpoints) ? checkpoints : [])
   }, [])
 
   useEffect(() => {
     void refreshSessions()
-  }, [refreshSessions])
+    void refreshRunCheckpoints()
+  }, [refreshRunCheckpoints, refreshSessions])
 
   const refreshProfiles = useCallback(async () => {
-    const [settings, profilesFile, auto, autoAgentEnabled, mode, definitions] = await Promise.all([
+    const [settings, profilesFile, auto, autoAgentEnabled, mode, definitions, scratch, savedConversationMode] = await Promise.all([
       GetSettings().catch(() => null),
       GetProfiles().catch(() => null),
       GetAutonomous().catch(() => false),
       GetAutoAgents().catch(() => true),
       GetAgentMode().catch(() => 'Auto'),
       ListAgentDefinitions().catch(() => [] as AgentDefinition[]),
+      GetScratchWorkspaceStatus().catch(() => null),
+      GetConversationMode().catch(() => 'adaptive'),
     ])
     if (settings) {
       setActiveProfile(settings.active_profile)
+      const selectedProfile = profilesFile?.profiles?.[settings.active_profile]
+      const modelID = selectedProfile?.model_id || settings.active_profile || ''
+      setActiveModelID(modelID)
+      setThinkingSupported(Boolean(selectedProfile?.thinking) || /qwen3[._-]?(?:5|6|8)/i.test(modelID))
+      setThinkingMode(settings.agents.thinking_mode || 'auto')
+      setReasoningEffort(settings.agents.reasoning_effort || 'auto')
+      setWorkspaceRootLabel(settings.context.workspace_dir || '')
       setShowToolCountdown(settings.ui.tool_countdown ?? false)
       setAgentSelection(settings.agents.mode_override || 'Auto')
       if (!appliedInitialUI.current) {
         appliedInitialUI.current = true
         setShowTerminal(settings.ui.terminal_default_open ?? false)
-        setTerminalHeight(Math.min(600, Math.max(100, settings.ui.terminal_height || 260)))
+        setTerminalHeight(clampTerminalHeight(settings.ui.terminal_height || TERMINAL_HEIGHT_DEFAULT))
       }
       applyTheme(settings.ui.theme || 'dark')
       applyAccentColor(settings.ui.accent_color || '#4ade80')
@@ -684,7 +1173,45 @@ export default function App() {
     setAutoAgentsState(autoAgentEnabled)
     setAgentMode(mode || 'Auto')
     setAgentDefinitions(definitions)
+    setScratchWorkspace(scratch?.active ? scratch : null)
+    setConversationModeState(savedConversationMode === 'direct' || savedConversationMode === 'agent' ? savedConversationMode : 'adaptive')
   }, [])
+
+  const handleConversationModeChange = useCallback(async (nextMode: 'adaptive' | 'direct' | 'agent') => {
+    if (streaming) {
+      pushToast('Stop the active run before changing this conversation mode.', 'warn')
+      return
+    }
+    try {
+      await SetConversationMode(selectedSession, nextMode)
+      setConversationModeState(nextMode)
+      await refreshSessions()
+      const label = nextMode === 'direct' ? 'Direct' : nextMode === 'agent' ? 'Agent' : 'Adaptive'
+      pushToast(`${label} mode selected for this conversation.`, 'success')
+    } catch (error) {
+      pushToast(`Could not change conversation mode: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, refreshSessions, selectedSession, streaming])
+
+  const handleSavedConversationModeChange = useCallback(async (name: string, nextMode: 'adaptive' | 'direct' | 'agent') => {
+    if (streaming) {
+      pushToast('Stop the active run before changing a conversation mode.', 'warn')
+      return
+    }
+    try {
+      if (name === selectedSession) {
+        await SetConversationMode(name, nextMode)
+        setConversationModeState(nextMode)
+      } else {
+        await SetSavedConversationMode(name, nextMode)
+      }
+      await refreshSessions()
+      const label = nextMode === 'direct' ? 'Direct' : nextMode === 'agent' ? 'Agent' : 'Adaptive'
+      pushToast(`${name} will use ${label} mode.`, 'success')
+    } catch (error) {
+      pushToast(`Could not change conversation mode: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, refreshSessions, selectedSession, streaming])
 
   useEffect(() => {
     void refreshProfiles()
@@ -720,6 +1247,15 @@ export default function App() {
         e.preventDefault()
         toggleTerminalPanel()
       }
+      if (e.key.toLowerCase() === 'b' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault()
+        if (e.shiftKey) toggleInspector()
+        else setLeftOpen(value => !value)
+      }
+      if (e.key.toLowerCase() === 'j' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault()
+        setShowTerminal(value => !value)
+      }
       if (e.key === 'Escape') {
         setShowSettings(false)
         setConfirm(null)
@@ -728,14 +1264,21 @@ export default function App() {
       }
       if (e.key.toLowerCase() === 'k' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault()
+        if (streaming) {
+          pushToast('Stop the active run before clearing this conversation.', 'warn')
+          return
+        }
         setConfirmAction({
           title: 'Clear Chat',
           message: 'Clear chat history?',
           confirmLabel: 'Clear',
           onConfirm: async () => {
             await ClearHistory()
+            const resetMode = await GetConversationMode().catch(() => 'adaptive')
+            retireActiveRunUI()
             setMessages([])
             setStreamBuffer('')
+            setConversationModeState(resetMode === 'direct' || resetMode === 'agent' ? resetMode : 'adaptive')
             setStatsVersion(v => v + 1)
           },
         })
@@ -743,7 +1286,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [toggleTerminalPanel])
+  }, [pushToast, retireActiveRunUI, streaming, toggleInspector, toggleTerminalPanel])
 
   const handleUserMessage = useCallback((text: string, images: string[], attachments: ChatAttachment[] = []) => {
     setMessages(m => [...m, {
@@ -757,6 +1300,20 @@ export default function App() {
   }, [])
 
   const sendNow = useCallback(async (text: string, images: string[], attachments: ChatAttachment[], profileOverride = '') => {
+    if (!selectedSession) {
+      try {
+        const name = await StartConversation(automaticConversationTitle(text, images, attachments))
+        setSelectedSession(name)
+      } catch (error) {
+        setMessages(current => [...current, {
+          id: crypto.randomUUID(),
+          role: 'system',
+          content: `Could not start a new conversation: ${error}`,
+          timestamp: Date.now(),
+        }])
+        return
+      }
+    }
     handleUserMessage(text, images, attachments)
     try {
       if (profileOverride) {
@@ -774,7 +1331,7 @@ export default function App() {
         timestamp: Date.now(),
       }])
     }
-  }, [handleUserMessage])
+  }, [handleUserMessage, selectedSession])
 
   const handleSubmitMessage = useCallback((text: string, images: string[], attachments: ChatAttachment[], profileOverride = '') => {
     if (streaming) {
@@ -904,6 +1461,59 @@ export default function App() {
     }
   }, [pushToast, streaming])
 
+  const handleCreateScratchWorkspace = useCallback(async () => {
+    if (streaming) {
+      pushToast('Stop the active run before attaching a scratch workspace.', 'warn')
+      return
+    }
+    try {
+      const status = await CreateScratchWorkspace(selectedSession || 'Scratch chat')
+      setScratchWorkspace(status)
+      setInspectorFocus('workspace')
+      pushToast('Scratch workspace attached. This conversation was preserved and files will never be deleted automatically.', 'success')
+    } catch (error) {
+      pushToast(`Could not create scratch workspace: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, selectedSession, streaming])
+
+  const handleCreateWorkspaceProject = useCallback(async (name: string, bugBounty: boolean) => {
+    if (streaming) {
+      pushToast('Stop the active run before creating a project.', 'warn')
+      return
+    }
+    try {
+      const created = await CreateWorkspaceProject(name, '')
+      if (!created) return
+      if (bugBounty) {
+        await SetAutoAgents(true)
+        await SetAgentModeOverride('Bug Bounty Hunter')
+        setAutoAgentsState(true)
+        setAgentSelection('Bug Bounty Hunter')
+        setAgentMode('Bug Bounty Hunter')
+      }
+      setScratchWorkspace(null)
+      setStatsVersion(v => v + 1)
+      pushToast(`Project created and opened: ${created}`, 'success')
+    } catch (error) {
+      pushToast(`Could not create project: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, streaming])
+
+  const handlePromoteScratchWorkspace = useCallback(async (name: string) => {
+    if (streaming) {
+      pushToast('Stop the active run before promoting this workspace.', 'warn')
+      return
+    }
+    try {
+      const promoted = await PromoteScratchWorkspace(name)
+      setScratchWorkspace(null)
+      setStatsVersion(v => v + 1)
+      pushToast(`${promoted.name || name || 'Workspace'} is now a durable Workspace; its files stayed in place.`, 'success')
+    } catch (error) {
+      pushToast(`Could not promote scratch workspace: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, streaming])
+
   const mapSessionMessages = (loaded: SessionChatMessage[]): ChatMessage[] =>
     loaded
       .filter(m => !(m.role === 'system' && m.content.trimStart().startsWith('[Context compacted]')))
@@ -911,6 +1521,10 @@ export default function App() {
       id: crypto.randomUUID(),
       role: m.role,
       content: m.content,
+      thinking: m.thinking,
+      toolName: m.tool_name,
+      toolCallId: m.tool_call_id,
+      category: m.role === 'tool_call' || m.role === 'tool_result' ? 'tool' : m.role === 'system' ? 'status' : 'reply',
       images: m.images ?? [],
       attachments: m.attachments ?? [],
       timestamp: Date.now(),
@@ -918,6 +1532,85 @@ export default function App() {
 
   const cleanSessionName = (name: string) =>
     name.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[._-]+|[._-]+$/g, '')
+
+  const handleOpenConversationCheckpoints = useCallback(async () => {
+    const stamp = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    setCheckpointDefaultName(`${selectedSession || 'Chat'} · ${stamp}`.slice(0, 80))
+    await refreshRunCheckpoints()
+    setShowConversationCheckpoints(true)
+  }, [refreshRunCheckpoints, selectedSession])
+
+  const handleCreateConversationCheckpoint = useCallback(async (name: string) => {
+    if (streaming) {
+      pushToast('Stop the active run before creating a checkpoint.', 'warn')
+      return false
+    }
+    setCheckpointBusy(true)
+    try {
+      await SaveConversationCheckpoint(name, selectedSession)
+      await refreshRunCheckpoints()
+      pushToast(`Created checkpoint “${name.trim()}”.`, 'success')
+      return true
+    } catch (error) {
+      pushToast(`Could not create checkpoint: ${String(error)}`, 'danger')
+      return false
+    } finally {
+      setCheckpointBusy(false)
+    }
+  }, [pushToast, refreshRunCheckpoints, selectedSession, streaming])
+
+  const handleResumeConversationCheckpoint = useCallback(async (checkpoint: RunCheckpoint) => {
+    if (streaming) {
+      pushToast('Stop the active run before resuming a checkpoint.', 'warn')
+      return false
+    }
+    const previousMessages = messages
+    const previousSelected = selectedSession
+    const previousMode = conversationMode
+    const mode = checkpoint.conversation_mode === 'direct' || checkpoint.conversation_mode === 'agent' ? checkpoint.conversation_mode : 'adaptive'
+    setCheckpointBusy(true)
+    retireActiveRunUI()
+    setSelectedSession('')
+    const restoredMessages = mapSessionMessages(checkpoint.chat_messages || [])
+    if (checkpoint.explicit) {
+      const instruction = `Resume the saved conversation from its captured state. Reconcile the existing evidence first and do not repeat completed work unless verification requires it.${checkpoint.prompt?.trim() ? `\n\nOriginal task: ${checkpoint.prompt.trim()}` : ''}`
+      restoredMessages.push({ id: crypto.randomUUID(), role: 'user', content: instruction, images: [], attachments: [], timestamp: Date.now(), category: 'reply' })
+    }
+    setMessages(restoredMessages)
+    setConversationModeState(mode)
+    setStreamBuffer('')
+    setCenterTab('chat')
+    try {
+      await ResumeRun(checkpoint.run_id)
+      setShowConversationCheckpoints(false)
+      setStatsVersion(value => value + 1)
+      pushToast(`Resumed “${checkpoint.name || 'automatic recovery'}” as a new linked run.`, 'success')
+      return true
+    } catch (error) {
+      setMessages(previousMessages)
+      setSelectedSession(previousSelected)
+      setConversationModeState(previousMode)
+      pushToast(`Could not resume checkpoint: ${String(error)}`, 'danger')
+      return false
+    } finally {
+      setCheckpointBusy(false)
+    }
+  }, [conversationMode, messages, pushToast, retireActiveRunUI, selectedSession, streaming])
+
+  const handleDeleteConversationCheckpoint = useCallback(async (checkpoint: RunCheckpoint) => {
+    setCheckpointBusy(true)
+    try {
+      await DeleteResumableRun(checkpoint.run_id)
+      await refreshRunCheckpoints()
+      pushToast(`Removed checkpoint “${checkpoint.name || 'automatic recovery'}”.`, 'success')
+      return true
+    } catch (error) {
+      pushToast(`Could not remove checkpoint: ${String(error)}`, 'danger')
+      return false
+    } finally {
+      setCheckpointBusy(false)
+    }
+  }, [pushToast, refreshRunCheckpoints])
 
   const handleSaveSession = useCallback(async () => {
     const fallback = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
@@ -934,43 +1627,192 @@ export default function App() {
     setShowSaveSession(false)
   }, [refreshSessions, saveSessionDraft])
 
-  const handleLoadSession = useCallback(async () => {
-    if (!selectedSession) return
-    const loaded = await LoadSession(selectedSession)
+  const handleRenameSession = useCallback((requestedName?: string) => {
+    const source = requestedName || selectedSession
+    if (!source || streaming) return
+    setRenameSessionSource(source)
+    setRenameSessionDraft(source)
+    setShowRenameSession(true)
+  }, [selectedSession, streaming])
+
+  const submitRenameSession = useCallback(async () => {
+    const name = renameSessionDraft.trim()
+    if (!renameSessionSource || !name || streaming) return
+    try {
+      await RenameSession(renameSessionSource, name)
+      const cleanName = cleanSessionName(name)
+      if (selectedSession === renameSessionSource) setSelectedSession(cleanName)
+      await refreshSessions()
+      setShowRenameSession(false)
+      pushToast(`Renamed conversation to “${cleanName}”.`, 'success')
+    } catch (error) {
+      pushToast(`Could not rename conversation: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, refreshSessions, renameSessionDraft, renameSessionSource, selectedSession, streaming])
+
+  const handleEditSessionTags = useCallback((requestedName?: string) => {
+    const name = requestedName || selectedSession
+    if (!name || streaming) return
+    const summary = sessions.find(session => session.name === name)
+    setTagSessionName(name)
+    setSessionTagsDraft((summary?.tags || []).join(', '))
+    setShowSessionTags(true)
+  }, [selectedSession, sessions, streaming])
+
+  const submitSessionTags = useCallback(async () => {
+    if (!tagSessionName || streaming) return
+    const tags = sessionTagsDraft.split(',').map(tag => tag.trim()).filter(Boolean)
+    try {
+      await SetSessionTags(tagSessionName, tags)
+      await refreshSessions()
+      setShowSessionTags(false)
+      pushToast(tags.length > 0 ? `Updated tags for “${tagSessionName}”.` : `Cleared tags for “${tagSessionName}”.`, 'success')
+    } catch (error) {
+      pushToast(`Could not update conversation tags: ${String(error)}`, 'danger')
+    }
+  }, [pushToast, refreshSessions, sessionTagsDraft, streaming, tagSessionName])
+
+  const handleLoadSession = useCallback(async (requestedName?: string) => {
+    const name = requestedName || selectedSession
+    if (!name) return
+    if (streaming) {
+      pushToast('Stop the active run before loading another conversation.', 'warn')
+      return
+    }
+    const loaded = await LoadSession(name)
+    const loadedMode = await GetConversationMode().catch(() => 'adaptive')
+    retireActiveRunUI()
+    setSelectedSession(name)
     setMessages(mapSessionMessages(loaded))
+    setConversationModeState(loadedMode === 'direct' || loadedMode === 'agent' ? loadedMode : 'adaptive')
     setStreamBuffer('')
     setStatsVersion(v => v + 1)
-  }, [selectedSession])
+  }, [pushToast, retireActiveRunUI, selectedSession, streaming])
 
-  const handleDeleteSession = useCallback(async () => {
-    if (!selectedSession) return
+  const handleDeleteSession = useCallback(async (requestedName?: string) => {
+    const name = requestedName || selectedSession
+    if (!name) return
     setConfirmAction({
       title: 'Delete Session',
-      message: `Delete session "${selectedSession}"?`,
+      message: `Delete session "${name}"?`,
       confirmLabel: 'Delete',
       onConfirm: async () => {
-        await DeleteSession(selectedSession)
-        setSelectedSession('')
+        const deletingActiveConversation = selectedSession === name
+        await DeleteSession(name)
+        if (deletingActiveConversation) {
+          await ClearHistory()
+          await ClearTodos()
+          retireActiveRunUI()
+          setSelectedSession('')
+          setMessages([])
+          setStreamBuffer('')
+          setThinkingBuffer('')
+          setRunState(null)
+          setActivity([])
+          refreshTodos()
+        }
         await refreshSessions()
       },
     })
-  }, [refreshSessions, selectedSession])
+  }, [refreshSessions, refreshTodos, retireActiveRunUI, selectedSession])
+
+  const handleInspectSession = useCallback(async (requestedName?: string) => {
+    const name = requestedName || selectedSession
+    if (!name) return
+    setSessionRepairBusy(true)
+    try {
+      setSessionRepairReport(await InspectSessionRepair(name))
+    } catch (error) {
+      pushToast(`Could not inspect session: ${String(error)}`, 'danger')
+    } finally {
+      setSessionRepairBusy(false)
+    }
+  }, [pushToast, selectedSession])
+
+  const handleApplySessionRepair = useCallback(async () => {
+    const name = sessionRepairReport?.name || selectedSession
+    if (!name || streaming) return
+    setSessionRepairBusy(true)
+    try {
+      const report = await RepairSession(name)
+      setSessionRepairReport(report)
+      await refreshSessions()
+      pushToast(report.applied ? 'Session repaired. The original was retained as a backup.' : 'Session is already structurally clean.', 'success')
+    } catch (error) {
+      pushToast(`Could not repair session: ${String(error)}`, 'danger')
+    } finally {
+      setSessionRepairBusy(false)
+    }
+  }, [pushToast, refreshSessions, selectedSession, sessionRepairReport?.name, streaming])
+
+  const handleNewChat = useCallback(async () => {
+    if (streaming) {
+      pushToast('Stop the active run before starting a new conversation.', 'warn')
+      return
+    }
+    try {
+      // End-of-run autosave normally owns this write. Saving once more here
+      // also protects a conversation immediately before the operator leaves it.
+      if (selectedSession && messages.length > 0) {
+        await SaveSession(selectedSession)
+      }
+      await ClearHistory()
+      const resetMode = await GetConversationMode().catch(() => 'adaptive')
+      await ClearTodos()
+      retireActiveRunUI()
+      setSelectedSession('')
+      setConversationModeState(resetMode === 'direct' || resetMode === 'agent' ? resetMode : 'adaptive')
+      setMessages([])
+      setStreamBuffer('')
+      setThinkingBuffer('')
+      setRunState(null)
+      setActivity([])
+      refreshTodos()
+      await refreshSessions()
+      setStatsVersion(value => value + 1)
+    } catch (error) {
+      pushToast(`Could not start a new conversation: ${String(error)}`, 'danger')
+    }
+  }, [messages.length, pushToast, refreshSessions, refreshTodos, retireActiveRunUI, selectedSession, streaming])
 
   const handleClearChat = useCallback(() => {
+    if (streaming) {
+      pushToast('Stop the active run before starting a new conversation.', 'warn')
+      return
+    }
     setConfirmAction({
       title: 'Clear Chat',
       message: 'Clear this conversation and its active plan? Project files, saved sessions, and memory are preserved.',
       confirmLabel: 'Clear',
       onConfirm: async () => {
         await ClearHistory()
+        const resetMode = await GetConversationMode().catch(() => 'adaptive')
         await ClearTodos()
+        retireActiveRunUI()
+        setSelectedSession('')
+        setConversationModeState(resetMode === 'direct' || resetMode === 'agent' ? resetMode : 'adaptive')
         setMessages([])
         setStreamBuffer('')
         refreshTodos()
         setStatsVersion(v => v + 1)
       },
     })
-  }, [refreshTodos])
+  }, [pushToast, refreshTodos, retireActiveRunUI, streaming])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.key.toLowerCase() === 'n') {
+        event.preventDefault()
+        void handleNewChat()
+      } else if (event.shiftKey && event.key.toLowerCase() === 's') {
+        event.preventDefault()
+        void handleSaveSession()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [handleNewChat, handleSaveSession])
 
   const startResize = useCallback((side: 'left' | 'right') => (e: ReactMouseEvent) => {
     const startX = e.clientX
@@ -1026,76 +1868,123 @@ export default function App() {
     return true
   }, [leftWidth, rightWidth])
 
-  const gridColumns = `${leftOpen ? leftWidth : 28}px ${leftOpen ? 6 : 0}px 1fr ${rightOpen ? 6 : 0}px ${rightOpen ? rightWidth : 28}px`
+	const chatCanvas = centerTab === 'chat'
+	const gridColumns = chatCanvas
+		? `${leftOpen ? leftWidth : closedPanelRails ? 28 : 0}px ${leftOpen ? 6 : 0}px 1fr 0px 0px`
+		: `${leftOpen ? leftWidth : closedPanelRails ? 28 : 0}px ${leftOpen ? 6 : 0}px 1fr ${rightOpen ? 6 : 0}px ${rightOpen ? rightWidth : closedPanelRails ? 28 : 0}px`
+	const shellLayoutStyle = {
+		'--left-pane-width': `${leftWidth}px`,
+		'--right-pane-width': `${rightWidth}px`,
+		'--terminal-panel-height': `${terminalHeight}px`,
+		'--chat-left-offset': `${leftOpen ? leftWidth + 6 : closedPanelRails ? 28 : 0}px`,
+	} as CSSProperties
 
   return (
-    <div className="app-shell">
+	<div className={`app-shell ${chatCanvas ? 'chat-canvas-shell' : 'workbench-canvas-shell'}${showTerminal ? ' bottom-surface-open' : ''}`} style={shellLayoutStyle}>
       <div className="titlebar">
         <div className="titlebar-brand">
+          <span className="titlebar-logo">M</span>
           <span className="titlebar-name">TheMauler</span>
+          <span className="titlebar-context-sep" aria-hidden="true" />
+          <span className="titlebar-context">
+            <strong>{centerTab === 'chat' ? (selectedSession || 'New chat') : (workbenchPageLabels[centerTab] || 'Workbench')}</strong>
+            <small>{streaming
+              ? `${activeRunProfile || activeProfile || 'Local model'} · ${titlebarRunSummary(runState)}`
+              : `${activeProfile || 'Local model'} · ${autonomous ? 'autonomous' : 'supervised'}`}</small>
+          </span>
         </div>
         <div className="titlebar-actions">
-          <div className="titlebar-group titlebar-session-group" aria-label="Session actions">
-            <select
-              className="session-select"
-              value={selectedSession}
-              onChange={e => setSelectedSession(e.target.value)}
-              title="Saved sessions"
-            >
-              <option value="">Sessions</option>
-              {sessions.map(name => <option key={name} value={name}>{name}</option>)}
-            </select>
-            <button onClick={() => void handleSaveSession()} title="Save session">Save</button>
-            <button onClick={() => void handleLoadSession()} disabled={!selectedSession} title="Load session">Load</button>
-            <button onClick={() => void handleDeleteSession()} disabled={!selectedSession} title="Delete saved session">Delete</button>
-            <button className="titlebar-clear-session" onClick={handleClearChat} disabled={streaming} title="Clear current chat transcript">Clear Chat</button>
-          </div>
-          <div className="titlebar-sep" />
-          <div className="titlebar-group">
-            <button onClick={() => setLeftOpen(v => !v)} title="Toggle Explorer panel" className={leftOpen ? 'panel-toggle on' : 'panel-toggle'}>Explorer</button>
-            <button onClick={() => setRightOpen(v => !v)} title="Toggle inspector panel" className={rightOpen ? 'panel-toggle on' : 'panel-toggle'}>Inspector</button>
-          </div>
-          <div className="titlebar-sep" />
-          <button
-            className="titlebar-doctor"
-            onClick={() => {
+		  <button className={`panel-toggle chats-toggle ${leftOpen ? 'on' : ''}`} onClick={() => setLeftOpen(value => !value)} aria-pressed={leftOpen} title="Show or hide conversations (Ctrl+B)"><UiIcon name="chats" /><span>Chats</span></button>
+          {!leftOpen && <>
+            <ConversationMenu
+              sessions={sessions}
+              selected={selectedSession}
+              streaming={streaming}
+              onOpen={name => void handleLoadSession(name)}
+              onNew={() => void handleNewChat()}
+              onSave={() => void handleSaveSession()}
+              onRename={handleRenameSession}
+              onEditTags={handleEditSessionTags}
+              onInspect={name => void handleInspectSession(name)}
+              onCheckpoints={() => void handleOpenConversationCheckpoints()}
+              checkpointCount={runCheckpoints.length}
+              onDelete={name => void handleDeleteSession(name)}
+              onModeChange={(name, mode) => void handleSavedConversationModeChange(name, mode)}
+            />
+            <div className="titlebar-sep" />
+          </>}
+		  <button
+			className={`panel-toggle inspector-toggle ${rightOpen ? 'on' : ''}`}
+			onClick={toggleInspector}
+			aria-pressed={rightOpen}
+			title="Show or hide Inspector (Ctrl+Shift+B)"
+		  ><UiIcon name="inspector" /><span>Inspector</span></button>
+		  <button className={`panel-toggle terminal-toggle ${showTerminal ? 'on' : ''}`} onClick={toggleTerminalPanel} aria-pressed={showTerminal} title="Show or hide Terminal (Ctrl+backtick)"><UiIcon name="terminal" /><span>Terminal</span></button>
+          <LayoutMenu
+            explorerOpen={leftOpen}
+            inspectorOpen={rightOpen}
+            bottomOpen={showTerminal}
+            bottomTab={bottomTab}
+            aiCommandsOpen={aiCommandsOpen}
+            autoOpenRunPanel={autoOpenRunPanel}
+            closedPanelRails={closedPanelRails}
+            onExplorerChange={setLeftOpen}
+            onInspectorChange={setInspectorVisible}
+            onBottomChange={setShowTerminal}
+            onShowBottom={showBottomTab}
+            onAICommandsChange={setAICommandsOpen}
+            onAutoOpenRunPanelChange={setAutoOpenRunPanel}
+            onClosedPanelRailsChange={setClosedPanelRails}
+            onFocusChat={focusChatLayout}
+            onRestoreDefault={restoreDefaultLayout}
+            onOpenDoctor={() => {
               setCenterTab('doctor')
               setDoctorRunRequest(v => v + 1)
             }}
-            title="Run Doctor diagnostics"
-          >Doctor</button>
-          <div className="titlebar-sep" />
-          <button
-            onClick={toggleTerminalPanel}
-            title="Show or hide Terminal (Ctrl+`)"
-            className={showTerminal && bottomTab === 'terminal' ? 'panel-toggle on' : 'panel-toggle'}
-          >Terminal</button>
-          <div className="titlebar-sep" />
-          <button onClick={() => setShowSettings(true)} title="Settings (Ctrl+,)">Settings</button>
+            onOpenSettings={() => setShowSettings(true)}
+          />
         </div>
       </div>
 
       <div className="workspace" style={{ gridTemplateColumns: gridColumns }}>
-        <div className={leftOpen ? 'pane-slot' : 'pane-slot closed'}>
+        <div className={leftOpen ? 'pane-slot' : closedPanelRails ? 'pane-slot closed' : 'pane-slot hidden'}>
           {leftOpen ? (
             <HermesSidebar
               sessions={sessions}
               selectedSession={selectedSession}
               activeProfile={activeProfile}
+              workspaceLabel={workspaceRootLabel}
+              streaming={streaming}
               centerTab={centerTab}
-              onSelectSession={setSelectedSession}
-              onLoadSession={() => void handleLoadSession()}
-              onSaveSession={() => void handleSaveSession()}
-              onDeleteSession={() => void handleDeleteSession()}
-              onClearChat={handleClearChat}
-              onSelectTab={setCenterTab}
-              onOpenSettings={() => setShowSettings(true)}
+              onNewChat={() => {
+                void handleNewChat()
+                if (window.innerWidth <= 900) setLeftOpen(false)
+              }}
+              onOpenSession={name => {
+                void handleLoadSession(name)
+                if (window.innerWidth <= 900) setLeftOpen(false)
+              }}
+              onSaveChat={() => void handleSaveSession()}
+              onRenameChat={handleRenameSession}
+              onEditChatTags={handleEditSessionTags}
+              onInspectChat={name => void handleInspectSession(name)}
+              onOpenCheckpoints={() => void handleOpenConversationCheckpoints()}
+              onDeleteChat={name => void handleDeleteSession(name)}
+              onChatModeChange={(name, mode) => void handleSavedConversationModeChange(name, mode)}
+              onSelectTab={tab => {
+                setCenterTab(tab)
+                if (window.innerWidth <= 900) setLeftOpen(false)
+                if (tab === 'engagement') setInspectorFocus('facts')
+                else if (tab === 'ops') setInspectorFocus('activity')
+                else if (tab === 'projects' || tab === 'file') setInspectorFocus('workspace')
+              }}
+              onClose={() => setLeftOpen(false)}
             />
-          ) : (
-            <button className="collapsed-rail collapsed-rail-left" onClick={() => setLeftOpen(true)} title="Open Explorer">
-              <span>Explorer</span>
+          ) : closedPanelRails ? (
+            <button className="collapsed-rail collapsed-rail-left" onClick={() => setLeftOpen(true)} title="Open chat sidebar">
+              <span>Chats</span>
             </button>
-          )}
+          ) : null}
         </div>
         <div
           className={leftOpen ? 'resize-handle resize-handle-left' : 'resize-handle disabled'}
@@ -1105,10 +1994,10 @@ export default function App() {
             if (leftOpen && resizePaneByKeyboard('left', e.key, e.shiftKey)) e.preventDefault()
           }}
           role="separator"
-          aria-label="Resize Explorer"
+          aria-label="Resize chat sidebar"
           aria-orientation="vertical"
           tabIndex={leftOpen ? 0 : -1}
-          title={leftOpen ? 'Drag or use arrow keys to resize; double-click to collapse Explorer' : undefined}
+          title={leftOpen ? 'Drag or use arrow keys to resize; double-click to collapse the chat sidebar' : undefined}
         />
 
         <main className="center-pane">
@@ -1137,6 +2026,10 @@ export default function App() {
                 streamBuffer={streamBuffer}
                 thinkingBuffer={thinkingBuffer}
                 activeProfile={activeProfile}
+                activeModelID={activeModelID}
+                thinkingSupported={thinkingSupported}
+                thinkingMode={thinkingMode}
+                reasoningEffort={reasoningEffort}
                 activeRunProfile={activeRunProfile}
                 cloudRunProfiles={cloudRunProfiles}
                 runProfileOverride={runProfileOverride}
@@ -1144,27 +2037,53 @@ export default function App() {
                 pendingInterrupt={pendingInterrupt !== null}
                 toolCountdown={showToolCountdown ? toolCountdown : null}
                 runState={runState}
+                browserHandoff={browserHandoff}
                 todos={todos}
                 activity={activity}
                 settingsVersion={statsVersion}
+                engagementVersion={taskRunVersion + workspaceVersion}
+                scratchWorkspace={scratchWorkspace}
                 agentDefinitions={agentDefinitions}
                 agentSelection={agentSelection}
                 agentMode={agentMode}
+                conversationMode={conversationMode}
                 draftRequest={chatDraftRequest}
                 onSubmitMessage={handleSubmitMessage}
                 onRunProfileOverrideChange={setRunProfileOverride}
+                onReasoningControlChange={handleReasoningControlChange}
                 onCancelPending={handleCancelPending}
                 onStopAgent={() => void StopAgent()}
+                onResumeBrowser={async () => {
+                  try {
+                    await ResumeBrowserWorkflow()
+                  } catch (error) {
+					pushToast(`Could not resume browser: ${String(error)}`, 'danger')
+                  }
+                }}
+                onStopBrowser={async () => {
+                  try {
+                    await StopBrowserWorkflow()
+                    setBrowserHandoff(null)
+                  } catch (error) {
+					pushToast(`Could not stop browser: ${String(error)}`, 'danger')
+                  }
+                }}
                 onClearChat={handleClearChat}
                 onArtifact={handleArtifact}
                 onAutonomousChange={handleToggleAutonomous}
                 onOpenQuickChat={() => setChatLane('quick')}
+                onConversationModeChange={handleConversationModeChange}
                 onOpenSettings={() => setShowSettings(true)}
                 onAgentSelectionChange={handleAgentSelectionChange}
                 onChooseWorkspace={handleChooseWorkspace}
                 onSwitchWorkspace={handleSwitchWorkspace}
+                onCreateScratchWorkspace={handleCreateScratchWorkspace}
+                onCreateWorkspaceProject={handleCreateWorkspaceProject}
+                onPromoteScratchWorkspace={handlePromoteScratchWorkspace}
                 onOpenProjects={() => setCenterTab('projects')}
-                onClearPlan={async () => { await ClearTodos(); refreshTodos() }}
+                onOpenEngagement={() => setCenterTab('engagement')}
+                onPrepareEngagementRun={prepareEngagementRun}
+                onClearPlan={handleClearPlan}
               />
             ) : centerTab === 'chat' ? (
               <SideChatPage streaming={streaming} onOpenProjectChat={() => setChatLane('project')} />
@@ -1190,6 +2109,7 @@ export default function App() {
                 onOpenEngagement={() => setCenterTab('engagement')}
                 onPrepareEngagementRun={prepareEngagementRun}
                 onProjectChanged={(project, previousName) => {
+                  retireActiveRunUI()
                   setWorkspaceVersion(v => v + 1)
                   setStatsVersion(v => v + 1)
                   setMessages([])
@@ -1205,7 +2125,7 @@ export default function App() {
             ) : centerTab === 'brain' ? (
               <BrainPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'context' ? (
-              <ContextInspectorPage version={taskRunVersion + statsVersion + workspaceVersion} onOpenFile={handleOpenFile} onOpenSettings={() => setShowSettings(true)} />
+              <ContextInspectorPage version={taskRunVersion + statsVersion + workspaceVersion + workspaceFilesVersion} onOpenFile={handleOpenFile} onOpenSettings={() => setShowSettings(true)} />
             ) : centerTab === 'telegram' ? (
               <TelegramPage version={taskRunVersion + statsVersion} />
             ) : centerTab === 'doctor' ? (
@@ -1232,7 +2152,7 @@ export default function App() {
         </main>
 
         <div
-          className={rightOpen ? 'resize-handle resize-handle-right' : 'resize-handle disabled'}
+		  className={rightOpen ? `resize-handle resize-handle-right${chatCanvas ? ' inspector-drawer-resize' : ''}` : 'resize-handle disabled'}
           onMouseDown={rightOpen ? startResize('right') : undefined}
           onDoubleClick={() => setRightOpen(false)}
           onKeyDown={e => {
@@ -1244,16 +2164,19 @@ export default function App() {
           tabIndex={rightOpen ? 0 : -1}
           title={rightOpen ? 'Drag or use arrow keys to resize; double-click to collapse Inspector' : undefined}
         />
-        <div className={rightOpen ? 'pane-slot' : 'pane-slot closed'}>
+		<div className={`${rightOpen ? 'pane-slot' : closedPanelRails && !chatCanvas ? 'pane-slot closed' : 'pane-slot hidden'}${chatCanvas ? ' inspector-drawer-slot' : ''}`}>
           {rightOpen ? (
             <RightInspector
               activity={activity}
               runState={runState}
               streaming={streaming}
               taskRunVersion={taskRunVersion}
-              workspaceVersion={workspaceVersion}
+              workspaceVersion={workspaceVersion + workspaceFilesVersion}
               doctorFocusRequest={doctorRunRequest}
-              workspaceBrowser={<FileTree key={workspaceVersion} onOpenFile={handleOpenFile} />}
+              requestedTab={inspectorFocus}
+              requestedTabVersion={inspectorFocusRequest}
+              onClose={() => setRightOpen(false)}
+              workspaceBrowser={<FileTree key={`${workspaceVersion}-${workspaceFilesVersion}`} onOpenFile={handleOpenFile} />}
               agentPanel={(
                 <AgentPanel
                   autonomous={autonomous}
@@ -1269,23 +2192,24 @@ export default function App() {
                   agentMode={agentMode}
                   doctorRunRequest={doctorRunRequest}
                   taskRunVersion={taskRunVersion}
+                  settingsVersion={statsVersion}
                   skillSuggestion={skillSuggestion}
                   onDismissSkillSuggestion={() => setSkillSuggestion(null)}
                 />
               )}
             />
-          ) : (
-            <button className="collapsed-rail collapsed-rail-right" onClick={() => setRightOpen(true)} title="Open Inspector panel">
+          ) : closedPanelRails ? (
+            <button className="collapsed-rail collapsed-rail-right" onClick={() => setInspectorVisible(true)} title={`Open ${inspectorFocus} Inspector`}>
               <span>Inspector</span>
             </button>
-          )}
+          ) : null}
         </div>
       </div>
 
       {/* Terminal resize handle — only visible when panel is open */}
       {showTerminal && (
         <div
-          className="terminal-resize-handle"
+		  className={`terminal-resize-handle${chatCanvas ? ' chat-terminal-resize' : ''}`}
           role="separator"
           aria-label="Resize bottom panel"
           aria-orientation="horizontal"
@@ -1297,7 +2221,7 @@ export default function App() {
             let nextH = terminalHeight
             const onMove = (mv: MouseEvent) => {
               const dy = startY - mv.clientY
-              nextH = Math.min(600, Math.max(100, startH + dy))
+              nextH = clampTerminalHeight(startH + dy)
               setTerminalHeight(nextH)
             }
             const onUp = () => {
@@ -1312,10 +2236,10 @@ export default function App() {
           onKeyDown={e => {
             const amount = e.shiftKey ? 48 : 16
             const next = e.key === 'ArrowUp'
-              ? Math.min(600, terminalHeight + amount)
+              ? clampTerminalHeight(terminalHeight + amount)
               : e.key === 'ArrowDown'
-                ? Math.max(100, terminalHeight - amount)
-                : e.key === 'Home' ? 260 : null
+                ? clampTerminalHeight(terminalHeight - amount)
+                : e.key === 'Home' ? clampTerminalHeight(TERMINAL_HEIGHT_DEFAULT) : null
             if (next == null) return
             e.preventDefault()
             setTerminalHeight(next)
@@ -1328,7 +2252,7 @@ export default function App() {
       )}
       {/* Terminal panel — always mounted so session/output survive toggle */}
       <div
-        className={`terminal-panel ${streaming ? 'terminal-panel-live' : ''}`}
+		className={`terminal-panel ${streaming ? 'terminal-panel-live' : ''}${chatCanvas ? ' chat-terminal-drawer' : ''}`}
         style={{ height: showTerminal ? terminalHeight : 0, display: showTerminal ? 'flex' : 'none' }}
       >
         <div className="bottom-panel-tabs">
@@ -1356,9 +2280,10 @@ export default function App() {
           <span className="bottom-panel-state">
             {runState?.state ? runState.state.replaceAll('_', ' ') : streaming ? 'running' : 'idle'}
           </span>
+          <button className="bottom-panel-close" onClick={() => setShowTerminal(false)} title="Close bottom panel (Ctrl+J)" aria-label="Close bottom panel">×</button>
         </div>
         <div className="bottom-panel-body">
-          <TerminalPane key={`terminal-${workspaceVersion}`} visible={showTerminal && bottomTab === 'terminal'} />
+          <TerminalPane key={`terminal-${workspaceVersion}`} visible={showTerminal && bottomTab === 'terminal'} aiCommandsOpen={aiCommandsOpen} onAICommandsOpenChange={setAICommandsOpen} />
           <StreamPane
             visible={showTerminal && bottomTab === 'stream'}
             streaming={streaming}
@@ -1410,6 +2335,20 @@ export default function App() {
         />
       )}
 
+      {showConversationCheckpoints && (
+        <ConversationCheckpointDialog
+          checkpoints={runCheckpoints}
+          defaultName={checkpointDefaultName}
+          canCreate={!streaming && messages.some(message => message.role === 'user' && message.content.trim())}
+          busy={checkpointBusy}
+          runActive={streaming}
+          onClose={() => setShowConversationCheckpoints(false)}
+          onCreate={handleCreateConversationCheckpoint}
+          onResume={handleResumeConversationCheckpoint}
+          onDelete={handleDeleteConversationCheckpoint}
+        />
+      )}
+
       {showSaveSession && (
         <div className="overlay">
           <div className="confirm-dialog">
@@ -1433,6 +2372,105 @@ export default function App() {
               <button onClick={() => setShowSaveSession(false)}>Cancel</button>
               <button className="primary" onClick={() => void submitSaveSession()} disabled={!saveSessionDraft.trim()}>
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRenameSession && (
+        <div className="overlay">
+          <div className="confirm-dialog">
+            <div className="confirm-header">
+              <span className="confirm-title">Rename conversation</span>
+            </div>
+            <div className="save-session-form">
+              <label htmlFor="rename-session-name">Conversation title</label>
+              <input
+                id="rename-session-name"
+                value={renameSessionDraft}
+                onChange={e => setRenameSessionDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') void submitRenameSession()
+                  if (e.key === 'Escape') setShowRenameSession(false)
+                }}
+                autoFocus
+              />
+            </div>
+            <div className="confirm-actions">
+              <button onClick={() => setShowRenameSession(false)}>Cancel</button>
+              <button className="primary" onClick={() => void submitRenameSession()} disabled={!cleanSessionName(renameSessionDraft) || cleanSessionName(renameSessionDraft) === renameSessionSource}>
+                Rename
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSessionTags && (
+        <div className="overlay">
+          <div className="confirm-dialog">
+            <div className="confirm-header">
+              <span className="confirm-title">Tags for {tagSessionName}</span>
+            </div>
+            <div className="save-session-form">
+              <label htmlFor="session-tags">Tags</label>
+              <input
+                id="session-tags"
+                value={sessionTagsDraft}
+                onChange={e => setSessionTagsDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') void submitSessionTags()
+                  if (e.key === 'Escape') setShowSessionTags(false)
+                }}
+                placeholder="client, urgent, research"
+                autoFocus
+              />
+              <small>Separate tags with commas. Up to 6 tags, 24 characters each.</small>
+            </div>
+            <div className="confirm-actions">
+              <button onClick={() => setShowSessionTags(false)}>Cancel</button>
+              <button className="primary" onClick={() => void submitSessionTags()}>Save tags</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sessionRepairReport && (
+        <div className="overlay">
+          <div className="confirm-dialog session-repair-dialog">
+            <div className="confirm-header">
+              <span className={`session-repair-status ${sessionRepairReport.status}`}>{sessionRepairReport.status}</span>
+              <span className="confirm-title">Session health: {sessionRepairReport.name}</span>
+            </div>
+            <div className="session-repair-summary">
+              <strong>{sessionRepairReport.before_messages}</strong> stored messages
+              <span>→</span>
+              <strong>{sessionRepairReport.after_messages}</strong> safe messages
+              <span>·</span>
+              <strong>{sessionRepairReport.actions.length}</strong> repair action{sessionRepairReport.actions.length === 1 ? '' : 's'}
+            </div>
+            {sessionRepairReport.diagnostic && <div className="session-repair-diagnostic">{sessionRepairReport.diagnostic}</div>}
+            {sessionRepairReport.actions.length > 0 && (
+              <div className="session-repair-actions-list">
+                {sessionRepairReport.actions.map((action, index) => (
+                  <div key={`${action.phase}-${action.index}-${index}`}>
+                    <span>Phase {action.phase}</span>
+                    <strong>{action.action.replaceAll('_', ' ')}</strong>
+                    <small>message {action.index + 1}{action.detail ? ` · ${action.detail}` : ''}</small>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sessionRepairReport.backup_path && <div className="session-repair-backup">Backup: {sessionRepairReport.backup_path}</div>}
+            <div className="confirm-actions">
+              <button onClick={() => setSessionRepairReport(null)}>Close</button>
+              <button
+                className="primary"
+                onClick={() => void handleApplySessionRepair()}
+                disabled={sessionRepairBusy || streaming || !sessionRepairReport.valid || sessionRepairReport.applied || sessionRepairReport.actions.length === 0}
+              >
+                {sessionRepairBusy ? 'Repairing…' : sessionRepairReport.applied ? 'Repaired' : 'Repair saved session'}
               </button>
             </div>
           </div>

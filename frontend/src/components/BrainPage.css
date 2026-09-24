@@ -68,6 +68,172 @@
   white-space: nowrap;
 }
 
+.brain-index {
+  display: grid;
+  gap: 12px;
+  margin: 12px 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--green) 5%, var(--bg2)), var(--bg2) 58%);
+  box-shadow: 0 14px 34px rgba(0,0,0,.18);
+}
+
+.brain-index[data-health="healthy"] { border-color: color-mix(in srgb, var(--green) 34%, var(--border)); }
+.brain-index[data-health="attention"] { border-color: color-mix(in srgb, var(--yellow) 42%, var(--border)); }
+.brain-index[data-health="unavailable"] { border-color: color-mix(in srgb, var(--red) 42%, var(--border)); }
+
+.brain-index-header,
+.brain-index-health,
+.brain-index-meta,
+.brain-index-refresh-facts,
+.brain-index-actions,
+.brain-index-actions > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brain-index-header,
+.brain-index-actions { justify-content: space-between; }
+.brain-index-title { min-width: 0; display: grid; gap: 3px; }
+.brain-index-kicker { color: var(--green); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.brain-index-title h2 { margin: 0; color: var(--text-bright); font-size: 17px; }
+.brain-index-title p { margin: 0; color: var(--text-dim); font-size: 11px; line-height: 1.45; }
+
+.brain-index-health {
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg1);
+  font-size: 10px;
+}
+.brain-index-health i { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+.brain-index[data-health="healthy"] .brain-index-health i { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb,var(--green) 14%,transparent); }
+.brain-index[data-health="attention"] .brain-index-health i { background: var(--yellow); }
+.brain-index[data-health="indexing"] .brain-index-health i { background: #60a5fa; animation: brain-index-pulse 1.2s ease-in-out infinite; }
+.brain-index[data-health="unavailable"] .brain-index-health i { background: var(--red); }
+.brain-index-health strong { color: var(--text); }
+.brain-index-health span { padding-left: 7px; border-left: 1px solid var(--border); color: var(--text-muted); text-transform: capitalize; }
+
+.brain-index-progress { display: grid; grid-template-columns: minmax(120px,1fr) minmax(180px,2fr) auto; align-items: center; gap: 10px; }
+.brain-index-progress > div { height: 5px; overflow: hidden; border-radius: 999px; background: var(--bg1); }
+.brain-index-progress > div i { display: block; height: 100%; border-radius: inherit; background: #60a5fa; transition: width .2s ease; }
+.brain-index-progress span { overflow: hidden; color: var(--text-dim); font: 10px/1.3 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.brain-index-progress strong { color: var(--text); font: 10px var(--font-mono); }
+
+.brain-index-metrics { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: 9px; background: var(--bg1); }
+.brain-index-metrics > div { min-width: 0; display: grid; gap: 4px; padding: 10px; border-right: 1px solid var(--border); }
+.brain-index-metrics > div:last-child { border-right: 0; }
+.brain-index-metrics span { color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.brain-index-metrics strong { overflow: hidden; color: var(--text-bright); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.brain-index-metrics strong.mono { font-family: var(--font-mono); font-size: 10px; }
+.brain-index-metrics .warn strong { color: var(--yellow); }
+
+.brain-index-refresh-facts { flex-wrap: wrap; }
+.brain-index-refresh-facts span { padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg1); color: var(--text-muted); font-size: 9px; }
+.brain-index-refresh-facts strong { color: var(--green); font: 700 10px var(--font-mono); }
+.brain-index-meta { flex-wrap: wrap; color: var(--text-muted); font-size: 9px; }
+.brain-index-meta > span { padding: 4px 7px; border-radius: 999px; background: var(--bg1); }
+.brain-index-meta strong { color: var(--text-dim); font-family: var(--font-mono); }
+.brain-index-error,.brain-index-notice { padding: 8px 10px; border-radius: 8px; font-size: 10px; }
+.brain-index-error { border: 1px solid color-mix(in srgb,var(--red) 40%,var(--border)); background: color-mix(in srgb,var(--red) 8%,var(--bg1)); color: #fca5a5; }
+.brain-index-notice { border: 1px solid color-mix(in srgb,var(--green) 28%,var(--border)); background: color-mix(in srgb,var(--green) 5%,var(--bg1)); color: var(--green); }
+
+.brain-index-omissions { overflow: hidden; border: 1px solid var(--border); border-radius: 9px; background: var(--bg1); }
+.brain-index-omissions > summary { padding: 9px 10px; color: var(--yellow); font-size: 10px; cursor: pointer; }
+.brain-index-omissions > div { max-height: 240px; overflow: auto; border-top: 1px solid var(--border); }
+.brain-index-omissions article { display: grid; grid-template-columns: minmax(140px,1fr) auto; gap: 3px 12px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.brain-index-omissions article strong { overflow: hidden; color: var(--text); font: 10px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.brain-index-omissions article span { color: var(--yellow); font-size: 9px; text-transform: capitalize; }
+.brain-index-omissions article small { grid-column: 1/-1; color: var(--text-muted); font-size: 9px; overflow-wrap: anywhere; }
+.brain-index-omissions p { margin: 0; padding: 8px 10px; color: var(--text-muted); font-size: 9px; }
+
+.brain-index-actions { padding-top: 10px; border-top: 1px solid var(--border); }
+.brain-index-actions button { min-height: 31px; padding: 0 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg1); color: var(--text-dim); font-size: 10px; }
+.brain-index-actions button:hover:not(:disabled),.brain-index-actions button.active { border-color: color-mix(in srgb,var(--green) 44%,var(--border)); color: var(--text); }
+.brain-index-actions button.primary { border-color: color-mix(in srgb,var(--green) 46%,var(--border)); background: color-mix(in srgb,var(--green) 13%,var(--bg1)); color: var(--green); }
+.brain-index-actions button.danger { color: #fca5a5; border-color: color-mix(in srgb,var(--red) 36%,var(--border)); }
+
+.brain-split-review { overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb,var(--bg1) 90%,var(--green) 10%); }
+.brain-split-review > header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 12px; }
+.brain-split-review > header > div:first-child { min-width: 0; display: grid; gap: 3px; }
+.brain-split-review h3 { margin: 0; color: var(--text-bright); font-size: 13px; }
+.brain-split-review header p { max-width: 780px; margin: 0; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.brain-split-review-controls { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; }
+.brain-split-review-controls label { display: grid; gap: 4px; color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.brain-split-review-controls select,.brain-split-review-controls button { min-height: 31px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg2); color: var(--text); font-size: 10px; }
+.brain-split-review-controls select { min-width: 92px; padding: 0 8px; }
+.brain-split-review-controls button { padding: 0 11px; }
+.brain-split-review-controls button.primary { border-color: color-mix(in srgb,var(--green) 46%,var(--border)); background: color-mix(in srgb,var(--green) 13%,var(--bg1)); color: var(--green); }
+.brain-split-review-controls button.danger { border-color: color-mix(in srgb,var(--red) 42%,var(--border)); background: color-mix(in srgb,var(--red) 9%,var(--bg1)); color: #fca5a5; }
+.brain-split-review-empty { padding: 10px 12px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 10px; }
+.brain-split-review-preview { display: grid; gap: 10px; padding: 0 12px 12px; border-top: 1px solid var(--border); }
+.brain-split-review-summary { display: flex; flex-wrap: wrap; gap: 7px; padding-top: 10px; }
+.brain-split-review-summary span { padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg2); color: var(--text-muted); font-size: 9px; }
+.brain-split-review-summary strong { color: var(--text); font-family: var(--font-mono); }
+.brain-split-review-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(210px,1fr)); gap: 8px; }
+.brain-split-review-grid article { min-width: 0; display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg2); }
+.brain-split-review-grid article > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.brain-split-review-grid article > div span { color: var(--green); font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.brain-split-review-grid article > div strong,.brain-split-review-grid article code { color: var(--text-dim); font: 9px var(--font-mono); }
+.brain-split-review-grid article p,.brain-split-review-grid article small { margin: 0; color: var(--text-muted); font-size: 9px; }
+.brain-split-review-grid article small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brain-split-review-grid ul { min-width: 0; display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.brain-split-review-grid li { overflow: hidden; color: var(--text-dim); font: 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.brain-split-review-caveat { margin: 0; color: var(--yellow); font-size: 9px; line-height: 1.45; }
+
+.brain-review-run { display: grid; gap: 10px; padding: 12px; border-top: 1px solid var(--border); background: color-mix(in srgb,var(--bg2) 94%,var(--green) 6%); }
+.brain-review-run[data-state="partial"],.brain-review-run[data-state="error"] { background: color-mix(in srgb,var(--bg2) 94%,var(--yellow) 6%); }
+.brain-review-run-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.brain-review-run-head > div:first-child { display: grid; gap: 3px; }
+.brain-review-run-head h4,.brain-review-findings h4 { margin: 0; color: var(--text-bright); font-size: 12px; }
+.brain-review-run-head p { margin: 0; color: var(--text-muted); font-size: 9px; }
+.brain-review-run-head p strong { color: var(--text-dim); font-family: var(--font-mono); }
+.brain-review-counts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.brain-review-counts span { padding: 5px 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg1); color: var(--text-muted); font-size: 8px; }
+.brain-review-counts strong { color: var(--text); font-family: var(--font-mono); }
+.brain-review-counts .warn strong { color: var(--yellow); }
+.brain-review-progress { height: 5px; overflow: hidden; border-radius: 999px; background: var(--bg1); }
+.brain-review-progress i { display: block; height: 100%; border-radius: inherit; background: var(--green); transition: width .25s ease; }
+.brain-review-run[data-state="cancelling"] .brain-review-progress i { background: var(--yellow); }
+.brain-review-warning { padding: 8px 9px; border: 1px solid color-mix(in srgb,var(--yellow) 38%,var(--border)); border-radius: 7px; background: color-mix(in srgb,var(--yellow) 7%,var(--bg1)); color: var(--yellow); font-size: 9px; line-height: 1.4; }
+.brain-review-shards { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 7px; }
+.brain-review-shards article { min-width: 0; display: grid; gap: 5px; padding: 9px; border: 1px solid var(--border); border-left: 3px solid var(--text-muted); border-radius: 8px; background: var(--bg1); }
+.brain-review-shards article[data-state="running"] { border-left-color: #60a5fa; }
+.brain-review-shards article[data-state="done"] { border-left-color: var(--green); }
+.brain-review-shards article[data-state="error"],.brain-review-shards article[data-state="cancelled"] { border-left-color: var(--yellow); }
+.brain-review-shards article > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.brain-review-shards article > div span { color: var(--text); font-size: 9px; font-weight: 700; }
+.brain-review-shards article > div strong { color: var(--text-muted); font-size: 8px; text-transform: uppercase; }
+.brain-review-shards article p,.brain-review-shards article small { overflow: hidden; margin: 0; color: var(--text-muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.brain-review-shards article button { justify-self: start; min-height: 26px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg2); color: var(--text-dim); font-size: 8px; }
+.brain-review-conflicts { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 7px; padding-top: 2px; }
+.brain-review-conflicts > div { grid-column: 1/-1; display: grid; gap: 3px; }
+.brain-review-conflicts h4 { margin: 0; color: var(--text-bright); font-size: 12px; }
+.brain-review-conflicts > div p { margin: 0; color: var(--text-muted); font-size: 8px; line-height: 1.45; }
+.brain-review-conflicts article { min-width: 0; display: grid; gap: 5px; padding: 9px 10px; border: 1px solid color-mix(in srgb,var(--yellow) 38%,var(--border)); border-left: 3px solid var(--text-muted); border-radius: 8px; background: var(--bg1); }
+.brain-review-conflicts article[data-state="running"] { border-left-color: #60a5fa; }
+.brain-review-conflicts article[data-state="done"] { border-left-color: var(--green); }
+.brain-review-conflicts article[data-state="error"],.brain-review-conflicts article[data-state="cancelled"],.brain-review-conflicts article[data-state="interrupted"] { border-left-color: var(--yellow); }
+.brain-review-conflicts article > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.brain-review-conflicts article strong { color: var(--text); font-size: 9px; }
+.brain-review-conflicts article span,.brain-review-conflicts article p,.brain-review-conflicts article small,.brain-review-conflicts article code { margin: 0; color: var(--text-muted); font-size: 8px; line-height: 1.4; }
+.brain-review-conflicts article code { overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.brain-review-findings { display: grid; gap: 7px; padding-top: 2px; }
+.brain-review-findings > article { display: grid; gap: 4px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg1); }
+.brain-review-findings > article[data-state="conflict"] { border-color: color-mix(in srgb,var(--yellow) 42%,var(--border)); }
+.brain-review-findings > article > div { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; }
+.brain-review-findings .severity { padding: 3px 5px; border-radius: 5px; background: var(--bg2); color: var(--text-muted); font-size: 7px; font-weight: 800; text-transform: uppercase; }
+.brain-review-findings .severity.high,.brain-review-findings .severity.critical { color: #fca5a5; }
+.brain-review-findings .severity.medium { color: var(--yellow); }
+.brain-review-findings article strong { overflow: hidden; color: var(--text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.brain-review-findings article em { color: var(--text-muted); font-size: 8px; font-style: normal; }
+.brain-review-findings article p,.brain-review-findings article small { margin: 0; color: var(--text-muted); font-size: 8px; }
+
+@keyframes brain-index-pulse { 50% { opacity: .35; transform: scale(.82); } }
+
 .brain-kpis {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
@@ -696,6 +862,10 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
+  .brain-index-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .brain-index-metrics > div:nth-child(3) { border-right: 0; }
+  .brain-index-metrics > div:nth-child(n+4) { border-top: 1px solid var(--border); }
+
   .brain-tuning-grid,
   .brain-tuning-cards,
   .brain-telemetry-grid {
@@ -711,4 +881,24 @@
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
+}
+
+@media (max-width: 620px) {
+  .brain-index { margin: 10px; padding: 12px; }
+  .brain-index-header,.brain-index-actions { align-items: stretch; flex-direction: column; }
+  .brain-index-health { align-self: flex-start; }
+  .brain-index-progress { grid-template-columns: 1fr auto; }
+  .brain-index-progress > span { grid-column: 1/-1; grid-row: 2; }
+  .brain-index-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .brain-index-metrics > div { border-top: 1px solid var(--border); border-right: 1px solid var(--border); }
+  .brain-index-metrics > div:nth-child(-n+2) { border-top: 0; }
+  .brain-index-metrics > div:nth-child(3) { border-right: 1px solid var(--border); }
+  .brain-index-metrics > div:nth-child(2n) { border-right: 0; }
+  .brain-index-actions > div { flex-wrap: wrap; }
+  .brain-split-review > header { align-items: stretch; flex-direction: column; }
+  .brain-split-review-controls { justify-content: flex-end; }
+  .brain-review-run-head { align-items: stretch; flex-direction: column; }
+  .brain-review-counts { justify-content: flex-start; }
+  .brain-review-findings > article > div { grid-template-columns: auto minmax(0,1fr); }
+  .brain-review-findings article em { grid-column: 2; }
 }

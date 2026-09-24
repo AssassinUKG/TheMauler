@@ -39,12 +39,66 @@ func (a *App) GetServiceHealth() []ServiceHealth {
 		browserStatus = "ready"
 	}
 	if browser.Active {
-		browserStatus = "active"
+		browserStatus = firstNonEmpty(browser.State, "active")
 	}
-	services = append(services, ServiceHealth{ID: "browser", Name: "Browser automation", Status: browserStatus, Summary: firstNonEmpty(browser.Binary, "Chrome or Edge not detected"), UpdatedAt: now})
+	services = append(services, ServiceHealth{
+		ID: "browser", Name: "Browser automation", Status: browserStatus,
+		Summary:   firstNonEmpty(browser.Title, browser.Binary, "Chrome or Edge not detected"),
+		Detail:    browser.LastError,
+		UpdatedAt: now,
+		Metadata: map[string]string{
+			"url":         browser.URL,
+			"last_action": browser.LastAction,
+			"visible":     strconv.FormatBool(browser.Visible),
+			"paused":      strconv.FormatBool(browser.Paused),
+		},
+	})
+
+	indexStatus, indexErr := a.GetRepositoryIndexStatus()
+	indexHealth := "ready"
+	indexSummary := "No complete workspace index"
+	indexDetail := ""
+	if indexErr != nil {
+		indexHealth, indexSummary, indexDetail = "error", "Repository index status unavailable", indexErr.Error()
+	} else if !indexStatus.Available {
+		indexHealth, indexSummary, indexDetail = "unavailable", "Repository index database unavailable", indexStatus.Error
+	} else if indexStatus.Indexing {
+		indexHealth = "active"
+		indexSummary = fmt.Sprintf("Scanning: %d seen, %d indexed", indexStatus.ProgressFilesSeen, indexStatus.ProgressIndexed)
+	} else if indexStatus.Active {
+		indexSummary = fmt.Sprintf("%d files · %d searchable chunks", indexStatus.FilesIndexed, indexStatus.ChunkCount)
+	}
+	services = append(services, ServiceHealth{
+		ID: "repository_index", Name: "Workspace index", Status: indexHealth, Summary: indexSummary,
+		Detail: indexDetail, UpdatedAt: now,
+		Metadata: map[string]string{
+			"workspace": indexStatus.Workspace, "generation_id": indexStatus.GenerationID,
+			"manifest_digest": indexStatus.ManifestDigest, "indexing": strconv.FormatBool(indexStatus.Indexing),
+			"files_indexed": strconv.Itoa(indexStatus.FilesIndexed), "progress_files_seen": strconv.Itoa(indexStatus.ProgressFilesSeen),
+		},
+	})
 
 	sessions := a.ListAgentSessions()
 	services = append(services, sessionServiceHealth(sessions, now))
+
+	eventDiagnostics := a.GetRunEventDiagnostics()
+	eventStatus := "ready"
+	eventSummary := "No stale run events rejected"
+	if eventDiagnostics.StaleEventsDropped > 0 {
+		eventStatus = "active"
+		eventSummary = fmt.Sprintf("%d stale run event(s) safely rejected", eventDiagnostics.StaleEventsDropped)
+	}
+	services = append(services, ServiceHealth{
+		ID: "run_event_ownership", Name: "Conversation event ownership", Status: eventStatus,
+		Summary: eventSummary, UpdatedAt: now,
+		Metadata: map[string]string{
+			"conversation_epoch":   strconv.FormatUint(eventDiagnostics.ConversationEpoch, 10),
+			"stale_events_dropped": strconv.FormatUint(eventDiagnostics.StaleEventsDropped, 10),
+			"last_event":           eventDiagnostics.LastRejection.Event,
+			"last_run_id":          eventDiagnostics.LastRejection.RunID,
+			"last_rejected_at":     eventDiagnostics.LastRejection.RejectedAt,
+		},
+	})
 
 	a.bgMu.Lock()
 	jobs := len(a.bgJobs)

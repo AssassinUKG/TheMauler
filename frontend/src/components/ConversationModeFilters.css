@@ -1,0 +1,41 @@
+.conversation-mode-filters {
+  display: flex;
+  gap: 5px;
+  padding: 3px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.conversation-mode-filters::-webkit-scrollbar { display: none; }
+
+.conversation-mode-filters button {
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.conversation-mode-filters button span {
+  margin-left: 3px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.conversation-mode-filters button:hover:not(:disabled),
+.conversation-mode-filters button.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 11%, var(--bg2));
+  color: var(--text);
+}
+
+.conversation-mode-filters button:disabled {
+  opacity: .42;
+  cursor: default;
+}

@@ -278,7 +278,14 @@ func saveTodos(items []TodoItem) error {
 	db, cleanup, err := todoStore()
 	if err == nil {
 		defer cleanup()
-		return saveTodosDB(db, items)
+		if err := saveTodosDB(db, items); err != nil {
+			return err
+		}
+		// Keep the legacy recovery/export copy in lock-step with SQLite. If an
+		// empty plan only clears the database, LoadTodos sees the stale JSON on
+		// its next call and MigrateTodosJSONToDB resurrects the plan we just
+		// cleared.
+		return saveTodosJSON(items)
 	}
 	return saveTodosJSON(items)
 }
@@ -306,7 +313,9 @@ ORDER BY idx ASC, id ASC`)
 		return nil, err
 	}
 	defer rows.Close()
-	var items []TodoItem
+	// Wails serialises a nil slice as JSON null. The frontend contract is an
+	// array even when the plan is empty, so initialise the result explicitly.
+	items := make([]TodoItem, 0)
 	for rows.Next() {
 		var item TodoItem
 		if err := rows.Scan(&item.ID, &item.Text, &item.Status, &item.Detail, &item.CreatedAt, &item.UpdatedAt); err != nil {
@@ -370,6 +379,9 @@ func loadTodosJSON() ([]TodoItem, error) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, err
 	}
+	if file.Items == nil {
+		file.Items = make([]TodoItem, 0)
+	}
 	sort.SliceStable(file.Items, func(i, j int) bool { return file.Items[i].ID < file.Items[j].ID })
 	return file.Items, nil
 }
@@ -381,6 +393,9 @@ func saveTodosJSON(items []TodoItem) error {
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
+	}
+	if items == nil {
+		items = make([]TodoItem, 0)
 	}
 	data, err := json.MarshalIndent(todoFile{Items: items}, "", "  ")
 	if err != nil {

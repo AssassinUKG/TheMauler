@@ -387,8 +387,8 @@
   width: var(--ai-commands-width, 420px);
   flex: 0 0 var(--ai-commands-width, 420px);
   flex-direction: column;
-  min-width: 340px;
-  max-width: calc(100% - 320px);
+  min-width: 300px;
+  max-width: calc(100% - 480px);
   min-height: 0;
   background: var(--c-pane);
 }
@@ -657,8 +657,8 @@ html.terminal-ai-resizing-row * {
     flex: 0 0 var(--ai-commands-height, 120px);
     min-width: 0;
     max-width: none;
-    min-height: 64px;
-    max-height: calc(100% - 90px);
+    min-height: 88px;
+    max-height: calc(100% - 140px);
     border-top: 1px solid var(--border);
   }
 

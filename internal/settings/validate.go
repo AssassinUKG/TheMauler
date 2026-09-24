@@ -21,6 +21,15 @@ func (s *Settings) Validate() []string {
 		return nil
 	}
 	var adjustments []string
+	switch strings.ToLower(strings.TrimSpace(s.Tools.TaskRoutingMode)) {
+	case "", "auto":
+		s.Tools.TaskRoutingMode = "auto"
+	case "selected":
+		s.Tools.TaskRoutingMode = "selected"
+	default:
+		adjustments = append(adjustments, fmt.Sprintf("tools.task_routing_mode reset from %q to auto", s.Tools.TaskRoutingMode))
+		s.Tools.TaskRoutingMode = "auto"
+	}
 	if s.Context.CompactionAt <= 0 || s.Context.CompactionAt >= 1 {
 		adjustments = append(adjustments, fmt.Sprintf("context.compaction_at clamped from %v to %.2f", s.Context.CompactionAt, defaultCompactionAt))
 		s.Context.CompactionAt = defaultCompactionAt
@@ -97,6 +106,15 @@ func (s *Settings) Validate() []string {
 	default:
 		adjustments = append(adjustments, fmt.Sprintf("agents.thinking_mode reset from %q to auto", s.Agents.ThinkingMode))
 		s.Agents.ThinkingMode = "auto"
+	}
+	switch strings.ToLower(strings.TrimSpace(s.Agents.DefaultConversationMode)) {
+	case "", "adaptive":
+		s.Agents.DefaultConversationMode = "adaptive"
+	case "direct", "agent":
+		s.Agents.DefaultConversationMode = strings.ToLower(strings.TrimSpace(s.Agents.DefaultConversationMode))
+	default:
+		adjustments = append(adjustments, fmt.Sprintf("agents.default_conversation_mode reset from %q to adaptive", s.Agents.DefaultConversationMode))
+		s.Agents.DefaultConversationMode = "adaptive"
 	}
 	return adjustments
 }

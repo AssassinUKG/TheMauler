@@ -17,6 +17,18 @@ import {
   ListChannelWorkQueue,
   GetSharedTerminalState,
   GetSettings,
+  GetRepositoryIndexStatus,
+  IndexWorkspaceRepository,
+  RefreshWorkspaceRepositoryIndex,
+  CancelWorkspaceRepositoryIndex,
+  SelectRepositoryIndexFolder,
+  SelectRepositoryIndexFiles,
+  RemoveRepositoryIndexSource,
+  SetRepositoryIndexWatch,
+  GetBrowserWorkflowStatus,
+  StartBrowserWorkflow,
+  TakeOverBrowserWorkflow,
+  ResumeBrowserWorkflow,
   TranscribeVoiceClip,
   SynthesizeSpeech,
   type ChatAttachment,
@@ -28,8 +40,13 @@ import {
   type TerminalStateSnapshot,
   type AgentDefinition,
   type Settings,
+  type RepositoryIndexStatus,
+  type ScratchWorkspaceStatus,
+  type BrowserWorkflowStatus,
 } from '../wailsjs/go'
-import type { AgentActivity, ChatMessage, RunProfileOption, RunStatePayload, ToolCountdown } from '../App'
+import type { AgentActivity, BrowserHandoffPayload, ChatMessage, RunProfileOption, RunStatePayload, ToolCountdown } from '../App'
+import { ChatSecurityWorkspace } from './ChatSecurityWorkspace'
+import { UiIcon, type UiIconName } from './UiIcon'
 import './ChatPane.css'
 
 const sharedMarkdownComponents: Components = {
@@ -48,6 +65,10 @@ interface Props {
   streamBuffer: string
   thinkingBuffer: string
   activeProfile: string
+  activeModelID: string
+  thinkingSupported: boolean
+  thinkingMode: string
+  reasoningEffort: string
   activeRunProfile: string
   cloudRunProfiles: RunProfileOption[]
   runProfileOverride: string
@@ -55,26 +76,39 @@ interface Props {
   pendingInterrupt: boolean
   toolCountdown: ToolCountdown | null
   runState: RunStatePayload | null
+  browserHandoff: BrowserHandoffPayload | null
   todos: TodoItem[]
   activity: AgentActivity[]
   settingsVersion: number
+  engagementVersion: number
+  scratchWorkspace: ScratchWorkspaceStatus | null
   agentDefinitions: AgentDefinition[]
   agentSelection: string
   agentMode: string
+  conversationMode: 'adaptive' | 'direct' | 'agent'
   draftRequest?: { id: string; text: string } | null
   onSubmitMessage: (text: string, images: string[], attachments: ChatAttachment[], profileOverride?: string) => void
   onRunProfileOverrideChange: (profile: string) => void
+  onReasoningControlChange: (thinkingMode: string, reasoningEffort: string) => void | Promise<void>
   onCancelPending: () => void
   onStopAgent: () => void
+  onResumeBrowser: () => void | Promise<void>
+  onStopBrowser: () => void | Promise<void>
   onClearChat: () => void
   onArtifact: (code: string, lang: string) => void
   onAutonomousChange: (enabled: boolean) => void
   onOpenQuickChat: () => void
+  onConversationModeChange: (mode: 'adaptive' | 'direct' | 'agent') => void | Promise<void>
   onOpenSettings: () => void
   onAgentSelectionChange: (mode: string) => void | Promise<void>
   onChooseWorkspace: (bugBounty: boolean) => void | Promise<void>
   onSwitchWorkspace: (path: string) => void | Promise<void>
+  onCreateScratchWorkspace: () => void | Promise<void>
+  onCreateWorkspaceProject: (name: string, bugBounty: boolean) => void | Promise<void>
+  onPromoteScratchWorkspace: (name: string) => void | Promise<void>
   onOpenProjects: () => void
+  onOpenEngagement: () => void
+  onPrepareEngagementRun: (prompt: string) => void
   onClearPlan: () => void | Promise<void>
 }
 
@@ -84,12 +118,22 @@ interface ChatWorkspaceOption {
   kind: 'project' | 'folder'
 }
 
+interface TranscriptFilters {
+  tools: boolean
+  status: boolean
+  browser: boolean
+}
+
 export function ChatPane({
   messages,
   streaming,
   streamBuffer,
   thinkingBuffer,
   activeProfile,
+  activeModelID,
+  thinkingSupported,
+  thinkingMode,
+  reasoningEffort,
   activeRunProfile,
   cloudRunProfiles,
   runProfileOverride,
@@ -97,35 +141,53 @@ export function ChatPane({
   pendingInterrupt,
   toolCountdown,
   runState,
+  browserHandoff,
   todos,
   activity,
   settingsVersion,
+  engagementVersion,
+  scratchWorkspace,
   agentDefinitions,
   agentSelection,
   agentMode,
+  conversationMode,
   draftRequest,
   onSubmitMessage,
   onRunProfileOverrideChange,
+  onReasoningControlChange,
   onCancelPending,
   onStopAgent,
+  onResumeBrowser,
+  onStopBrowser,
   onClearChat,
   onArtifact,
   onAutonomousChange,
   onOpenQuickChat,
+  onConversationModeChange,
   onOpenSettings,
   onAgentSelectionChange,
   onChooseWorkspace,
   onSwitchWorkspace,
+  onCreateScratchWorkspace,
+  onCreateWorkspaceProject,
+  onPromoteScratchWorkspace,
   onOpenProjects,
+  onOpenEngagement,
+  onPrepareEngagementRun,
   onClearPlan,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
+  const messagesRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const toolbarRef = useRef<HTMLDivElement>(null)
+  const composerMoreRef = useRef<HTMLDetailsElement>(null)
   const planTriggerRef = useRef<HTMLButtonElement>(null)
   const toolsTriggerRef = useRef<HTMLButtonElement>(null)
   const workspaceTriggerRef = useRef<HTMLButtonElement>(null)
   const agentTriggerRef = useRef<HTMLButtonElement>(null)
+  const runSetupTriggerRef = useRef<HTMLButtonElement>(null)
+  const reasoningTriggerRef = useRef<HTMLButtonElement>(null)
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
@@ -137,13 +199,37 @@ export function ChatPane({
   const [attachmentCopied, setAttachmentCopied] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [showSearch, setShowSearch] = useState(false)
+  const [toolbarMenu, setToolbarMenu] = useState<'tools' | 'view' | 'run' | null>(null)
+  const [showBrowserPanel, setShowBrowserPanel] = useState(false)
+  const [showIndexPanel, setShowIndexPanel] = useState(() => localStorage.getItem('mauler.chat.indexPanel') === 'true')
+  const [showSecurityPanel, setShowSecurityPanel] = useState(() => localStorage.getItem('mauler.chat.securityPanel') === 'true')
+  const [followOutput, setFollowOutput] = useState(() => localStorage.getItem('mauler.chat.followOutput') !== 'false')
+  const [browserStatus, setBrowserStatus] = useState<BrowserWorkflowStatus | null>(null)
+  const [browserURL, setBrowserURL] = useState('')
+  const [browserBusy, setBrowserBusy] = useState(false)
+  const [browserError, setBrowserError] = useState('')
+  const [repositoryIndex, setRepositoryIndex] = useState<RepositoryIndexStatus | null>(null)
+  const [repositoryIndexBusy, setRepositoryIndexBusy] = useState(false)
+  const [repositorySourceBusy, setRepositorySourceBusy] = useState(false)
+  const [repositoryIndexError, setRepositoryIndexError] = useState('')
   const [nowMs, setNowMs] = useState(Date.now())
   const [workspaceRoot, setWorkspaceRoot] = useState('')
   const [historyStats, setHistoryStats] = useState<HistoryStats | null>(null)
   const [channelStatus, setChannelStatus] = useState<Record<string, string>>({})
   const [channelQueue, setChannelQueue] = useState<ChannelWorkItem[]>([])
   const [terminalState, setTerminalState] = useState<TerminalStateSnapshot | null>(null)
-  const [openPopover, setOpenPopover] = useState<'plan' | 'tools' | 'workspace' | 'agent' | null>(null)
+  const [openPopover, setOpenPopover] = useState<'plan' | 'tools' | 'workspace' | 'agent' | 'runSetup' | 'reasoning' | null>(null)
+  const [reasoningBusy, setReasoningBusy] = useState(false)
+  const [reasoningError, setReasoningError] = useState('')
+  const [transcriptFilters, setTranscriptFilters] = useState<TranscriptFilters>(() => {
+    const legacyReplies = localStorage.getItem('mauler.chat.transcriptMode') === 'replies'
+    try {
+      const saved = JSON.parse(localStorage.getItem('mauler.chat.transcriptFilters') || '') as Partial<TranscriptFilters>
+      return { tools: saved.tools !== false, status: saved.status !== false, browser: saved.browser !== false }
+    } catch {
+      return { tools: !legacyReplies, status: !legacyReplies, browser: !legacyReplies }
+    }
+  })
   const [audioConfig, setAudioConfig] = useState<AudioConfig | null>(null)
   const [workspaceOptions, setWorkspaceOptions] = useState<ChatWorkspaceOption[]>([])
   const [recording, setRecording] = useState(false)
@@ -168,19 +254,70 @@ export function ChatPane({
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }, [draftRequest])
 
-  const visibleMessages = useMemo(() => {
-    if (!searchQuery.trim()) return messages
-    const q = searchQuery.toLowerCase()
-    return messages.filter(m => {
-      const attachmentText = (m.attachments ?? []).map(a => `${a.name} ${a.content ?? ''} ${a.path ?? ''}`).join(' ')
-      return `${m.content} ${attachmentText}`.toLowerCase().includes(q)
-    })
-  }, [messages, searchQuery])
+  const transcriptMessages = useMemo(() => messages.filter(message => {
+    if (message.role === 'tool_call' || message.role === 'tool_result' || message.category === 'tool') return transcriptFilters.tools
+    if (message.category === 'browser') return transcriptFilters.browser
+    if (message.role === 'system' || message.category === 'status') return transcriptFilters.status
+    return true
+  }), [messages, transcriptFilters])
 
-  // Auto-scroll to bottom
+  const visibleMessages = useMemo(() => {
+    if (!searchQuery.trim()) return transcriptMessages
+    const q = searchQuery.toLowerCase()
+    return transcriptMessages.filter(m => {
+      const attachmentText = (m.attachments ?? []).map(a => `${a.name} ${a.content ?? ''} ${a.path ?? ''}`).join(' ')
+      return `${m.content} ${m.toolName ?? ''} ${m.category ?? ''} ${attachmentText}`.toLowerCase().includes(q)
+    })
+  }, [searchQuery, transcriptMessages])
+
+  const storeTranscriptFilters = useCallback((filters: TranscriptFilters) => {
+    setTranscriptFilters(filters)
+    localStorage.setItem('mauler.chat.transcriptFilters', JSON.stringify(filters))
+    localStorage.setItem('mauler.chat.transcriptMode', filters.tools || filters.status || filters.browser ? 'complete' : 'replies')
+  }, [])
+
+  const changeTranscriptMode = useCallback((mode: 'complete' | 'replies') => {
+    const enabled = mode === 'complete'
+    storeTranscriptFilters({ tools: enabled, status: enabled, browser: enabled })
+  }, [storeTranscriptFilters])
+
+  const toggleTranscriptFilter = useCallback((name: keyof TranscriptFilters) => {
+    storeTranscriptFilters({ ...transcriptFilters, [name]: !transcriptFilters[name] })
+  }, [storeTranscriptFilters, transcriptFilters])
+
+  const transcriptMode = transcriptFilters.tools && transcriptFilters.status && transcriptFilters.browser
+    ? 'complete'
+    : !transcriptFilters.tools && !transcriptFilters.status && !transcriptFilters.browser ? 'replies' : 'custom'
+
+  const storeFollowOutput = useCallback((enabled: boolean) => {
+    setFollowOutput(enabled)
+    localStorage.setItem('mauler.chat.followOutput', String(enabled))
+  }, [])
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamBuffer])
+    if (!toolbarMenu) return
+    const dismissToolbar = (event: globalThis.PointerEvent) => {
+      if (event.target instanceof Node && !toolbarRef.current?.contains(event.target)) {
+        setToolbarMenu(null)
+      }
+    }
+    const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setToolbarMenu(null)
+    }
+    window.addEventListener('pointerdown', dismissToolbar)
+    window.addEventListener('keydown', dismissOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', dismissToolbar)
+      window.removeEventListener('keydown', dismissOnEscape)
+    }
+  }, [toolbarMenu])
+
+  // Follow new output only when the operator wants it. Scrolling upward pauses
+  // following immediately so a streaming tool result cannot steal the viewport.
+  useEffect(() => {
+    if (!followOutput) return
+    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' })
+  }, [messages, streamBuffer, thinkingBuffer, followOutput])
 
   useEffect(() => {
     if (!toolCountdown) return
@@ -197,6 +334,103 @@ export function ChatPane({
       setWorkspaceOptions([])
     })
   }, [settingsVersion])
+
+  const refreshBrowserStatus = useCallback(async () => {
+    const status = await GetBrowserWorkflowStatus()
+    setBrowserStatus(status)
+    if (status.url) setBrowserURL(status.url)
+    return status
+  }, [])
+
+  useEffect(() => {
+    void refreshBrowserStatus().catch(error => setBrowserError(String(error)))
+    const id = window.setInterval(() => {
+      void refreshBrowserStatus().catch(() => {})
+    }, 5000)
+    return () => window.clearInterval(id)
+  }, [refreshBrowserStatus, settingsVersion])
+
+  useEffect(() => {
+    if (!browserHandoff?.active) return
+    setShowBrowserPanel(true)
+    void refreshBrowserStatus().catch(() => {})
+  }, [browserHandoff?.active, refreshBrowserStatus])
+
+  const runBrowserAction = useCallback(async (action: () => unknown | Promise<unknown>) => {
+    setBrowserBusy(true)
+    setBrowserError('')
+    try {
+      await action()
+      await refreshBrowserStatus()
+    } catch (error) {
+      setBrowserError(error instanceof Error ? error.message : String(error))
+      await refreshBrowserStatus().catch(() => {})
+    } finally {
+      setBrowserBusy(false)
+    }
+  }, [refreshBrowserStatus])
+
+  const refreshRepositoryIndex = useCallback(async () => {
+    const status = await GetRepositoryIndexStatus()
+    setRepositoryIndex(status)
+    return status
+  }, [])
+
+  useEffect(() => {
+	void refreshRepositoryIndex().catch(error => setRepositoryIndexError(String(error)))
+	if (!showIndexPanel) return
+	const id = window.setInterval(() => { void refreshRepositoryIndex().catch(() => {}) }, repositoryIndexBusy || repositoryIndex?.indexing ? 750 : 8000)
+	return () => window.clearInterval(id)
+	}, [refreshRepositoryIndex, settingsVersion, workspaceRoot, showIndexPanel, repositoryIndexBusy, repositoryIndex?.indexing])
+
+  const rebuildRepositoryIndex = useCallback(async () => {
+    setRepositoryIndexBusy(true)
+    setRepositoryIndexError('')
+    try {
+      setRepositoryIndex(await IndexWorkspaceRepository())
+	} catch (error) {
+	  const message = error instanceof Error ? error.message : String(error)
+	  if (!message.toLowerCase().includes('context canceled')) setRepositoryIndexError(message)
+	  await refreshRepositoryIndex().catch(() => {})
+    } finally {
+      setRepositoryIndexBusy(false)
+    }
+  }, [refreshRepositoryIndex])
+
+  const refreshChangedRepositoryFiles = useCallback(async () => {
+    setRepositoryIndexBusy(true)
+    setRepositoryIndexError('')
+    try {
+      setRepositoryIndex(await RefreshWorkspaceRepositoryIndex())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!message.toLowerCase().includes('context canceled')) setRepositoryIndexError(message)
+      await refreshRepositoryIndex().catch(() => {})
+    } finally {
+      setRepositoryIndexBusy(false)
+    }
+  }, [refreshRepositoryIndex])
+
+  const cancelRepositoryIndex = useCallback(async () => {
+	setRepositoryIndexError('')
+	try {
+	  setRepositoryIndex(await CancelWorkspaceRepositoryIndex())
+	} catch (error) {
+	  setRepositoryIndexError(error instanceof Error ? error.message : String(error))
+	}
+  }, [])
+
+  const updateRepositorySources = useCallback(async (action: () => Promise<RepositoryIndexStatus>) => {
+    setRepositorySourceBusy(true)
+    setRepositoryIndexError('')
+    try {
+      setRepositoryIndex(await action())
+    } catch (error) {
+      setRepositoryIndexError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRepositorySourceBusy(false)
+    }
+  }, [])
 
   const stopSpeech = useCallback(() => {
     speechGenerationRef.current += 1
@@ -377,6 +611,19 @@ export function ChatPane({
     setAttachments([])
     onSubmitMessage(text, imgs, atts, runProfileOverride)
   }, [input, images, attachments, messages, onSubmitMessage, runProfileOverride])
+
+  const applyReasoningControl = useCallback(async (nextThinkingMode: string, nextReasoningEffort: string) => {
+    if (streaming || reasoningBusy) return
+    setReasoningBusy(true)
+    setReasoningError('')
+    try {
+      await onReasoningControlChange(nextThinkingMode, nextReasoningEffort)
+    } catch (error) {
+      setReasoningError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setReasoningBusy(false)
+    }
+  }, [onReasoningControlChange, reasoningBusy, streaming])
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -709,7 +956,336 @@ export function ChatPane({
 
   return (
     <div className="chat-pane">
-      <div className="chat-lane-banner"><strong>Project agent</strong><span>Tools and selected-box context are active.</span><button onClick={onOpenQuickChat}>Fast chat · no tools/context</button></div>
+      <div className="chat-lane-banner">
+        <div className="chat-lane-identity">
+          <strong>Mauler chat</strong>
+          <span>Chat immediately; a workspace adds durable files, tools and evidence.</span>
+        </div>
+        <div className="chat-header-actions" ref={toolbarRef}>
+          <div className={`chat-toolbar-menu ${toolbarMenu === 'tools' ? 'open' : ''}`}>
+            <button className={(showSecurityPanel || showIndexPanel || showBrowserPanel) ? 'active' : ''} onClick={() => setToolbarMenu(value => value === 'tools' ? null : 'tools')} aria-haspopup="menu" aria-expanded={toolbarMenu === 'tools'}>
+              <UiIcon name="tools" />
+              <span>Tools</span>
+              {(repositoryIndex?.active || browserStatus?.active) && <i aria-hidden="true" />}
+              <b aria-hidden="true">⌄</b>
+            </button>
+            {toolbarMenu === 'tools' && (
+              <div className="chat-toolbar-popover" role="menu" aria-label="Chat tools">
+                <div className="chat-toolbar-popover-heading"><strong>Tools</strong><span>Open a task surface in Chat</span></div>
+                <button
+                  className={showSecurityPanel ? 'active' : ''}
+                  onClick={() => {
+                    setShowSecurityPanel(value => {
+                      localStorage.setItem('mauler.chat.securityPanel', String(!value))
+                      return !value
+                    })
+                    setToolbarMenu(null)
+                  }}
+                  role="menuitem"
+                >
+                  <UiIcon name="security" className="chat-menu-item-icon" /><span><strong>Security workspace</strong><small>Scope, findings and validation</small></span>
+                  <em>{showSecurityPanel ? 'Open' : 'Security'}</em>
+                </button>
+                <button
+                  className={showIndexPanel ? 'active' : ''}
+                  onClick={() => {
+                    setShowIndexPanel(value => {
+                      localStorage.setItem('mauler.chat.indexPanel', String(!value))
+                      return !value
+                    })
+                    setToolbarMenu(null)
+                  }}
+                  role="menuitem"
+                >
+                  <UiIcon name="files" className="chat-menu-item-icon" /><span><strong>Workspace files</strong><small>Searchable repository knowledge</small></span>
+                  <em>{repositoryIndexLabel(repositoryIndex)}</em>
+                </button>
+                <button
+                  className={`${showBrowserPanel ? 'active' : ''} ${browserStatus?.active ? 'live' : ''}`}
+                  onClick={() => {
+                    setShowBrowserPanel(value => !value)
+                    setToolbarMenu(null)
+                  }}
+                  role="menuitem"
+                >
+                  <UiIcon name="browser" className="chat-menu-item-icon" /><span><strong>Native browser</strong><small>Visible session and takeover controls</small></span>
+                  <em>{browserStatusLabel(browserStatus)}</em>
+                </button>
+              </div>
+            )}
+          </div>
+          <div className={`chat-toolbar-menu ${toolbarMenu === 'view' ? 'open' : ''}`}>
+            <button className={(!followOutput || showSearch || transcriptMode !== 'replies') ? 'active' : ''} onClick={() => setToolbarMenu(value => value === 'view' ? null : 'view')} aria-haspopup="menu" aria-expanded={toolbarMenu === 'view'}>
+              <UiIcon name="view" />
+              <span>View</span>
+              <small>{followOutput ? (transcriptMode === 'custom' ? 'Custom' : transcriptMode === 'complete' ? 'Complete' : 'Replies') : 'Paused'}</small>
+              <b aria-hidden="true">⌄</b>
+            </button>
+            {toolbarMenu === 'view' && (
+              <div className="chat-toolbar-popover chat-view-popover" role="menu" aria-label="Chat view">
+                <div className="chat-toolbar-popover-heading"><strong>View</strong><span>Control the conversation display</span></div>
+                <button onClick={() => {
+                  setShowSearch(value => {
+                    if (!value) window.setTimeout(() => searchRef.current?.focus(), 0)
+                    return !value
+                  })
+                  setToolbarMenu(null)
+                }} role="menuitem">
+                  <UiIcon name="search" className="chat-menu-item-icon" /><span><strong>Search conversation</strong><small>Find visible messages and events</small></span>
+                  <kbd>Ctrl+F</kbd>
+                </button>
+                <button className={followOutput ? 'active' : 'paused'} onClick={() => storeFollowOutput(!followOutput)} role="menuitemcheckbox" aria-checked={followOutput}>
+                  <UiIcon name="follow" className="chat-menu-item-icon" /><span><strong>Follow new output</strong><small>{followOutput ? 'Chat stays on the latest activity' : 'Reading position is preserved'}</small></span>
+                  <em>{followOutput ? 'On' : 'Paused'}</em>
+                </button>
+                <div className="chat-toolbar-section-label">Transcript detail</div>
+                <div className="chat-toolbar-choice" role="group" aria-label="Transcript detail">
+                  <button className={transcriptMode === 'complete' ? 'active' : ''} onClick={() => changeTranscriptMode('complete')}>Complete</button>
+                  <button className={transcriptMode === 'replies' ? 'active' : ''} onClick={() => changeTranscriptMode('replies')}>Replies only</button>
+                </div>
+                <div className="chat-toolbar-section-label">Show activity</div>
+                <div className="chat-toolbar-checks">
+                  <button className={transcriptFilters.tools ? 'active' : ''} onClick={() => toggleTranscriptFilter('tools')} aria-pressed={transcriptFilters.tools}>Tools</button>
+                  <button className={transcriptFilters.status ? 'active' : ''} onClick={() => toggleTranscriptFilter('status')} aria-pressed={transcriptFilters.status}>Run status</button>
+                  <button className={transcriptFilters.browser ? 'active' : ''} onClick={() => toggleTranscriptFilter('browser')} aria-pressed={transcriptFilters.browser}>Browser</button>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className={`chat-toolbar-menu chat-run-mode-menu ${toolbarMenu === 'run' ? 'open' : ''}`}>
+            <button className={conversationMode !== 'adaptive' ? 'active' : ''} onClick={() => setToolbarMenu(value => value === 'run' ? null : 'run')} aria-haspopup="menu" aria-expanded={toolbarMenu === 'run'}>
+              <UiIcon name="run" />
+              <span>Run mode</span><small>{conversationMode === 'direct' ? 'Direct' : conversationMode === 'agent' ? 'Agent' : 'Adaptive'}</small><b aria-hidden="true">⌄</b>
+            </button>
+            {toolbarMenu === 'run' && (
+              <div className="chat-toolbar-popover" role="menu" aria-label="Run mode">
+                <div className="chat-toolbar-popover-heading"><strong>Conversation mode</strong><span>Saved with this conversation</span></div>
+                <button className={conversationMode === 'adaptive' ? 'active' : ''} onClick={() => { setToolbarMenu(null); void onConversationModeChange('adaptive') }} role="menuitemradio" aria-checked={conversationMode === 'adaptive'}>
+                  <span><strong>Adaptive</strong><small>Direct for questions; tools and validation for tasks</small></span>
+                  <em>{conversationMode === 'adaptive' ? 'Current' : 'Recommended'}</em>
+                </button>
+                <button className={conversationMode === 'direct' ? 'active' : ''} onClick={() => { setToolbarMenu(null); void onConversationModeChange('direct') }} role="menuitemradio" aria-checked={conversationMode === 'direct'}>
+                  <span><strong>Always direct</strong><small>One text answer with no tools, repair, or reviewer pass</small></span>
+                  <em>{conversationMode === 'direct' ? 'Current' : 'Fast'}</em>
+                </button>
+                <button className={conversationMode === 'agent' ? 'active' : ''} onClick={() => { setToolbarMenu(null); void onConversationModeChange('agent') }} role="menuitemradio" aria-checked={conversationMode === 'agent'}>
+                  <span><strong>Always agent</strong><small>Keep planning, recovery, validation, and evidence checks</small></span>
+                  <em>{conversationMode === 'agent' ? 'Current' : 'Thorough'}</em>
+                </button>
+                <button onClick={() => { setToolbarMenu(null); onOpenQuickChat() }} role="menuitemradio" aria-checked="false">
+                  <span><strong>Fast chat window</strong><small>Separate lightweight chat without workspace context</small></span>
+                  <em>Open</em>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {showSecurityPanel && (
+        <ChatSecurityWorkspace
+          version={engagementVersion}
+          workspaceRoot={workspaceRoot}
+          onClose={() => {
+            setShowSecurityPanel(false)
+            localStorage.setItem('mauler.chat.securityPanel', 'false')
+          }}
+          onOpenEngagement={onOpenEngagement}
+          onPrepareRun={onPrepareEngagementRun}
+        />
+      )}
+      {showIndexPanel && (
+        <section className={`chat-index-panel ${repositoryIndex?.active ? 'active' : ''}`} aria-label="Workspace repository index">
+          <header>
+            <div>
+              <span>Workspace knowledge</span>
+              <strong title={repositoryIndex?.workspace || workspaceRoot}>{shortPath(repositoryIndex?.workspace || workspaceRoot) || 'Current workspace'}</strong>
+            </div>
+            <div className="chat-index-panel-state">
+              <i aria-hidden="true" />
+			  <span>{repositoryIndex?.indexing ? repositoryIndex.status : repositoryIndexBusy ? 'starting' : repositoryIndexLabel(repositoryIndex)}</span>
+			  <button onClick={() => void refreshRepositoryIndex()} disabled={repositoryIndexBusy && !repositoryIndex?.indexing} title="Refresh index status">↻</button>
+              <button onClick={() => {
+                setShowIndexPanel(false)
+                localStorage.setItem('mauler.chat.indexPanel', 'false')
+              }} title="Close workspace index">×</button>
+            </div>
+          </header>
+          {repositoryIndexError || repositoryIndex?.error ? (
+            <p className="chat-index-error">{repositoryIndexError || repositoryIndex?.error}</p>
+          ) : (
+			<p>Mauler streams supported text, code, readable PDFs and Office documents into bounded chunks; ZIP files contribute a safe inventory only. Unsupported, encrypted, corrupt or over-expanded inputs remain explicit omissions. Content stays untrusted and every search result carries immutable file and chunk hashes.</p>
+		  )}
+		  {repositoryIndex?.indexing && (
+			<div className="chat-index-progress" role="status" aria-live="polite">
+			  <div className="chat-index-metrics">
+				<div><span>Files seen</span><strong>{repositoryIndex.progress_files_seen.toLocaleString()}</strong></div>
+				<div><span>Files indexed</span><strong>{repositoryIndex.progress_files_indexed.toLocaleString()}</strong></div>
+				<div><span>Chunks</span><strong>{repositoryIndex.progress_chunk_count.toLocaleString()}</strong></div>
+				<div><span>Read</span><strong>{formatByteCount(repositoryIndex.progress_bytes_read)}</strong></div>
+			  </div>
+			  <small title={repositoryIndex.current_path}>{repositoryIndex.status === 'cancelling' ? 'Cancelling safely…' : repositoryIndex.current_path || 'Preparing scanner…'}</small>
+			</div>
+		  )}
+          <section className="chat-index-sources" aria-label="Knowledge sources">
+            <header>
+              <div><strong>Knowledge sources</strong><span>Current workspace plus explicit read-only additions</span></div>
+              <div>
+                <label className="chat-index-watch-toggle" title="Poll metadata and SHA-verify changes before activating a replacement generation">
+                  <input type="checkbox" checked={Boolean(repositoryIndex?.watch_enabled)} onChange={event => void updateRepositorySources(() => SetRepositoryIndexWatch(event.target.checked))} disabled={repositorySourceBusy} />
+                  Watch
+                </label>
+                <button onClick={() => void updateRepositorySources(SelectRepositoryIndexFiles)} disabled={repositorySourceBusy || Boolean(repositoryIndex?.indexing)}>+ Files</button>
+                <button onClick={() => void updateRepositorySources(SelectRepositoryIndexFolder)} disabled={repositorySourceBusy || Boolean(repositoryIndex?.indexing)}>+ Folder</button>
+              </div>
+            </header>
+            <div className="chat-index-source-root"><UiIcon name="workspace" /><span><strong>Workspace</strong><small title={repositoryIndex?.workspace || workspaceRoot}>{repositoryIndex?.workspace || workspaceRoot}</small></span><em>Required</em></div>
+            {(repositoryIndex?.sources ?? []).map(source => (
+              <div className="chat-index-source-root" key={`${source.kind}:${source.path}`}>
+                <UiIcon name={source.kind === 'folder' ? 'workspace' : 'files'} />
+                <span><strong>{source.kind === 'folder' ? 'Folder' : 'File'}</strong><small title={source.path}>{source.path}</small></span>
+                <button title={`Remove ${source.path} from future indexes`} onClick={() => void updateRepositorySources(() => RemoveRepositoryIndexSource(source.path))} disabled={repositorySourceBusy || Boolean(repositoryIndex?.indexing)}>Remove</button>
+              </div>
+            ))}
+          </section>
+          {repositoryIndex?.watch_enabled && (
+            <div className={`chat-index-watch-state ${repositoryIndex.watch_state === 'error' ? 'error' : ''}`}>
+              <i aria-hidden="true" />
+              <span><strong>{repositoryIndex.watch_state?.replaceAll('_', ' ') || 'starting'}</strong>{repositoryIndex.watch_error || (repositoryIndex.watch_last_check ? `Last checked ${new Date(repositoryIndex.watch_last_check).toLocaleTimeString()}` : 'Waiting for first check')}</span>
+            </div>
+          )}
+          {repositoryIndex?.active ? (
+            <>
+              <div className="chat-index-metrics">
+                <div><span>Files indexed</span><strong>{repositoryIndex.files_indexed.toLocaleString()} / {repositoryIndex.files_seen.toLocaleString()}</strong></div>
+                <div><span>Search chunks</span><strong>{repositoryIndex.chunk_count.toLocaleString()}</strong></div>
+                <div><span>Read</span><strong>{formatByteCount(repositoryIndex.bytes_read)}</strong></div>
+                <div className={repositoryIndex.omission_count ? 'warn' : ''}><span>Explicit omissions</span><strong>{repositoryIndex.omission_count.toLocaleString()}</strong></div>
+              </div>
+              <div className="chat-index-provenance">
+                <span title={repositoryIndex.generation_id}>Generation {shortDigest(repositoryIndex.generation_id)}</span>
+                <span title={repositoryIndex.manifest_digest}>Manifest {shortDigest(repositoryIndex.manifest_digest)}</span>
+                <span>{repositoryIndex.completed_at ? new Date(repositoryIndex.completed_at).toLocaleString() : 'Complete'}</span>
+              </div>
+              {repositoryIndex.refresh_mode === 'incremental' && (
+                <div className="chat-index-refresh-summary">
+                  <span><strong>{repositoryIndex.files_reused.toLocaleString()}</strong> hash-verified reused</span>
+                  <span><strong>{repositoryIndex.files_changed.toLocaleString()}</strong> changed/new</span>
+                  <span><strong>{repositoryIndex.files_deleted.toLocaleString()}</strong> deleted</span>
+                </div>
+              )}
+              {repositoryIndex.omissions.length > 0 && (
+                <details className="chat-index-omissions">
+                  <summary>Review {repositoryIndex.omission_count.toLocaleString()} non-indexed entr{repositoryIndex.omission_count === 1 ? 'y' : 'ies'}</summary>
+                  <div>
+                    {repositoryIndex.omissions.map((item, index) => (
+                      <article key={`${item.path}-${item.status}-${index}`}>
+                        <strong title={item.path}>{item.path || '(workspace root)'}</strong>
+                        <span>{item.status.replaceAll('_', ' ')}</span>
+                        {item.detail && <small>{item.detail}</small>}
+                      </article>
+                    ))}
+                    {repositoryIndex.omissions_truncated && <p>Only the first {repositoryIndex.omissions.length.toLocaleString()} notices are shown here; the manifest retains the complete count.</p>}
+                  </div>
+                </details>
+              )}
+            </>
+          ) : (
+            <div className="chat-index-empty">
+              <strong>No complete index for this workspace</strong>
+              <span>Create one before asking Mauler to search or review a large repository.</span>
+            </div>
+          )}
+          <footer>
+			<span>{repositoryIndexBusy || repositoryIndex?.indexing ? 'Scanning without loading whole files into Chat…' : 'Generated/dependency directories and unsupported files are reported, never silently counted as covered.'}</span>
+			{repositoryIndex?.indexing ? (
+			  <button className="danger" onClick={() => void cancelRepositoryIndex()} disabled={!repositoryIndex.can_cancel}>{repositoryIndex.can_cancel ? 'Cancel scan' : 'Cancelling…'}</button>
+			) : (
+			  <div className="chat-index-footer-actions">
+                {repositoryIndex?.active && <button onClick={() => void refreshChangedRepositoryFiles()} disabled={repositoryIndexBusy || repositoryIndex?.available === false}>Refresh changes</button>}
+                <button className="primary" onClick={() => void rebuildRepositoryIndex()} disabled={repositoryIndexBusy || repositoryIndex?.available === false}>
+				  {repositoryIndexBusy ? 'Starting…' : repositoryIndex?.active ? 'Full rebuild' : 'Index workspace'}
+			    </button>
+              </div>
+			)}
+          </footer>
+        </section>
+      )}
+      {showBrowserPanel && (
+        <section className={`chat-browser-panel ${browserStatus?.active ? 'active' : ''} ${browserStatus?.paused ? 'paused' : ''}`} aria-label="Native browser controls">
+          <header>
+            <div>
+              <span>Native browser</span>
+              <strong>{browserStatus?.title || (browserStatus?.available ? 'Ready for a visible session' : 'Browser unavailable')}</strong>
+            </div>
+            <div className="chat-browser-panel-state">
+              <i aria-hidden="true" />
+              <span>{browserStatusLabel(browserStatus)}</span>
+              <button onClick={() => void runBrowserAction(refreshBrowserStatus)} disabled={browserBusy} title="Refresh browser status">↻</button>
+              <button onClick={() => setShowBrowserPanel(false)} title="Close browser controls">×</button>
+            </div>
+          </header>
+          <p>{browserError || browserStatus?.last_error || browserStatus?.guidance || 'Open a visible Chrome or Edge session for this conversation.'}</p>
+          <div className="chat-browser-location">
+            <input
+              value={browserURL}
+              onChange={event => setBrowserURL(event.target.value)}
+              placeholder="https://example.com/login"
+              aria-label="Browser URL"
+              disabled={browserBusy || Boolean(browserStatus?.active)}
+              onKeyDown={event => {
+                if (event.key === 'Enter' && browserURL.trim() && !browserStatus?.active && !browserBusy) {
+                  event.preventDefault()
+                  void runBrowserAction(() => StartBrowserWorkflow(browserURL.trim()))
+                }
+              }}
+            />
+            {!browserStatus?.active && (
+              <button
+                className="primary"
+                onClick={() => void runBrowserAction(() => StartBrowserWorkflow(browserURL.trim()))}
+                disabled={browserBusy || !browserURL.trim() || !browserStatus?.available || !browserStatus?.tool_enabled}
+              >{browserBusy ? 'Opening…' : 'Open visible browser'}</button>
+            )}
+          </div>
+          {browserStatus?.active && (
+            <div className="chat-browser-session">
+              <div>
+                <span>Current page</span>
+                <strong title={browserStatus.url}>{browserStatus.url || 'Waiting for page URL'}</strong>
+                <small>{browserStatus.active_tab || 't1'} · {browserStatus.tab_count || 1} tab{(browserStatus.tab_count || 1) === 1 ? '' : 's'} · conversation-only session</small>
+              </div>
+              <div className="chat-browser-actions">
+                {!browserStatus.visible && (
+                  <button
+                    className="primary"
+                    onClick={() => void runBrowserAction(async () => {
+                      const reopenURL = browserStatus.url || browserURL
+                      await onStopBrowser()
+                      await StartBrowserWorkflow(reopenURL)
+                    })}
+                    disabled={browserBusy || !(browserStatus.url || browserURL)}
+                  >Restart visible</button>
+                )}
+                <button
+                  onClick={() => void runBrowserAction(TakeOverBrowserWorkflow)}
+                  disabled={browserBusy || browserStatus.paused || !browserStatus.visible}
+                >Take over</button>
+                <button
+                  className="primary"
+                  onClick={() => void runBrowserAction(async () => browserHandoff?.active ? onResumeBrowser() : ResumeBrowserWorkflow())}
+                  disabled={browserBusy || !browserStatus.paused}
+                >I’ve completed this—continue</button>
+                <button
+                  className="danger"
+                  onClick={() => void runBrowserAction(onStopBrowser)}
+                  disabled={browserBusy}
+                >Stop</button>
+              </div>
+            </div>
+          )}
+          <footer>Chrome/Edge opens in its own window. Cookies and page state belong only to this conversation; typed values are not returned to Chat.</footer>
+        </section>
+      )}
       {showSearch && (
         <div className="chat-search-bar">
           <input
@@ -723,36 +1299,54 @@ export function ChatPane({
             }}
           />
           <span className="chat-search-count">
-            {searchQuery.trim() ? `${visibleMessages.length} / ${messages.length}` : ''}
+            {searchQuery.trim() ? `${visibleMessages.length} / ${transcriptMessages.length}` : ''}
           </span>
           <button className="chat-search-close" onClick={() => { setShowSearch(false); setSearchQuery('') }}>x</button>
         </div>
       )}
-      <div className="chat-messages">
+      <div
+        ref={messagesRef}
+        className="chat-messages"
+        onWheel={event => {
+          if (event.deltaY < 0 && followOutput) storeFollowOutput(false)
+        }}
+        onTouchMove={() => {
+          if (followOutput) storeFollowOutput(false)
+        }}
+      >
         {messages.length === 0 && !streaming && (
           <div className="chat-empty">
-            <div className="chat-empty-head">
-              <span>$ TheMauler</span>
-              <strong>Ready for a local agent run</strong>
+            <div className="chat-empty-logo">M</div>
+            <h1>What are we working on?</h1>
+            <p>Ask anything, attach files, or give Mauler a task to complete in your workspace.</p>
+            <div className="chat-empty-prompts">
+              <button onClick={() => { setInput('Summarise this workspace, identify the important files and evidence, and suggest the most useful next step.'); inputRef.current?.focus() }}>
+                <UiIcon name="files" /><span><strong>Review workspace</strong><small>Understand files, evidence, and current state</small></span><em>Draft →</em>
+              </button>
+              <button onClick={() => { setInput('Review the latest run, explain what happened, and continue safely without repeating completed work.'); inputRef.current?.focus() }}>
+                <UiIcon name="run" /><span><strong>Continue latest run</strong><small>Resume from recorded state and evidence</small></span><em>Draft →</em>
+              </button>
+              <button onClick={() => { setInput('Help me plan this task before making changes: '); inputRef.current?.focus() }}>
+                <UiIcon name="tools" /><span><strong>Plan a task</strong><small>Agree the approach before tools or edits</small></span><em>Draft →</em>
+              </button>
+              <button className="security" onClick={() => { setShowSecurityPanel(true); localStorage.setItem('mauler.chat.securityPanel', 'true') }}>
+                <UiIcon name="security" /><span><strong>Security assessment</strong><small>Scope, test coverage, findings, and validation</small></span><em>Open →</em>
+              </button>
             </div>
-            <div className="chat-empty-grid">
-              <div><span>Profile</span><strong>{activeProfile || 'none'}</strong></div>
-              <div><span>Mode</span><strong>{autonomous ? 'Autonomous' : 'Manual'}</strong></div>
-              <div><span>Workspace</span><strong title={workspaceRoot}>{shortPath(workspaceRoot) || 'unknown'}</strong></div>
-              <div><span>Context</span><strong>{formatContext(historyStats)}</strong></div>
+            <div className="chat-empty-context">
+              <span>{activeProfile || 'Local model'}</span>
+              <span>{autonomous ? 'Autonomous' : 'Supervised'}</span>
+              <span title={workspaceRoot}>{shortPath(workspaceRoot) || 'No workspace'}</span>
+              <span>{formatContext(historyStats)}</span>
             </div>
-            <div className="chat-empty-actions">
-              <div><strong>Start</strong><span>Ask a task, drop files, or open artifacts from Workspace.</span></div>
-              <div><strong>Inspect</strong><span>Use the right panel for files, facts, commands, and activity.</span></div>
-              <div><strong>Control</strong><span>Profile, autonomy, state, and context are pinned above the composer.</span></div>
-            </div>
-            <div className="chat-empty-shortcuts">
-              <div className="chat-shortcut"><kbd>Enter</kbd><span>Send message</span></div>
-              <div className="chat-shortcut"><kbd>Ctrl+Enter</kbd><span>New line</span></div>
-              <div className="chat-shortcut"><kbd>Ctrl+F</kbd><span>Search chat</span></div>
-              <div className="chat-shortcut"><kbd>Ctrl+K</kbd><span>Clear chat</span></div>
-              <div className="chat-shortcut"><kbd>Ctrl+,</kbd><span>Settings</span></div>
-              <div className="chat-shortcut"><kbd>Ctrl+Z</kbd><span>Undo last edit</span></div>
+          </div>
+        )}
+        {messages.length === 0 && streaming && !thinkingBuffer.trim() && !streamBuffer.trim() && (
+          <div className="chat-active-run" role="status" aria-live="polite">
+            <span className="chat-active-run-pulse" aria-hidden="true" />
+            <div>
+              <strong>Run still active</strong>
+              <span>{runState?.detail || activity.find(item => item.status === 'running')?.name || 'Waiting for the next agent update'}</span>
             </div>
           </div>
         )}
@@ -842,25 +1436,44 @@ export function ChatPane({
       )}
 
       <div className="chat-input-area">
+        {browserHandoff?.active && (
+          <section className="browser-takeover-card" aria-live="assertive" aria-label="Browser waiting for you">
+            <div className="browser-takeover-copy">
+              <div className="browser-takeover-heading">
+                <span className="browser-takeover-badge">Waiting for you</span>
+                <strong>{browserHandoff.title || 'Browser takeover'}</strong>
+              </div>
+              {browserHandoff.url && <div className="browser-takeover-url" title={browserHandoff.url}>{browserHandoff.url}</div>}
+              <p>{browserHandoff.guidance || 'Complete the manual step in the visible browser. This same task is paused and will continue from a fresh page observation.'}</p>
+            </div>
+            <div className="browser-takeover-actions">
+              <button type="button" className="primary" onClick={() => void onResumeBrowser()}>
+                I’ve completed this—continue
+              </button>
+              <button type="button" onClick={() => void onStopBrowser()}>Stop browser</button>
+            </div>
+          </section>
+        )}
         {pendingInterrupt && (
           <div className="chat-pending-interrupt">
             <span>Interrupting current run. Your next message will send as soon as it stops.</span>
             <button onClick={onCancelPending}>Cancel</button>
           </div>
         )}
-        <div className="chat-run-footer">
+        <div className={`chat-context-toolbar ${streaming ? 'running' : ''}`} aria-label="Task context and run controls">
           <div className="run-popover-wrap">
             <button
               ref={planTriggerRef}
               type="button"
-              className={`run-popover-trigger ${openPopover === 'plan' ? 'active' : ''}`}
+              className={`context-toolbar-button ${openPopover === 'plan' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'plan' ? null : 'plan')}
               title="Show the active task plan"
             >
-              Plan <strong>{todoSummary(todos)}</strong>
+              <UiIcon name="plan" />
+              <span><strong>Plan</strong><small>{todoSummary(todos)}</small></span>
             </button>
             {openPopover === 'plan' && (
-              <ComposerPopoverPortal anchor={planTriggerRef.current}>
+              <ComposerPopoverPortal anchor={planTriggerRef.current} width={600}>
                 <PlanPopover todos={todos} onClear={onClearPlan} />
               </ComposerPopoverPortal>
             )}
@@ -869,14 +1482,15 @@ export function ChatPane({
             <button
               ref={toolsTriggerRef}
               type="button"
-              className={`run-popover-trigger ${openPopover === 'tools' ? 'active' : ''}`}
+              className={`context-toolbar-button ${openPopover === 'tools' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'tools' ? null : 'tools')}
               title="Show current tool/run state"
             >
-              Tools <strong>{toolSummary(activity, toolCountdown)}</strong>
+              <UiIcon name="tools" />
+              <span><strong>Tools</strong><small>{toolSummary(activity, toolCountdown)}</small></span>
             </button>
             {openPopover === 'tools' && (
-              <ComposerPopoverPortal anchor={toolsTriggerRef.current}>
+              <ComposerPopoverPortal anchor={toolsTriggerRef.current} width={580}>
                 <ToolboxPopover
                   activity={activity}
                   countdown={toolCountdown}
@@ -896,17 +1510,19 @@ export function ChatPane({
             <button
               ref={workspaceTriggerRef}
               type="button"
-              className={`run-popover-trigger ${openPopover === 'workspace' ? 'active' : ''}`}
+              className={`context-toolbar-button ${openPopover === 'workspace' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'workspace' ? null : 'workspace')}
               title={workspaceRoot || 'Choose the active workspace'}
             >
-              Workspace <strong>{shortPath(workspaceRoot) || 'choose'}</strong>
+              <UiIcon name="workspace" />
+              <span><strong>Workspace</strong><small>{shortPath(workspaceRoot) || 'Choose'}</small></span>
             </button>
             {openPopover === 'workspace' && (
-              <ComposerPopoverPortal anchor={workspaceTriggerRef.current} width={560}>
+              <ComposerPopoverPortal anchor={workspaceTriggerRef.current} width={620}>
                 <WorkspacePopover
                   current={workspaceRoot}
                   options={workspaceOptions}
+                  scratch={scratchWorkspace}
                   disabled={streaming}
                   onChoose={async bugBounty => {
                     setOpenPopover(null)
@@ -915,6 +1531,18 @@ export function ChatPane({
                   onSwitch={async path => {
                     setOpenPopover(null)
                     await onSwitchWorkspace(path)
+                  }}
+                  onCreateScratch={async () => {
+                    setOpenPopover(null)
+                    await onCreateScratchWorkspace()
+                  }}
+                  onCreateProject={async (name, bugBounty) => {
+                    setOpenPopover(null)
+                    await onCreateWorkspaceProject(name, bugBounty)
+                  }}
+                  onPromoteScratch={async name => {
+                    await onPromoteScratchWorkspace(name)
+                    setOpenPopover(null)
                   }}
                   onManage={() => {
                     setOpenPopover(null)
@@ -928,14 +1556,15 @@ export function ChatPane({
             <button
               ref={agentTriggerRef}
               type="button"
-              className={`run-popover-trigger ${openPopover === 'agent' ? 'active' : ''}`}
+              className={`context-toolbar-button ${openPopover === 'agent' ? 'active' : ''}`}
               onClick={() => setOpenPopover(v => v === 'agent' ? null : 'agent')}
               title={streaming ? `Active task route: ${agentMode || agentSelection || 'Auto'}` : 'Choose the agent remembered for this workspace'}
             >
-              {streaming ? 'Route' : 'Agent'} <strong>{streaming ? (agentMode || agentSelection || 'Auto') : (agentSelection || 'Auto')}</strong>
+              <UiIcon name="agent" />
+              <span><strong>{streaming ? 'Route' : 'Agent'}</strong><small>{streaming ? (agentMode || agentSelection || 'Auto') : (agentSelection || 'Auto')}</small></span>
             </button>
             {openPopover === 'agent' && (
-              <ComposerPopoverPortal anchor={agentTriggerRef.current} width={560}>
+              <ComposerPopoverPortal anchor={agentTriggerRef.current} width={620}>
                 <AgentPopover
                   definitions={agentDefinitions}
                   selected={agentSelection || 'Auto'}
@@ -948,37 +1577,36 @@ export function ChatPane({
               </ComposerPopoverPortal>
             )}
           </div>
-          <label className={`run-profile-once ${runProfileOverride ? 'cloud' : 'local'}`} title="Choose a model for the next task only. Mauler always returns to the local default afterward.">
-            <span>Next task</span>
-            <select
-              value={runProfileOverride}
-              onChange={event => onRunProfileOverrideChange(event.target.value)}
-              aria-label="Model for next task"
+          <div className="run-popover-wrap">
+            <button
+              ref={runSetupTriggerRef}
+              type="button"
+              className={`context-toolbar-button context-toolbar-run ${openPopover === 'runSetup' ? 'active' : ''}`}
+              onClick={() => setOpenPopover(value => value === 'runSetup' ? null : 'runSetup')}
+              title="Choose the next-task model and confirmation mode"
             >
-              <option value="">Local default · {activeProfile || 'local profile'}</option>
-              {cloudRunProfiles.map(profile => (
-                <option key={profile.name} value={profile.name}>Cloud once · {profile.model}</option>
-              ))}
-            </select>
-          </label>
-          {cloudRunProfiles.length === 0 && (
-            <button type="button" className="run-cloud-setup" onClick={onOpenSettings} title="Add an OpenRouter model in Settings, then use it for one task at a time.">
-              Add cloud boost
+              <UiIcon name="run" />
+              <span><strong>Run setup</strong><small>{runProfileOverride ? 'Cloud once' : autonomous ? 'Automatic' : 'Supervised'}</small></span>
             </button>
-          )}
-          {activeRunProfile && activeRunProfile !== activeProfile && (
-            <RunPill label="This run" value={`Cloud · ${activeRunProfile}`} tone="live" />
-          )}
-          <label className={`run-autonomy ${autonomous ? 'active' : ''}`} title="Autonomous mode lets the agent run tools without confirmation prompts.">
-            <input
-              type="checkbox"
-              checked={autonomous}
-              onChange={e => onAutonomousChange(e.target.checked)}
-              disabled={streaming}
-            />
-            <span>{autonomous ? 'Auto' : 'Manual'}</span>
-          </label>
-          {toolCountdown && <RunPill label="Tool" value={`${toolCountdown.name} ${formatDuration(Math.ceil(Math.max(0, toolCountdown.deadline - nowMs) / 1000))}`} tone="live" />}
+            {openPopover === 'runSetup' && (
+              <ComposerPopoverPortal anchor={runSetupTriggerRef.current} width={560}>
+                <RunSetupPopover
+                  activeProfile={activeProfile}
+                  activeRunProfile={activeRunProfile}
+                  cloudRunProfiles={cloudRunProfiles}
+                  runProfileOverride={runProfileOverride}
+                  autonomous={autonomous}
+                  streaming={streaming}
+                  toolCountdown={toolCountdown}
+                  nowMs={nowMs}
+                  onProfileChange={onRunProfileOverrideChange}
+                  onAutonomousChange={onAutonomousChange}
+                  onOpenSettings={onOpenSettings}
+                />
+              </ComposerPopoverPortal>
+            )}
+          </div>
+          {streaming && <span className="context-toolbar-live" title={runState?.detail || 'Working'}>{runState?.detail || 'Working'}</span>}
         </div>
         <div className="chat-input-card">
           {attachments.length > 0 && (
@@ -1010,34 +1638,72 @@ export function ChatPane({
             autoCapitalize="sentences"
           />
           <div className="chat-input-actions">
-            <button className="composer-attach-btn" onClick={() => void chooseChatFiles()} title="Choose one or more files. Large files stay on disk and are read in bounded chunks.">
-              Attach files
+            <button className="composer-icon-btn composer-attach-btn" onClick={() => void chooseChatFiles()} title="Attach files" aria-label="Attach files">
+              ＋
             </button>
+            <div className="composer-reasoning-wrap">
+              <button
+                ref={reasoningTriggerRef}
+                type="button"
+                className={`composer-reasoning-trigger mode-${normaliseComposerThinkingMode(thinkingMode)}${openPopover === 'reasoning' ? ' active' : ''}`}
+                onClick={() => setOpenPopover(value => value === 'reasoning' ? null : 'reasoning')}
+                disabled={streaming}
+                title={`Thinking and effort for the next run · ${activeModelID || activeProfile || 'active model'}`}
+                aria-haspopup="dialog"
+                aria-expanded={openPopover === 'reasoning'}
+              >
+                <span aria-hidden="true">✦</span>
+                <strong>{composerReasoningLabel(thinkingMode, reasoningEffort)}</strong>
+                <small>{compactModelLabel(activeModelID || activeProfile)}</small>
+              </button>
+              {openPopover === 'reasoning' && (
+                <ComposerPopoverPortal anchor={reasoningTriggerRef.current} width={470}>
+                  <ReasoningPopover
+                    modelID={activeModelID || activeProfile}
+                    supported={thinkingSupported}
+                    thinkingMode={thinkingMode}
+                    reasoningEffort={reasoningEffort}
+                    disabled={streaming || reasoningBusy}
+                    error={reasoningError}
+                    onChange={(mode, effort) => void applyReasoningControl(mode, effort)}
+                    onClose={() => setOpenPopover(null)}
+                  />
+                </ComposerPopoverPortal>
+              )}
+            </div>
             <button
               className={`composer-voice-btn ${recording ? 'recording' : voiceSession ? 'active' : ''}`}
               onClick={() => recording ? stopRecording() : void startRecording()}
               disabled={!audioConfig?.enabled}
               title={recording ? 'Stop recording and send' : 'Talk to Mauler'}
             >
-              {recording ? 'Send voice' : 'Talk'}
+              {recording ? 'Send voice' : 'Voice'}
             </button>
             {voiceSession && (
               <button className="composer-voice-btn active" onClick={() => { setVoiceSession(false); stopSpeech(); setVoiceStatus('') }} title="Turn spoken replies off">
                 Voice on
               </button>
             )}
-            <button className="composer-stop-btn danger" onClick={onStopAgent} disabled={!streaming} title={streaming ? 'Stop the current run' : 'No run is active'}>
-              Stop
-            </button>
-            <button className="composer-undo-btn" onClick={() => void Undo()} title="Undo last file change (Ctrl+Z)">Undo</button>
-            <button className="chat-clear-btn" onClick={onClearChat} title="Clear chat history (Ctrl+K)" disabled={streaming}>Clear</button>
+            {streaming && <button className="composer-stop-btn danger" onClick={onStopAgent} title="Stop the current run">Stop</button>}
+            <details className="composer-more-menu" ref={composerMoreRef}>
+              <summary title="More composer actions" aria-label="More composer actions"><UiIcon name="more" /></summary>
+              <div>
+                <span className="composer-menu-label">Task surfaces</span>
+                <button onClick={() => { setShowSecurityPanel(true); localStorage.setItem('mauler.chat.securityPanel', 'true'); if (composerMoreRef.current) composerMoreRef.current.open = false }}><UiIcon name="security" /><span><strong>Security workspace</strong><small>Scope, findings, and validation</small></span></button>
+                <button onClick={() => { setShowIndexPanel(true); localStorage.setItem('mauler.chat.indexPanel', 'true'); if (composerMoreRef.current) composerMoreRef.current.open = false }}><UiIcon name="files" /><span><strong>Workspace files</strong><small>Repository index and omissions</small></span></button>
+                <button onClick={() => { setShowBrowserPanel(true); if (composerMoreRef.current) composerMoreRef.current.open = false }}><UiIcon name="browser" /><span><strong>Native browser</strong><small>Visible session and takeover</small></span></button>
+                <span className="composer-menu-label divided">Conversation</span>
+                <button className="composer-undo-btn" onClick={() => { void Undo(); if (composerMoreRef.current) composerMoreRef.current.open = false }} title="Undo last file change (Ctrl+Z)"><UiIcon name="undo" /><span><strong>Undo last file edit</strong><small>Restore the previous workspace change</small></span></button>
+                <button className="chat-clear-btn danger" onClick={() => { onClearChat(); if (composerMoreRef.current) composerMoreRef.current.open = false }} title="Clear chat history (Ctrl+K)" disabled={streaming}><UiIcon name="trash" /><span><strong>Clear conversation</strong><small>Start again without deleting workspace files</small></span></button>
+              </div>
+            </details>
             <button
-              className={`primary composer-send-btn ${streaming ? 'interrupt' : ''}`}
+              className={`primary composer-icon-btn composer-send-btn ${streaming ? 'interrupt' : ''}`}
               onClick={() => void handleSend()}
               disabled={(!input.trim() && images.length === 0 && attachments.length === 0) || pendingInterrupt}
               title={streaming ? 'Interrupt the current run and send this draft' : 'Send'}
             >
-              <span>{streaming ? 'Interrupt & Send' : 'Send'}</span>
+              <span aria-hidden="true">↑</span>
             </button>
           </div>
           {attachmentStatus && <div className="composer-attachment-status" role="status">{attachmentStatus}</div>}
@@ -1099,11 +1765,32 @@ function takeSpeechChunks(input: string, minChars: number, flush: boolean): { ch
 }
 
 function todoSummary(todos: TodoItem[]): string {
+  if (!Array.isArray(todos)) return 'none'
   if (todos.length === 0) return 'none'
   const done = todos.filter(t => t.status === 'done').length
   const blocked = todos.filter(t => t.status === 'blocked').length
   if (blocked > 0) return `${done}/${todos.length}, ${blocked} blocked`
   return `${done}/${todos.length}`
+}
+
+function todoDisplayText(value: string): string {
+  return String(value || '')
+    .replace(/^\s*\[[*x X]?\]\s*/u, '')
+    .replace(/^TODO[- _]?\d+\s*:\s*/iu, '')
+    .trim()
+}
+
+function todoStatusLabel(value: string): string {
+  switch (String(value || '').trim().toLowerCase()) {
+    case 'in_progress': return 'In progress'
+    case 'done': return 'Done'
+    case 'blocked': return 'Blocked'
+    case 'pending': return 'Pending'
+    case 'running': return 'Running'
+    case 'error': return 'Error'
+    case 'denied': return 'Denied'
+    default: return titleCase(String(value || 'Ready').replaceAll('_', ' '))
+  }
 }
 
 function toolSummary(activity: AgentActivity[], countdown: ToolCountdown | null): string {
@@ -1112,6 +1799,35 @@ function toolSummary(activity: AgentActivity[], countdown: ToolCountdown | null)
   if (running) return running.name
   const last = activity[0]
   return last ? `${last.name} ${last.status}` : 'idle'
+}
+
+function browserStatusLabel(status: BrowserWorkflowStatus | null): string {
+  if (!status) return 'checking'
+  if (!status.tool_enabled) return 'disabled'
+  if (!status.available) return 'unavailable'
+  if (status.paused) return 'waiting for you'
+  if (status.active) return status.visible ? 'visible' : 'headless'
+  return 'ready'
+}
+
+function repositoryIndexLabel(status: RepositoryIndexStatus | null): string {
+  if (!status) return 'checking'
+  if (!status.available) return 'unavailable'
+  if (!status.active) return 'not indexed'
+  return `${status.files_indexed} indexed`
+}
+
+function formatByteCount(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / Math.pow(1024, unit)
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
+}
+
+function shortDigest(value?: string): string {
+  if (!value) return 'pending'
+  return value.length > 14 ? `${value.slice(0, 12)}…` : value
 }
 
 function ComposerPopoverPortal({
@@ -1155,29 +1871,275 @@ function ComposerPopoverPortal({
   )
 }
 
+function normaliseComposerThinkingMode(value: string): 'auto' | 'on' | 'off' {
+  return value === 'on' || value === 'off' ? value : 'auto'
+}
+
+function compactModelLabel(value: string): string {
+  const clean = String(value || 'Local model').replace(/\.gguf$/i, '')
+  return clean.length > 24 ? `${clean.slice(0, 21)}…` : clean
+}
+
+function titleCase(value: string): string {
+  const clean = String(value || '').trim()
+  return clean ? `${clean.charAt(0).toUpperCase()}${clean.slice(1)}` : 'Auto'
+}
+
+function composerReasoningLabel(thinkingMode: string, reasoningEffort: string): string {
+  const mode = normaliseComposerThinkingMode(thinkingMode)
+  if (mode === 'off') return 'Direct'
+  if (mode === 'auto') return reasoningEffort && reasoningEffort !== 'auto'
+    ? `Profile · ${reasoningEffort === 'xhigh' ? 'XHigh' : titleCase(reasoningEffort)}`
+    : 'Profile'
+  const effort = reasoningEffort && reasoningEffort !== 'auto' ? reasoningEffort : 'auto'
+  return effort === 'xhigh' ? 'Think · XHigh' : `Think · ${titleCase(effort)}`
+}
+
+function ReasoningPopover({
+  modelID,
+  supported,
+  thinkingMode,
+  reasoningEffort,
+  disabled,
+  error,
+  onChange,
+  onClose,
+}: {
+  modelID: string
+  supported: boolean
+  thinkingMode: string
+  reasoningEffort: string
+  disabled: boolean
+  error: string
+  onChange: (thinkingMode: string, reasoningEffort: string) => void
+  onClose: () => void
+}) {
+  const mode = normaliseComposerThinkingMode(thinkingMode)
+  const qwen38 = /qwen3[._-]?8/i.test(modelID)
+  const efforts = qwen38
+    ? [
+      { value: 'auto', label: 'Auto' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'xhigh', label: 'XHigh' },
+    ]
+    : [
+      { value: 'auto', label: 'Auto' },
+      { value: 'minimal', label: 'Minimal' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'xhigh', label: 'XHigh' },
+    ]
+  const selectedEffort = qwen38 && reasoningEffort === 'high' ? 'xhigh' : (reasoningEffort || 'auto')
+
+  return (
+    <div className="composer-popover composer-reasoning-popover" role="dialog" aria-label="Thinking and reasoning effort">
+      <div className="composer-popover-head">
+        <span>Thinking &amp; effort</span>
+        <div>
+          <strong title={modelID}>{compactModelLabel(modelID)}</strong>
+          <button type="button" onClick={onClose} aria-label="Close thinking controls">Close</button>
+        </div>
+      </div>
+      <p className="composer-popover-note">Choose how the next run starts. The model may still adjust effort during a task, but it cannot override an explicit Direct or Always think choice.</p>
+      <section className="reasoning-control-section">
+        <div className="reasoning-control-heading">
+          <div><strong>Thinking</strong><span>Template behaviour for the complete run</span></div>
+          <small>{mode === 'auto' ? 'Recommended' : mode === 'on' ? 'Pinned on' : 'Pinned off'}</small>
+        </div>
+        <div className="reasoning-mode-picker" role="radiogroup" aria-label="Thinking mode">
+          <button type="button" role="radio" aria-checked={mode === 'auto'} className={mode === 'auto' ? 'active' : ''} disabled={disabled} onClick={() => onChange('auto', reasoningEffort || 'auto')}>
+            <strong>Profile</strong><span>Adaptive</span>
+          </button>
+          <button type="button" role="radio" aria-checked={mode === 'on'} className={mode === 'on' ? 'active' : ''} disabled={disabled || !supported} onClick={() => onChange('on', reasoningEffort || 'auto')}>
+            <strong>Always think</strong><span>Preserve reasoning</span>
+          </button>
+          <button type="button" role="radio" aria-checked={mode === 'off'} className={mode === 'off' ? 'active direct' : 'direct'} disabled={disabled} onClick={() => onChange('off', reasoningEffort || 'auto')}>
+            <strong>Direct</strong><span>No thinking</span>
+          </button>
+        </div>
+        {!supported && <p className="reasoning-capability-note warn">This profile does not advertise thinking support. Profile and Direct remain available; Mauler will not invent an unsupported model capability.</p>}
+      </section>
+      <section className="reasoning-control-section">
+        <div className="reasoning-control-heading">
+          <div><strong>Starting effort</strong><span>{mode === 'off' ? 'Direct mode ignores effort' : 'Depth before the agent adapts'}</span></div>
+          <small>{selectedEffort === 'xhigh' ? 'XHigh' : titleCase(selectedEffort)}</small>
+        </div>
+        <div className={`reasoning-effort-picker${mode === 'off' ? ' disabled' : ''}`} role="radiogroup" aria-label="Reasoning effort">
+          {efforts.map(effort => (
+            <button
+              key={effort.value}
+              type="button"
+              role="radio"
+              aria-checked={selectedEffort === effort.value}
+              className={selectedEffort === effort.value ? 'active' : ''}
+              disabled={disabled || mode === 'off'}
+              onClick={() => onChange(mode, effort.value)}
+              title={effort.value === 'auto' ? 'Use the selected agent mode default' : `${effort.label} starting reasoning effort`}
+            >
+              <i aria-hidden="true" />
+              <span>{effort.label}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <footer className="reasoning-popover-footer">
+        <span>{qwen38 ? 'Qwen3.8 supports Low, Medium, and XHigh; XHigh is the model default for difficult work.' : 'Profile is the safest default for mixed chat, tool, and coding work.'}</span>
+        {error && <strong role="alert">{error}</strong>}
+      </footer>
+    </div>
+  )
+}
+
+function TaskMenuHeader({
+  icon,
+  title,
+  subtitle,
+  status,
+  tone = 'neutral',
+  actions,
+}: {
+  icon: UiIconName
+  title: string
+  subtitle: string
+  status?: string
+  tone?: 'neutral' | 'live' | 'warn'
+  actions?: ReactNode
+}) {
+  return (
+    <header className="task-menu-header">
+      <span className="task-menu-header-icon"><UiIcon name={icon} /></span>
+      <span className="task-menu-header-copy"><strong>{title}</strong><small>{subtitle}</small></span>
+      <span className={`task-menu-header-state ${tone}`}>{status}</span>
+      {actions && <div className="task-menu-header-actions">{actions}</div>}
+    </header>
+  )
+}
+
+function RunSetupPopover({
+  activeProfile,
+  activeRunProfile,
+  cloudRunProfiles,
+  runProfileOverride,
+  autonomous,
+  streaming,
+  toolCountdown,
+  nowMs,
+  onProfileChange,
+  onAutonomousChange,
+  onOpenSettings,
+}: {
+  activeProfile: string
+  activeRunProfile: string
+  cloudRunProfiles: RunProfileOption[]
+  runProfileOverride: string
+  autonomous: boolean
+  streaming: boolean
+  toolCountdown: ToolCountdown | null
+  nowMs: number
+  onProfileChange: (profile: string) => void
+  onAutonomousChange: (enabled: boolean) => void
+  onOpenSettings: () => void
+}) {
+  return (
+    <div className="composer-popover composer-run-setup-popover">
+      <TaskMenuHeader
+        icon="run"
+        title="Run setup"
+        subtitle="Model route and confirmation behaviour"
+        status={streaming ? 'Locked during run' : 'Applies to next task'}
+        tone={streaming ? 'warn' : 'neutral'}
+      />
+      <p className="composer-popover-note">Choose the model route and how Mauler asks before higher-risk tool actions. Policy and scope checks always remain active.</p>
+      <section className="run-setup-section">
+        <div className="run-setup-heading"><strong>Model route</strong><small>Cloud choices reset to local after one task</small></div>
+        <label className={`run-profile-once ${runProfileOverride ? 'cloud' : 'local'}`}>
+          <span>Next task</span>
+          <select
+            value={runProfileOverride}
+            onChange={event => onProfileChange(event.target.value)}
+            aria-label="Model for next task"
+            disabled={streaming}
+          >
+            <option value="">Local default · {activeProfile || 'local profile'}</option>
+            {cloudRunProfiles.map(profile => (
+              <option key={profile.name} value={profile.name}>Cloud once · {profile.model}</option>
+            ))}
+          </select>
+        </label>
+        {cloudRunProfiles.length === 0 && (
+          <button type="button" className="run-cloud-setup" onClick={onOpenSettings}>Configure an optional cloud boost</button>
+        )}
+        {activeRunProfile && activeRunProfile !== activeProfile && (
+          <div className="run-setup-live"><span>This run</span><strong>{activeRunProfile}</strong></div>
+        )}
+      </section>
+      <section className="run-setup-section">
+        <div className="run-setup-heading"><strong>Tool confirmations</strong><small>Choose how independently tools may run</small></div>
+        <div className="run-setup-choice" role="radiogroup" aria-label="Run confirmation mode">
+          <button type="button" role="radio" aria-checked={!autonomous} className={!autonomous ? 'active' : ''} disabled={streaming} onClick={() => onAutonomousChange(false)}>
+            <UiIcon name="agent" /><span><strong>Supervised</strong><small>Ask before protected actions</small></span>
+          </button>
+          <button type="button" role="radio" aria-checked={autonomous} className={autonomous ? 'active' : ''} disabled={streaming} onClick={() => onAutonomousChange(true)}>
+            <UiIcon name="run" /><span><strong>Automatic</strong><small>Use enabled tools without prompts</small></span>
+          </button>
+        </div>
+      </section>
+      {toolCountdown && (
+        <footer className="run-setup-tool"><span>Active tool</span><strong>{toolCountdown.name}</strong><small>{formatDuration(Math.ceil(Math.max(0, toolCountdown.deadline - nowMs) / 1000))} remaining</small></footer>
+      )}
+    </div>
+  )
+}
+
 function PlanPopover({ todos, onClear }: { todos: TodoItem[]; onClear: () => void | Promise<void> }) {
-  const current = todos.find(t => t.status === 'in_progress') || todos.find(t => t.status === 'blocked') || todos.find(t => t.status !== 'done')
+  const [clearing, setClearing] = useState(false)
+  const [clearError, setClearError] = useState('')
+  const items = Array.isArray(todos) ? todos : []
+  const current = items.find(t => t.status === 'in_progress') || items.find(t => t.status === 'blocked') || items.find(t => t.status !== 'done')
+  const clearPlan = async () => {
+    if (clearing || items.length === 0) return
+    setClearing(true)
+    setClearError('')
+    try {
+      await onClear()
+    } catch (error) {
+      setClearError(String(error))
+    } finally {
+      setClearing(false)
+    }
+  }
+  const done = items.filter(item => item.status === 'done').length
+  const blocked = items.filter(item => item.status === 'blocked').length
+  const remaining = current ? items.filter(item => item.id !== current.id) : items
   return (
     <div className="composer-popover composer-plan-popover">
-      <div className="composer-popover-head">
-        <span>Active Plan</span>
-        <div><strong>{todoSummary(todos)}</strong><button onClick={() => void onClear()} disabled={todos.length === 0}>Clear plan</button></div>
-      </div>
+      <TaskMenuHeader
+        icon="plan"
+        title="Task plan"
+        subtitle={items.length === 0 ? 'No steps yet' : `${done} completed · ${items.length - done} remaining`}
+        status={blocked > 0 ? `${blocked} blocked` : todoSummary(items)}
+        tone={blocked > 0 ? 'warn' : done === items.length && items.length > 0 ? 'live' : 'neutral'}
+        actions={<button className="task-menu-danger-action" onClick={() => void clearPlan()} disabled={items.length === 0 || clearing}>{clearing ? 'Clearing…' : 'Clear plan'}</button>}
+      />
       <p className="composer-popover-note">Plan state is not evidence. Confirm important claims in Facts, logs, files, or terminal output.</p>
+      {clearError && <div className="plan-clear-error" role="alert">Could not clear plan: {clearError}</div>}
       {current && (
         <div className={`plan-current plan-current-${current.status}`}>
-          <span>Now</span>
-          <strong>{current.text}</strong>
+          <span className="task-status-chip">Current step</span>
+          <strong>{todoDisplayText(current.text)}</strong>
           {current.detail && <small>{current.detail}</small>}
         </div>
       )}
+      {items.length > 0 && <div className="task-menu-section-label"><strong>{current ? 'Other steps' : 'Steps'}</strong><span>{remaining.length}</span></div>}
       <div className="plan-popover-list">
-        {todos.length === 0 ? (
-          <div className="empty-popover-row">No active plan yet.</div>
-        ) : todos.map(item => (
+        {items.length === 0 ? (
+          <div className="empty-popover-row"><strong>No active plan</strong><span>Ask Mauler to plan a multi-step task and its progress will appear here.</span></div>
+        ) : remaining.map(item => (
           <div key={item.id} className={`plan-popover-item plan-${item.status}`}>
-            <span>{item.status}</span>
-            <strong>{item.text}</strong>
+            <span className="task-status-chip">{todoStatusLabel(item.status)}</span>
+            <strong>{todoDisplayText(item.text)}</strong>
             {item.detail && <small>{item.detail}</small>}
           </div>
         ))}
@@ -1210,40 +2172,88 @@ function chatWorkspaceOptions(settings: Settings): ChatWorkspaceOption[] {
 function WorkspacePopover({
   current,
   options,
+  scratch,
   disabled,
   onChoose,
   onSwitch,
+  onCreateScratch,
+  onCreateProject,
+  onPromoteScratch,
   onManage,
 }: {
   current: string
   options: ChatWorkspaceOption[]
+  scratch: ScratchWorkspaceStatus | null
   disabled: boolean
   onChoose: (bugBounty: boolean) => void | Promise<void>
   onSwitch: (path: string) => void | Promise<void>
+  onCreateScratch: () => void | Promise<void>
+  onCreateProject: (name: string, bugBounty: boolean) => void | Promise<void>
+  onPromoteScratch: (name: string) => void | Promise<void>
   onManage: () => void
 }) {
+  const [promoteName, setPromoteName] = useState(scratch?.name || 'Saved workspace')
+  const [projectName, setProjectName] = useState('')
+  const [projectBugBounty, setProjectBugBounty] = useState(false)
   const currentKey = current.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase()
   return (
     <div className="composer-popover composer-workspace-popover">
-      <div className="composer-popover-head">
-        <span>Active workspace</span>
-        <strong title={current}>{shortPath(current) || 'Not selected'}</strong>
-      </div>
-      <p className="composer-popover-note">Switching opens a clean project chat and restores the agent remembered for that folder. Files, memory, saved sessions, evidence, and logs are preserved.</p>
+      <TaskMenuHeader
+        icon="workspace"
+        title="Workspace"
+        subtitle="Files and durable context for this chat"
+        status={shortPath(current) || 'Not selected'}
+        tone={current ? 'live' : 'warn'}
+      />
+      <p className="composer-popover-note">Attach scratch context to this chat, or switch to a durable workspace. Switching workspaces starts a clean chat; promotion keeps this conversation and every file in place.</p>
       {disabled && <div className="workspace-switch-warning">Stop the active run before changing workspace.</div>}
+      <div className="task-menu-section-label"><strong>Start or attach</strong><span>Choose how this chat stores work</span></div>
+      <section className="workspace-new-project-card">
+        <div>
+          <span><UiIcon name="workspace" /><strong>New project</strong></span>
+          <small>Create a new folder, register it, and open a clean project chat.</small>
+        </div>
+        <div className="workspace-new-project-row">
+          <input
+            value={projectName}
+            onChange={event => setProjectName(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && projectName.trim() && !disabled) void onCreateProject(projectName.trim(), projectBugBounty)
+            }}
+            placeholder="Project or client name"
+            maxLength={96}
+          />
+          <button disabled={disabled || !projectName.trim()} onClick={() => void onCreateProject(projectName.trim(), projectBugBounty)}>Choose location…</button>
+        </div>
+        <label><input type="checkbox" checked={projectBugBounty} onChange={event => setProjectBugBounty(event.target.checked)} disabled={disabled} /> Open with Bug Bounty Hunter</label>
+      </section>
+      {scratch?.active ? (
+        <section className={`scratch-workspace-card${scratch.review_due ? ' review-due' : ''}`}>
+          <div className="scratch-workspace-head"><span><UiIcon name="files" />Conversation scratch</span><strong>{scratch.review_due ? 'Review due' : 'Active'}</strong></div>
+          <code title={scratch.path}>{shortPath(scratch.path || current)}</code>
+          <p>{scratch.retention_policy}. Review {scratch.review_after_unix ? new Date(scratch.review_after_unix * 1000).toLocaleDateString() : 'when finished'}.</p>
+          <div className="scratch-promote-row">
+            <input value={promoteName} onChange={event => setPromoteName(event.target.value)} placeholder="Workspace name" />
+            <button disabled={disabled || !promoteName.trim()} onClick={() => void onPromoteScratch(promoteName.trim())}>Promote</button>
+          </div>
+        </section>
+      ) : (
+        <button className="scratch-create-button" disabled={disabled} onClick={() => void onCreateScratch()}>
+          <UiIcon name="files" /><span><strong>Start conversation scratch</strong><small>Private working folder; review after 7 days, never auto-deleted</small></span><em>New</em>
+        </button>
+      )}
       <div className="workspace-action-grid">
         <button disabled={disabled} onClick={() => void onChoose(false)}>
-          <strong>Choose folder...</strong>
-          <span>Open any existing workspace</span>
+          <UiIcon name="workspace" /><span><strong>Choose workspace</strong><small>Open any existing folder</small></span>
         </button>
         <button disabled={disabled} onClick={() => void onChoose(true)}>
-          <strong>Choose bounty folder...</strong>
-          <span>Open it with Bug Bounty Hunter</span>
+          <UiIcon name="security" /><span><strong>Choose bounty workspace</strong><small>Open with Bug Bounty Hunter</small></span>
         </button>
       </div>
+      <div className="task-menu-section-label"><strong>Recent workspaces</strong><span>{options.length}</span></div>
       <div className="workspace-popover-list">
         {options.length === 0 ? (
-          <div className="empty-popover-row">No recent workspaces yet.</div>
+          <div className="empty-popover-row"><strong>No recent workspaces</strong><span>Choose a folder above to add one.</span></div>
         ) : options.map(option => {
           const key = option.path.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase()
           const active = key === currentKey
@@ -1255,14 +2265,14 @@ function WorkspacePopover({
               onClick={() => void onSwitch(option.path)}
               title={option.path}
             >
-              <span>{option.kind}</span>
-              <strong>{option.name}</strong>
-              <small>{option.path}</small>
+              <UiIcon name={option.kind === 'project' ? 'workspace' : 'files'} />
+              <span className="workspace-popover-copy"><strong>{option.name}</strong><small>{option.path}</small></span>
+              <em>{active ? 'Current' : option.kind}</em>
             </button>
           )
         })}
       </div>
-      <button className="workspace-manage-button" onClick={onManage}>Manage workspaces...</button>
+      <button className="workspace-manage-button" onClick={onManage}><UiIcon name="workspace" />Manage all workspaces</button>
     </div>
   )
 }
@@ -1280,15 +2290,19 @@ function AgentPopover({
 }) {
   const items = definitions.length > 0 ? definitions : [{
     id: 'auto', name: 'Auto', description: 'Choose the right working style for the task.', version: '1',
-    default_toolset: 'balanced', default_autonomy: 'balanced', planning_only: false, builtin: true,
+    default_profile: '', default_toolset: 'balanced', default_autonomy: 'balanced', planning_only: false, builtin: true,
   }]
   return (
     <div className="composer-popover composer-agent-popover">
-      <div className="composer-popover-head">
-        <span>Workspace agent</span>
-        <strong>{selected}</strong>
-      </div>
-      <p className="composer-popover-note">This choice is remembered for the current workspace. It does not change the local model default or one-task cloud boost.</p>
+      <TaskMenuHeader
+        icon="agent"
+        title="Agent"
+        subtitle="Working style remembered for this workspace"
+        status={selected}
+        tone="live"
+      />
+      <p className="composer-popover-note">This choice is remembered for the current workspace. Security agents may select a task-specific local profile, but never overwrite your normal chat default.</p>
+      <div className="task-menu-section-label"><strong>Choose an agent</strong><span>{items.length} available</span></div>
       <div className="agent-popover-list">
         {items.map(definition => (
           <button
@@ -1297,12 +2311,13 @@ function AgentPopover({
             disabled={disabled || definition.name === selected}
             onClick={() => void onSelect(definition.name)}
           >
-            <span className="agent-popover-title">
-              <strong>{definition.name}</strong>
-              {definition.planning_only && <small>Planning only</small>}
+            <span className="agent-popover-icon"><UiIcon name={definition.name === 'Bug Bounty Hunter' ? 'security' : definition.planning_only ? 'plan' : 'agent'} /></span>
+            <span className="agent-popover-copy">
+              <span className="agent-popover-title"><strong>{definition.name}</strong>{definition.name === selected && <small>Selected</small>}{definition.planning_only && <small>Planning only</small>}</span>
+              <span className="agent-popover-description">{definition.description}</span>
+              <span className="agent-popover-policy"><em>{titleCase(definition.default_autonomy || 'balanced')}</em><em>{titleCase(definition.default_toolset || 'balanced')} tools</em>{definition.default_profile && <em title={definition.default_profile}>Model · {compactModelLabel(definition.default_profile)}</em>}</span>
             </span>
-            <span className="agent-popover-description">{definition.description}</span>
-            <span className="agent-popover-policy">{definition.default_autonomy || 'balanced'} / {definition.default_toolset || 'balanced'}</span>
+            <span className="agent-popover-select">{definition.name === selected ? 'Current' : 'Select'}</span>
           </button>
         ))}
       </div>
@@ -1335,51 +2350,57 @@ function ToolboxPopover({
   terminalState: TerminalStateSnapshot | null
 }) {
   const queued = Number(channelStatus.queued_work || channelQueue.length || 0)
+  const runLabel = formatRunState(runState?.state || 'ready')
   return (
     <div className="composer-popover composer-tools-popover">
-      <div className="composer-popover-head">
-        <span>Toolbox</span>
-        <strong>{formatRunState(runState?.state || 'ready')} / {terminalState?.state || 'terminal unknown'}</strong>
-      </div>
+      <TaskMenuHeader
+        icon="tools"
+        title="Tools and run status"
+        subtitle="Live execution context and recent activity"
+        status={runLabel}
+        tone={runState?.state && !['ready', 'complete', 'idle'].includes(runState.state.toLowerCase()) ? 'warn' : 'live'}
+      />
+      <div className="task-menu-section-label"><strong>Current task</strong><span>{autonomous ? 'Automatic' : 'Supervised'}</span></div>
       <div className="toolbox-grid">
-        <div><span>Profile</span><strong>{profile || 'none'}</strong></div>
-        <div><span>Mode</span><strong>{autonomous ? 'Autonomous' : 'Manual'}</strong></div>
-        <div><span>Workspace</span><strong title={workspace}>{shortPath(workspace) || 'unknown'}</strong></div>
-        <div><span>Context</span><strong>{context}</strong></div>
-        <div><span>Terminal</span><strong title={terminalState?.summary}>{terminalState?.state || 'unknown'}</strong></div>
-        <div><span>Channel</span><strong>{queued} queued</strong></div>
-        <div><span>Telegram</span><strong title={channelStatus.telegram_status}>{channelStatus.telegram_running === 'true' ? 'running' : 'off'}</strong></div>
-        <div><span>Agent</span><strong>{channelStatus.agent_running === 'true' ? 'running' : 'idle'}</strong></div>
+        <div><span>Model profile</span><strong title={profile}>{profile || 'Not selected'}</strong></div>
+        <div><span>Workspace</span><strong title={workspace}>{shortPath(workspace) || 'Not selected'}</strong></div>
+        <div><span>Context use</span><strong>{context}</strong></div>
+        <div><span>Confirmations</span><strong>{autonomous ? 'Automatic' : 'Supervised'}</strong></div>
       </div>
       {countdown && (
         <div className="toolbox-active">
-          <span>Running tool</span>
-          <strong>{countdown.name}</strong>
+          <span className="task-status-chip">Running now</span>
+          <strong>{countdown.name}</strong><small>Mauler is waiting for this tool to finish.</small>
         </div>
       )}
-      {terminalState?.summary && (
-        <div className="toolbox-active toolbox-terminal">
-          <span>Terminal summary</span>
-          <strong>{terminalState.summary}</strong>
-        </div>
-      )}
+      <div className="task-menu-section-label"><strong>Connected surfaces</strong><span>Live</span></div>
+      <div className="toolbox-surfaces">
+        <div><UiIcon name="terminal" /><span><strong>Shared terminal</strong><small>{terminalState?.summary || 'Terminal state is unavailable'}</small></span><em className={terminalState?.state === 'ready' ? 'live' : ''}>{titleCase(terminalState?.state || 'unknown')}</em></div>
+        <div><UiIcon name="agent" /><span><strong>Agent worker</strong><small>Runs the active task and tool loop</small></span><em className={channelStatus.agent_running === 'true' ? 'live' : ''}>{channelStatus.agent_running === 'true' ? 'Running' : 'Idle'}</em></div>
+        <div><UiIcon name="chats" /><span><strong>Telegram channel</strong><small title={channelStatus.telegram_status}>Remote task and status channel</small></span><em className={channelStatus.telegram_running === 'true' ? 'live' : ''}>{channelStatus.telegram_running === 'true' ? 'Running' : 'Off'}</em></div>
+        <div><UiIcon name="run" /><span><strong>Queued work</strong><small>Requests waiting for the agent</small></span><em className={queued > 0 ? 'warn' : ''}>{queued}</em></div>
+      </div>
       {channelQueue.length > 0 && (
+        <>
+        <div className="task-menu-section-label"><strong>Queued requests</strong><span>{channelQueue.length}</span></div>
         <div className="toolbox-activity toolbox-queue">
           {channelQueue.map(item => (
             <div key={item.id} className="toolbox-activity-row tool-running">
-              <span>{item.status}</span>
+              <span className="task-status-chip">{todoStatusLabel(item.status)}</span>
               <strong>{item.route.lane}</strong>
               <small>{truncateMiddle(item.envelope.text, 46)}</small>
             </div>
           ))}
         </div>
+        </>
       )}
+      <div className="task-menu-section-label"><strong>Recent activity</strong><span>{Math.min(activity.length, 6)}</span></div>
       <div className="toolbox-activity">
         {activity.length === 0 ? (
-          <div className="empty-popover-row">No recent tool activity.</div>
+          <div className="empty-popover-row"><strong>No recent tool activity</strong><span>Calls and results will appear here during a run.</span></div>
         ) : activity.slice(0, 6).map(item => (
           <div key={item.id} className={`toolbox-activity-row tool-${item.status}`}>
-            <span>{item.status}</span>
+            <span className="task-status-chip">{todoStatusLabel(item.status)}</span>
             <strong>{item.name}</strong>
             {typeof item.durationMs === 'number' && <small>{Math.max(0, Math.round(item.durationMs))}ms</small>}
           </div>
@@ -1392,25 +2413,6 @@ function ToolboxPopover({
 function formatRunState(state: string): string {
   if (!state) return 'Working'
   return state.replaceAll('_', ' ').replace(/\b\w/g, ch => ch.toUpperCase())
-}
-
-function RunPill({
-  label,
-  value,
-  title,
-  tone,
-}: {
-  label: string
-  value: string
-  title?: string
-  tone?: 'idle' | 'live' | 'warn'
-}) {
-  return (
-    <div className={`run-pill ${tone ? `run-pill-${tone}` : ''}`} title={title || `${label}: ${value}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  )
 }
 
 function formatContext(stats: HistoryStats | null): string {
@@ -1549,7 +2551,7 @@ function MessageBubble({
   const lineCount = prettyContent.split('\n').length
   const collapsible = isToolMsg && !planOutput && lineCount > COLLAPSE_THRESHOLD
   const [collapsed, setCollapsed] = useState(collapsible)
-  const roleClass = `msg msg-${msg.role}${msg.queued ? ' msg-queued' : ''}${guardedToolOutput ? ' msg-guardrail' : ''}`
+  const roleClass = `msg msg-${msg.role}${msg.category ? ` msg-event-${msg.category}` : ''}${msg.queued ? ' msg-queued' : ''}${guardedToolOutput ? ' msg-guardrail' : ''}`
 
   const roleLabel: Record<ChatMessage['role'], string> = {
     user: 'You',
@@ -1588,8 +2590,9 @@ function MessageBubble({
   return (
     <div className={roleClass}>
       <div className="msg-header">
-        <span className="msg-role">{roleLabel[msg.role]}</span>
+        <span className="msg-role">{msg.category === 'browser' ? 'Browser' : msg.category === 'status' ? (msg.role === 'assistant' ? 'Agent update' : 'Run status') : roleLabel[msg.role]}</span>
         {msg.queued && <span className="msg-queued-badge">queued</span>}
+        {isToolMsg && msg.toolName && <span className="msg-tool-name">{msg.toolName}</span>}
         {msg.timestamp > 0 && <span className="msg-time">{formatMsgTime(msg.timestamp)}</span>}
         {msg.role === 'assistant' && (
           <button className="msg-save-btn" onClick={() => void saveMessage()} title="Save reply to file">
@@ -1638,7 +2641,7 @@ function MessageBubble({
         {planOutput ? (
           <PlanResultCard content={prettyContent} rawContent={msg.content} />
         ) : isToolMsg ? (
-          <ToolMessageCard role={msg.role} content={prettyContent} rawContent={msg.content} guarded={guardedToolOutput} onReadResult={onReadResult} />
+          <ToolMessageCard role={msg.role} name={msg.toolName} content={prettyContent} rawContent={msg.content} guarded={guardedToolOutput} onReadResult={onReadResult} />
         ) : (
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -1753,12 +2756,14 @@ function stripPlanBullet(line: string): string {
 
 function ToolMessageCard({
   role,
+  name,
   content,
   rawContent,
   guarded,
   onReadResult,
 }: {
   role: ChatMessage['role']
+  name?: string
   content: string
   rawContent: string
   guarded: boolean
@@ -1768,7 +2773,7 @@ function ToolMessageCard({
   const parsed = parseToolPayload(content)
   const command = parsed.command || parsed.cmd || parsed.path || parsed.query || ''
   const status = toolStatus(content, role, guarded)
-  const summary = command || parsed.detail || parsed.error || firstMeaningfulLine(content) || role
+  const summary = command || parsed.detail || parsed.error || name || firstMeaningfulLine(content) || role
   const timeout = parsed.timeout ? `${parsed.timeout}s` : ''
   const isResult = role === 'tool_result'
   const resultIds = extractResultIds(content)
@@ -1780,7 +2785,7 @@ function ToolMessageCard({
     <div className={`tool-card tool-card-${status}`}>
       <div className="tool-card-head">
         <div className="tool-card-title">
-          <span>{isResult ? 'Result' : toolCallLabel(parsed, content)}</span>
+          <span>{name || (isResult ? 'Result' : toolCallLabel(parsed, content))}</span>
           <strong title={summary}>{summary}</strong>
         </div>
         <div className="tool-card-actions">

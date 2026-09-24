@@ -1,0 +1,41 @@
+.conversation-current-summary {
+  min-width: 0;
+}
+
+.conversation-current-summary > strong {
+  max-width: 310px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-current-summary > small {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.conversation-current-summary .conversation-library-mode {
+  display: inline-flex;
+  font-style: normal;
+}
+
+.conversation-menu-filters {
+  display: grid;
+  gap: 4px;
+  padding: 0 12px 9px;
+}
+
+.hermes-library-filters {
+  display: grid;
+  gap: 3px;
+  padding: 4px 10px 2px;
+  overflow: hidden;
+}
+
+.hermes-library-filters .conversation-tag-filters {
+  margin: 0;
+}

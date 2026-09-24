@@ -81,11 +81,15 @@ func trimOpsToolDefsIfNeededWithState(defs []llm.ToolDef, cfg settings.ToolsConf
 	return out
 }
 
-func (a *App) recordToolRoutingState(runID, firstUserText, toolChoice string, toolDefs []llm.ToolDef, autoContinues, totalToolCallsMade int, terminalState TerminalStateSnapshot) bool {
+func (a *App) recordToolRoutingState(runID, firstUserText, routingMode, toolChoice string, toolDefs []llm.ToolDef, autoContinues, totalToolCallsMade int, terminalState TerminalStateSnapshot) bool {
 	if a == nil {
 		return false
 	}
 	phase := opsPhaseForTaskWithState(firstUserText, terminalState)
+	routingMode = strings.ToLower(strings.TrimSpace(routingMode))
+	if routingMode != "selected" {
+		routingMode = "auto"
+	}
 	names := enabledToolNames(toolDefs)
 	if len(names) > opsToolBudgetSoftCap && (needsOperationalTool(strings.ToLower(firstUserText)) || looksShellCentricTask(strings.ToLower(firstUserText))) {
 		a.recordLedger(ledger.Event{
@@ -97,13 +101,14 @@ func (a *App) recordToolRoutingState(runID, firstUserText, toolChoice string, to
 			Message: fmt.Sprintf("Ops routed %d tools over budget %d", len(names), opsToolBudgetSoftCap),
 			Detail:  strings.Join(names, ", "),
 			Metadata: map[string]string{
-				"phase":       phase,
-				"tool_count":  fmt.Sprintf("%d", len(names)),
-				"tool_budget": fmt.Sprintf("%d", opsToolBudgetSoftCap),
+				"phase":        phase,
+				"tool_count":   fmt.Sprintf("%d", len(names)),
+				"tool_budget":  fmt.Sprintf("%d", opsToolBudgetSoftCap),
+				"routing_mode": routingMode,
 			},
 		})
 	}
-	key := fmt.Sprintf("%s|%s|%s|%s|%d|%s", runID, phase, toolChoice, terminalState.State, len(names), strings.Join(names, ","))
+	key := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%s", runID, phase, routingMode, toolChoice, terminalState.State, len(names), strings.Join(names, ","))
 	a.sessionMu.Lock()
 	if a.lastOpsPhaseKey == key {
 		a.sessionMu.Unlock()
@@ -117,10 +122,11 @@ func (a *App) recordToolRoutingState(runID, firstUserText, toolChoice string, to
 		Source:  "tool_router",
 		Status:  phase,
 		State:   phase,
-		Message: fmt.Sprintf("phase=%s choice=%s tools=%d", phase, toolChoice, len(names)),
+		Message: fmt.Sprintf("phase=%s routing=%s choice=%s tools=%d", phase, routingMode, toolChoice, len(names)),
 		Detail:  strings.Join(names, ", "),
 		Metadata: map[string]string{
 			"phase":          phase,
+			"routing_mode":   routingMode,
 			"tool_choice":    toolChoice,
 			"tool_count":     fmt.Sprintf("%d", len(names)),
 			"auto_turns":     fmt.Sprintf("%d", autoContinues),

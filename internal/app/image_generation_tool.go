@@ -165,7 +165,7 @@ func (t *generateImageTool) Run(ctx context.Context, raw json.RawMessage) (strin
 		return "", fmt.Errorf("generate_image: submit failed: %w", err)
 	}
 	emit := func(update imageJob) {
-		t.app.emit("mauler:image_progress", map[string]any{
+		payload := map[string]any{
 			"tool_call_id": callID,
 			"job_id":       update.ID,
 			"status":       update.Status,
@@ -176,7 +176,8 @@ func (t *generateImageTool) Run(ctx context.Context, raw json.RawMessage) (strin
 			"total_steps":  update.TotalSteps,
 			"jobs_ahead":   update.JobsAhead,
 			"eta_seconds":  update.ETASeconds,
-		})
+		}
+		t.app.emitRunContext(ctx, "mauler:image_progress", payload)
 	}
 	emit(job)
 

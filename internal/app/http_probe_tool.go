@@ -90,7 +90,11 @@ func (t *httpProbeTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 	var artifacts []string
 	if artifactOK {
 		artifacts = []string{artifactPath}
-		t.app.emit("mauler:workspace_changed", filepath.Dir(artifactPath))
+		// An HTTP artifact changes the contents visible in Explorer, not the
+		// authoritative workspace root. Emitting workspace_changed here used to
+		// make App.tsx clear the entire Chat transcript and remount the terminal
+		// in the middle of an otherwise healthy run.
+		t.app.emitRunContext(ctx, "mauler:workspace_files_changed", filepath.Dir(artifactPath))
 	}
 	t.app.recordLedger(ledger.Event{
 		Kind:      "pipeline",

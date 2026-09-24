@@ -103,10 +103,22 @@ type MicrocompactStats struct {
 }
 
 type RepairAction struct {
-	Phase  int
-	Action string
-	Index  int
-	Detail string
+	Phase  int    `json:"phase"`
+	Action string `json:"action"`
+	Index  int    `json:"index"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// RepairReport is the deterministic result of validating and normalising a
+// conversation before it is sent to a model. A rejected report never contains
+// invented replacement evidence; Diagnostic explains the structural blocker.
+type RepairReport struct {
+	Status         string         `json:"status"`
+	Valid          bool           `json:"valid"`
+	BeforeMessages int            `json:"before_messages"`
+	AfterMessages  int            `json:"after_messages"`
+	Actions        []RepairAction `json:"actions"`
+	Diagnostic     string         `json:"diagnostic,omitempty"`
 }
 
 func (a RepairAction) String() string {
@@ -127,13 +139,17 @@ func IsRepairPlaceholder(text string) bool {
 }
 
 func (h *History) RepairStructure() []RepairAction {
-	repaired, actions := RepairMessages(h.messages)
-	if len(actions) == 0 {
-		return nil
+	return h.RepairStructureReport().Actions
+}
+
+func (h *History) RepairStructureReport() RepairReport {
+	repaired, report := RepairMessagesReport(h.messages)
+	if len(report.Actions) == 0 {
+		return report
 	}
 	h.messages = repaired
 	h.recount()
-	return actions
+	return report
 }
 
 // ClearOldToolResults replaces stale, re-fetchable tool payloads with compact
@@ -391,6 +407,14 @@ func sanitizeCompactedMessages(messages []llm.Message) []llm.Message {
 }
 
 func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
+	repaired, report := RepairMessagesReport(messages)
+	return repaired, report.Actions
+}
+
+// RepairMessagesReport applies the code-owned nine-phase session repair
+// pipeline. It is intentionally deterministic: the same messages always
+// produce the same repaired transcript and action list.
+func RepairMessagesReport(messages []llm.Message) ([]llm.Message, RepairReport) {
 	valid := make([]llm.Message, 0, len(messages))
 	actions := make([]RepairAction, 0)
 	for i, msg := range messages {
@@ -411,22 +435,46 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 			actions = append(actions, RepairAction{Phase: 2, Action: "drop_leading_assistant", Index: i})
 			continue
 		}
+		if !seenUser && msg.Role == llm.RoleTool {
+			actions = append(actions, RepairAction{Phase: 2, Action: "drop_leading_tool", Index: i, Detail: msg.ToolCallID})
+			continue
+		}
 		withoutLeadingAssistant = append(withoutLeadingAssistant, msg)
 	}
 
-	merged := make([]llm.Message, 0, len(withoutLeadingAssistant))
+	withoutStaleNudges := make([]llm.Message, 0, len(withoutLeadingAssistant))
 	for i, msg := range withoutLeadingAssistant {
+		if len(withoutStaleNudges) > 0 && isControllerContinuation(msg) {
+			previous := withoutStaleNudges[len(withoutStaleNudges)-1]
+			if previous.Role == msg.Role && isControllerContinuation(previous) && messageContentText(previous) == messageContentText(msg) {
+				actions = append(actions, RepairAction{Phase: 8, Action: "collapse_stale_continuation", Index: i, Detail: msg.Role})
+				continue
+			}
+		}
+		withoutStaleNudges = append(withoutStaleNudges, msg)
+	}
+
+	merged := make([]llm.Message, 0, len(withoutStaleNudges))
+	for i, msg := range withoutStaleNudges {
 		if msg.Role == llm.RoleUser && len(merged) > 0 && merged[len(merged)-1].Role == llm.RoleUser {
 			prev := &merged[len(merged)-1]
-			prev.Content = mergeMessageContent(*prev, msg)
+			*prev = mergeMessages(*prev, msg)
 			actions = append(actions, RepairAction{Phase: 3, Action: "merge_consecutive_user", Index: i})
 			continue
 		}
 		if msg.Role == llm.RoleSystem && len(merged) > 0 && merged[len(merged)-1].Role == llm.RoleSystem {
 			prev := &merged[len(merged)-1]
-			prev.Content = mergeMessageContent(*prev, msg)
+			*prev = mergeMessages(*prev, msg)
 			actions = append(actions, RepairAction{Phase: 3, Action: "merge_consecutive_system", Index: i})
 			continue
+		}
+		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) == 0 && len(merged) > 0 {
+			prev := &merged[len(merged)-1]
+			if prev.Role == llm.RoleAssistant && len(prev.ToolCalls) == 0 {
+				*prev = mergeMessages(*prev, msg)
+				actions = append(actions, RepairAction{Phase: 3, Action: "merge_consecutive_assistant", Index: i})
+				continue
+			}
 		}
 		merged = append(merged, msg)
 	}
@@ -435,11 +483,12 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 	pendingToolIDs := map[string]bool{}
 	for i := 0; i < len(merged); i++ {
 		msg := merged[i]
-		if (msg.Role == llm.RoleAssistant || msg.Role == llm.RoleUser) && isEmptyMessageContent(msg) {
+		if (msg.Role == llm.RoleAssistant || msg.Role == llm.RoleUser) && isEmptyMessageContent(msg) && len(msg.ToolCalls) == 0 {
 			msg.Content = RepairPlaceholder
 			actions = append(actions, RepairAction{Phase: 6, Action: "fill_empty_content", Index: i, Detail: msg.Role})
 		}
 		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
+			msg.ToolCalls, actions = deduplicateExactToolCalls(msg.ToolCalls, actions, i)
 			resultIDs := followingToolResultIDs(merged, i+1)
 			kept := make([]llm.ToolCallDef, 0, len(msg.ToolCalls))
 			trailing := i == len(merged)-1
@@ -456,7 +505,7 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 			}
 			if len(kept) == 0 {
 				msg.ToolCalls = nil
-				if messageContentText(msg) == RepairPlaceholder {
+				if strings.TrimSpace(messageContentText(msg)) == "" || messageContentText(msg) == RepairPlaceholder {
 					msg.Content = "[Tool calls were removed because their results are unavailable.]"
 				}
 			} else {
@@ -474,6 +523,10 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 				actions = append(actions, RepairAction{Phase: 5, Action: "drop_orphaned_tool_result", Index: i, Detail: msg.ToolCallID})
 				continue
 			}
+			if isEmptyMessageContent(msg) {
+				msg.Content = "[Tool returned no output; no evidence was produced.]"
+				actions = append(actions, RepairAction{Phase: 6, Action: "fill_empty_tool_result", Index: i, Detail: msg.ToolCallID})
+			}
 			out = append(out, msg)
 			delete(pendingToolIDs, msg.ToolCallID)
 			continue
@@ -481,7 +534,22 @@ func RepairMessages(messages []llm.Message) ([]llm.Message, []RepairAction) {
 		pendingToolIDs = map[string]bool{}
 		out = append(out, msg)
 	}
-	return out, actions
+	report := RepairReport{
+		Status:         "clean",
+		Valid:          true,
+		BeforeMessages: len(messages),
+		AfterMessages:  len(out),
+		Actions:        actions,
+	}
+	if len(actions) > 0 {
+		report.Status = "repaired"
+	}
+	if !containsActionableMessage(out) {
+		report.Status = "rejected"
+		report.Valid = false
+		report.Diagnostic = "conversation contains no usable message after structural repair"
+	}
+	return out, report
 }
 
 func validRole(role string) bool {
@@ -493,7 +561,20 @@ func validRole(role string) bool {
 	}
 }
 
-func mergeMessageContent(a, b llm.Message) string {
+func mergeMessages(a, b llm.Message) llm.Message {
+	a.Content = mergeMessageContent(a, b)
+	a.DisplayContent = mergeText(a.DisplayContent, b.DisplayContent)
+	a.ReasoningContent = mergeText(a.ReasoningContent, b.ReasoningContent)
+	a.Attachments = append(a.Attachments, b.Attachments...)
+	return a
+}
+
+func mergeMessageContent(a, b llm.Message) interface{} {
+	leftBlocks, leftStructured := messageContentBlocks(a.Content)
+	rightBlocks, rightStructured := messageContentBlocks(b.Content)
+	if leftStructured || rightStructured {
+		return append(leftBlocks, rightBlocks...)
+	}
 	left := strings.TrimSpace(messageContentText(a))
 	right := strings.TrimSpace(messageContentText(b))
 	if left == "" {
@@ -503,6 +584,82 @@ func mergeMessageContent(a, b llm.Message) string {
 		return left
 	}
 	return left + "\n" + right
+}
+
+func messageContentBlocks(content interface{}) ([]llm.ContentBlock, bool) {
+	switch value := content.(type) {
+	case []llm.ContentBlock:
+		return append([]llm.ContentBlock(nil), value...), true
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return nil, false
+		}
+		return []llm.ContentBlock{{Type: "text", Text: value}}, false
+	default:
+		data, _ := json.Marshal(value)
+		if len(data) == 0 || string(data) == "null" {
+			return nil, false
+		}
+		return []llm.ContentBlock{{Type: "text", Text: string(data)}}, true
+	}
+}
+
+func mergeText(left, right string) string {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" {
+		return right
+	}
+	if right == "" {
+		return left
+	}
+	return left + "\n" + right
+}
+
+func isControllerContinuation(msg llm.Message) bool {
+	if msg.Role != llm.RoleUser && msg.Role != llm.RoleSystem {
+		return false
+	}
+	text := strings.TrimSpace(messageContentText(msg))
+	prefixes := []string{
+		"You produced no visible output and made no tool call.",
+		"You have thought about this multiple times but still produced no tool call.",
+		"You completed your reasoning but produced no output and made no tool calls.",
+		"Your tool call was cut off by the token limit",
+		"Your response was cut off by the token limit.",
+		"You stopped generating mid-task.",
+		"The control plane rejected completion because",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func deduplicateExactToolCalls(calls []llm.ToolCallDef, actions []RepairAction, messageIndex int) ([]llm.ToolCallDef, []RepairAction) {
+	seen := make(map[string]bool, len(calls))
+	kept := make([]llm.ToolCallDef, 0, len(calls))
+	for _, call := range calls {
+		key := call.ID + "\x00" + call.Type + "\x00" + call.Function.Name + "\x00" + strings.TrimSpace(string(call.Function.Arguments))
+		if seen[key] {
+			actions = append(actions, RepairAction{Phase: 9, Action: "deduplicate_exact_tool_call", Index: messageIndex, Detail: firstNonEmpty(call.ID, call.Function.Name)})
+			continue
+		}
+		seen[key] = true
+		kept = append(kept, call)
+	}
+	return kept, actions
+}
+
+func containsActionableMessage(messages []llm.Message) bool {
+	for _, msg := range messages {
+		if strings.TrimSpace(messageContentText(msg)) != "" && !IsRepairPlaceholder(messageContentText(msg)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isEmptyMessageContent(msg llm.Message) bool {

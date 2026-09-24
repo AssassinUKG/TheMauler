@@ -65,6 +65,10 @@ record any supersession.
 
 - Switching workspace clears only transient/path-specific state and preserves durable sessions,
   memory, evidence, logs, saved roots, and scratch tabs as designed.
+- Removing a saved project is metadata-only: never delete its workspace files, evidence, notes, or
+  sessions. Keep one valid active project, or create/select a replacement before removal.
+- Creating or refreshing a workspace artifact is not a workspace switch. File-refresh events must
+  not clear Chat, drafts, active streams, plans, or the shared terminal.
 - Settings structs require both TOML and JSON tags. Frontend settings types must round-trip every
   field; missing fields must not zero persisted config on Save.
 - Provider secrets stay in `provider-secrets.json` or environment variables and never return to React.

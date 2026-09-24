@@ -1,0 +1,68 @@
+.conversation-library-mode {
+  justify-self: start;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  color: var(--text-dim);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.conversation-library-mode.mode-direct {
+  border-color: color-mix(in srgb, var(--yellow) 35%, var(--border));
+  background: color-mix(in srgb, var(--yellow) 9%, var(--bg2));
+  color: var(--yellow);
+}
+
+.conversation-library-mode.mode-agent {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+  background: color-mix(in srgb, var(--green) 10%, var(--bg2));
+  color: var(--green);
+}
+
+.conversation-library-menu {
+  width: 232px;
+}
+
+.conversation-library-mode-picker {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.conversation-library-mode-picker > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.conversation-library-mode-picker > div {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.conversation-library-mode-picker button {
+  min-height: 28px;
+  padding: 5px 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg2);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.conversation-library-mode-picker button:hover,
+.conversation-library-mode-picker button.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg2));
+  color: var(--text);
+}

@@ -1393,13 +1393,13 @@ func formatTelegramRunProgressMessageForTask(state, detail, task string, elapsed
 		lines = append(lines, splitNonEmptyLines(model)...)
 	} else if isRemoteRunTerminalState(state) {
 		terminalDetail := detail
-		if state != "done" {
+		if state != "done" && state != "recovered" {
 			terminalDetail = cleanTelegramRunDetail(detail)
 		}
 		if result := cleanTelegramRunResult(terminalDetail); result != "" {
 			label := "Reason:"
 			switch state {
-			case "done":
+			case "done", "recovered":
 				label = "Result:"
 			case "failed":
 				label = "Error:"
@@ -1473,6 +1473,8 @@ func remoteRunTitle(state string) string {
 	switch state {
 	case "done":
 		return "\u2705 Mauler finished"
+	case "recovered":
+		return "\u2705 Mauler answer recovered"
 	case "failed":
 		return "\u274c Mauler failed"
 	case "blocked":
@@ -1504,6 +1506,8 @@ func remoteRunPhase(state string) string {
 		return "Thinking"
 	case "done":
 		return "Complete"
+	case "recovered":
+		return "Answer delivered"
 	case "failed":
 		return "Failed"
 	case "blocked":
@@ -1521,7 +1525,7 @@ func remoteRunPhase(state string) string {
 
 func isRemoteRunTerminalState(state string) bool {
 	switch strings.TrimSpace(state) {
-	case "done", "failed", "blocked", "stopped":
+	case "done", "recovered", "failed", "blocked", "stopped":
 		return true
 	default:
 		return false
@@ -1530,7 +1534,7 @@ func isRemoteRunTerminalState(state string) bool {
 
 func isRemoteRunDeliveryTerminalState(state string) bool {
 	switch strings.TrimSpace(state) {
-	case "done", "failed", "stopped":
+	case "done", "recovered", "failed", "stopped":
 		return true
 	default:
 		return false

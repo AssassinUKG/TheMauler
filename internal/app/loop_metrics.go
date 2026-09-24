@@ -269,8 +269,11 @@ func allDistinct(values []string) bool {
 func repeatedToolSkipCount(tools []TaskToolEvent) int {
 	count := 0
 	for _, tool := range tools {
-		if strings.EqualFold(strings.TrimSpace(tool.Status), "skipped") ||
-			strings.Contains(strings.ToLower(tool.Result), "repeated command was skipped") {
+		status := strings.ToLower(strings.TrimSpace(tool.Status))
+		result := strings.ToLower(tool.Result)
+		if status == "skipped" || status == "cached" ||
+			strings.Contains(result, "repeated command was skipped") ||
+			strings.Contains(result, "[cached_tool_result]") {
 			count++
 		}
 	}
@@ -387,7 +390,7 @@ func loopSignalsWorsened(current, trip LoopMetrics) bool {
 }
 
 func loopCircuitBreakerPrompt(metrics LoopMetrics) string {
-	return fmt.Sprintf("Loop-health is critical: stability_score=%d, repeated_tool_inputs=%d, repeated_identical_outcomes=%d, repeated_skips=%d, tool_errors=%d, tool_cycle_detected=%t, tool_cycle_period=%d. Your last actions repeated or failed without producing new evidence. Stop repeating. State the single blocking fact, then take one DIFFERENT action only: for public research use web_search/fetch_url because skill and memory excerpts are methodology, not current evidence; for target work follow redirects with -L or the Location URL, switch back to the confirmed target IP, inspect an existing artifact/result_id once, or change the hypothesis/input. Do not rerun the same command with only head/tail/timeout/count changes.",
+	return fmt.Sprintf("Loop-health is critical: stability_score=%d, repeated_tool_inputs=%d, repeated_identical_outcomes=%d, repeated_skips=%d, tool_errors=%d, tool_cycle_detected=%t, tool_cycle_period=%d. Your last actions repeated or failed without producing new evidence. Stop repeating. First decide whether the evidence already gathered is sufficient to answer the user's request. If it is sufficient, call no more tools and answer the original request directly now. If evidence is genuinely missing, state the single blocking fact, then take one DIFFERENT action only: for public research use web_search/fetch_url because skill and memory excerpts are methodology, not current evidence; for target work follow redirects with -L or the Location URL, switch back to the confirmed target IP, inspect an existing artifact/result_id once, or change the hypothesis/input. Do not rerun the same command with only head/tail/timeout/count changes.",
 		metrics.StabilityScore, metrics.RepeatedToolInputs, metrics.RepeatedIdenticalOutcomes, metrics.RepeatedSkips, metrics.ToolErrors, metrics.ToolCycleDetected, metrics.ToolCyclePeriod)
 }
 

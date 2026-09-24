@@ -14,9 +14,27 @@ import (
 	"mauler/internal/controlplane"
 	"mauler/internal/llm"
 	"mauler/internal/settings"
+	"mauler/internal/tools"
 )
 
 var errControlPlanRequired = fmt.Errorf("control plane requires an accepted plan before completion")
+
+type runControlContextKey struct{}
+
+func withRunControlContext(ctx context.Context, run *TaskRun) context.Context {
+	if ctx == nil || run == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runControlContextKey{}, run)
+}
+
+func runControlFromContext(ctx context.Context) *TaskRun {
+	if ctx == nil {
+		return nil
+	}
+	run, _ := ctx.Value(runControlContextKey{}).(*TaskRun)
+	return run
+}
 
 func (a *App) initializeRunControlPlane(run *TaskRun, cfg *settings.Settings, mode AgentMode, autonomous bool) error {
 	if run == nil || cfg == nil {
@@ -39,7 +57,7 @@ func (a *App) initializeRunControlPlane(run *TaskRun, cfg *settings.Settings, mo
 		return nil
 	}
 
-	contract, err := buildTaskContract(*run, *cfg, mode, autonomous)
+	contract, err := a.buildTaskContract(*run, *cfg, mode, autonomous)
 	if err != nil {
 		return err
 	}
@@ -61,7 +79,7 @@ func (a *App) initializeRunControlPlane(run *TaskRun, cfg *settings.Settings, mo
 	return nil
 }
 
-func buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMode, autonomous bool) (controlplane.TaskContract, error) {
+func (a *App) buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMode, autonomous bool) (controlplane.TaskContract, error) {
 	workspace := strings.TrimSpace(cfg.Context.WorkspaceDir)
 	if workspace == "" {
 		workspace = mustGetwd()
@@ -92,6 +110,14 @@ func buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMode, auton
 	var requiredEvidence []string
 	var mutationRules []controlplane.PathRule
 	constraints := []string{"Do not mutate outside the authoritative workspace or an explicitly approved scope."}
+	protectedArtifacts := a.finalizedArtifactBoundaries(absWorkspace)
+	repairScope := repairScopeForPrompt(run.Prompt, mode.Name, absWorkspace, protectedArtifacts)
+	if len(protectedArtifacts) > 0 {
+		constraints = append(constraints, "Earlier finalized artifacts are immutable unless this is an explicit Fixer run whose repair scope names the exact file.")
+	}
+	if strings.EqualFold(strings.TrimSpace(mode.Name), "Fixer") && len(protectedArtifacts) > 0 && len(repairScope) == 0 {
+		constraints = append(constraints, "No finalized artifact is in repair scope. Name the exact handed-off file before changing it.")
+	}
 	if concrete {
 		deliverables = append(deliverables, controlplane.Deliverable{
 			ID: "primary", Description: strings.TrimSpace(run.Prompt), Kind: "workspace_change",
@@ -125,6 +151,8 @@ func buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMode, auton
 		Constraints:         constraints,
 		ProtectedResources:  cfg.Tools.ProtectedPaths,
 		AllowedMutations:    mutationRules,
+		ProtectedArtifacts:  protectedArtifacts,
+		RepairScope:         repairScope,
 		AcceptanceChecks:    checks,
 		RequiredEvidence:    requiredEvidence,
 		Risk:                risk,
@@ -153,7 +181,7 @@ func (a *App) applyControlEvent(run *TaskRun, event controlplane.Event) error {
 	run.addEvent("control_transition", string(event.Kind), controlPlaneEventDetail(previous, next))
 	a.persistControlRun(*run)
 	if a != nil && a.ctx != nil {
-		a.emit("mauler:control_phase", map[string]any{
+		a.emitRun(run, "mauler:control_phase", map[string]any{
 			"id": run.ID, "phase": next.Phase, "revision": next.Revision,
 			"contract_revision": next.ContractRevision, "detail": strings.TrimSpace(event.Detail),
 		})
@@ -175,6 +203,10 @@ func controlPlaneEventDetail(previous, next controlplane.MachineState) string {
 func (a *App) prepareControlledTool(run *TaskRun, tc llm.ToolCallDef) (bool, string) {
 	if run == nil || run.Control == nil {
 		return false, "control state is unavailable"
+	}
+	if detail := guardFinalizedArtifactMutation(*run, tc); detail != "" {
+		run.addEvent("control_artifact_scope_denied", tc.Function.Name, detail)
+		return true, detail
 	}
 	decision := run.Control.CheckTool(tc.Function.Name)
 	if !decision.Controlled {
@@ -220,7 +252,7 @@ func (a *App) recordControlledToolOutcome(run *TaskRun, controlled bool, tc llm.
 		return
 	}
 	if isWriteTool(strings.ToLower(strings.TrimSpace(tc.Function.Name))) {
-		if id, path := mutationEvidenceIDForCall(tc); id != "" {
+		if id, path := mutationEvidenceIDForCall(run, tc); id != "" {
 			run.addEvent("control_evidence", id, path)
 		}
 	}
@@ -273,9 +305,212 @@ func controlPlanePrompt(run TaskRun) string {
 	case controlplane.PhaseVerifying:
 		allowed = "wait for controller-owned verification"
 	}
-	return fmt.Sprintf("[control_plane]\ncontract_revision: %d\ncontract_digest: %s\nphase: %s\nplan_required: %t\nplan_accepted: %t\nrisk: %s\nobjective: %s\nallowed_next: %s\nblocking_checks: %s\nThe Go control plane is authoritative. Assistant prose is not completion evidence.",
+	repairScope := "none"
+	if len(run.Contract.RepairScope) > 0 {
+		repairScope = strings.Join(run.Contract.RepairScope, ", ")
+	}
+	return fmt.Sprintf("[control_plane]\ncontract_revision: %d\ncontract_digest: %s\nphase: %s\nplan_required: %t\nplan_accepted: %t\nrisk: %s\nobjective: %s\nallowed_next: %s\nblocking_checks: %s\nprotected_artifacts: %d\nrepair_scope: %s\nThe Go control plane is authoritative. Assistant prose is not completion evidence.",
 		run.Contract.Revision, run.Contract.Digest, run.Control.Phase, run.Contract.PlanRequired, run.Control.PlanAccepted,
-		run.Contract.Risk, run.Contract.Objective, allowed, strings.Join(missing, ", "))
+		run.Contract.Risk, run.Contract.Objective, allowed, strings.Join(missing, ", "), len(run.Contract.ProtectedArtifacts), repairScope)
+}
+
+func (a *App) finalizedArtifactBoundaries(workspace string) []controlplane.ArtifactBoundary {
+	if a == nil || a.db == nil {
+		return nil
+	}
+	runs, err := loadTaskRunsDB(a.db)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var boundaries []controlplane.ArtifactBoundary
+	for _, prior := range runs {
+		for _, artifact := range prior.FinalizedArtifacts {
+			path, ok := artifactPathInWorkspace(workspace, artifact.Path)
+			if !ok {
+				continue
+			}
+			key := strings.ToLower(filepath.Clean(path))
+			if seen[key] || artifact.RunID == "" || artifact.Generation == 0 || len(artifact.SHA256) != 64 {
+				continue
+			}
+			seen[key] = true
+			boundaries = append(boundaries, controlplane.ArtifactBoundary{
+				Path: path, SHA256: strings.ToLower(artifact.SHA256), SourceRunID: artifact.RunID, Generation: artifact.Generation,
+			})
+		}
+	}
+	return boundaries
+}
+
+func artifactPathInWorkspace(workspace, supplied string) (string, bool) {
+	workspace, err := filepath.Abs(tools.NormalizeHostPath(strings.TrimSpace(workspace)))
+	if err != nil || workspace == "" {
+		return "", false
+	}
+	path := tools.NormalizeHostPath(strings.TrimSpace(supplied))
+	if path == "" || tools.ShouldUseWSLForPath(supplied) {
+		return "", false
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workspace, path)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(workspace, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.Clean(path), true
+}
+
+func repairScopeForPrompt(prompt, mode, workspace string, boundaries []controlplane.ArtifactBoundary) []string {
+	if !strings.EqualFold(strings.TrimSpace(mode), "Fixer") {
+		return nil
+	}
+	prompt = strings.ToLower(filepath.ToSlash(strings.TrimSpace(prompt)))
+	var scope []string
+	for _, boundary := range boundaries {
+		path := filepath.ToSlash(boundary.Path)
+		rel, _ := filepath.Rel(workspace, boundary.Path)
+		candidates := []string{strings.ToLower(path), strings.ToLower(filepath.ToSlash(rel)), strings.ToLower(filepath.Base(path))}
+		for _, candidate := range candidates {
+			if candidate != "" && candidate != "." && strings.Contains(prompt, candidate) {
+				scope = append(scope, boundary.Path)
+				break
+			}
+		}
+	}
+	return scope
+}
+
+func guardFinalizedArtifactMutation(run TaskRun, tc llm.ToolCallDef) string {
+	if run.Contract == nil || len(run.Contract.ProtectedArtifacts) == 0 {
+		return ""
+	}
+	name := strings.ToLower(strings.TrimSpace(tc.Function.Name))
+	if isWriteTool(name) {
+		path, ok := artifactPathInWorkspace(run.Contract.WorkspaceRoot, pathFromToolInput(string(tc.Function.Arguments)))
+		if !ok {
+			return ""
+		}
+		if boundary, protected := protectedArtifactAtPath(run.Contract.ProtectedArtifacts, path); protected {
+			return finalizedArtifactMutationBlock(run, boundary)
+		}
+		return ""
+	}
+	if name == "shell" || name == "terminal_send" {
+		command := shellCommandFromToolArgs(tc.Function.Arguments)
+		for _, boundary := range run.Contract.ProtectedArtifacts {
+			if shellMutatesFinalizedArtifact(command, run.Contract.WorkspaceRoot, boundary.Path) {
+				return finalizedArtifactMutationBlock(run, boundary)
+			}
+		}
+	}
+	if name == "run_script" {
+		code := runScriptCodeFromToolArgs(tc.Function.Arguments)
+		for _, boundary := range run.Contract.ProtectedArtifacts {
+			if scriptMutatesFinalizedArtifact(code, run.Contract.WorkspaceRoot, boundary.Path) {
+				return finalizedArtifactMutationBlock(run, boundary)
+			}
+		}
+	}
+	return ""
+}
+
+func protectedArtifactAtPath(boundaries []controlplane.ArtifactBoundary, path string) (controlplane.ArtifactBoundary, bool) {
+	path = strings.ToLower(filepath.Clean(path))
+	for _, boundary := range boundaries {
+		if strings.ToLower(filepath.Clean(boundary.Path)) == path {
+			return boundary, true
+		}
+	}
+	return controlplane.ArtifactBoundary{}, false
+}
+
+func finalizedArtifactMutationBlock(run TaskRun, boundary controlplane.ArtifactBoundary) string {
+	if strings.EqualFold(strings.TrimSpace(run.Mode), "Fixer") {
+		for _, allowed := range run.Contract.RepairScope {
+			if strings.EqualFold(filepath.Clean(allowed), filepath.Clean(boundary.Path)) {
+				return ""
+			}
+		}
+		return fmt.Sprintf("finalized artifact %s is not in this Fixer run's repair scope; name the exact file in the user request before changing it", filepath.ToSlash(boundary.Path))
+	}
+	return fmt.Sprintf("finalized artifact %s was handed off by run %s generation %d; start an explicit Fixer request naming this file before changing it", filepath.ToSlash(boundary.Path), boundary.SourceRunID, boundary.Generation)
+}
+
+func shellMutatesFinalizedArtifact(command, workspace, artifact string) bool {
+	lower := strings.ToLower(filepath.ToSlash(command))
+	if strings.TrimSpace(lower) == "" {
+		return false
+	}
+	rel, _ := filepath.Rel(workspace, artifact)
+	candidates := []string{strings.ToLower(filepath.ToSlash(artifact)), strings.ToLower(filepath.ToSlash(rel)), strings.ToLower(filepath.Base(artifact))}
+	references := false
+	for _, candidate := range candidates {
+		if candidate != "" && candidate != "." && strings.Contains(lower, candidate) {
+			references = true
+			break
+		}
+	}
+	if !references {
+		return false
+	}
+	for _, marker := range []string{"rm ", "remove-item", "del ", "erase ", "mv ", "move-item", "cp ", "copy-item", "sed -i", "perl -pi", "truncate ", "touch ", "tee ", "set-content", "add-content", "out-file", "gofmt -w", "rustfmt "} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	for _, candidate := range candidates {
+		if candidate != "" && (strings.Contains(lower, "> "+candidate) || strings.Contains(lower, ">"+candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func runScriptCodeFromToolArgs(raw json.RawMessage) string {
+	var input struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(raw, &input) != nil {
+		return ""
+	}
+	return input.Code
+}
+
+func scriptMutatesFinalizedArtifact(code, workspace, artifact string) bool {
+	lower := strings.ToLower(filepath.ToSlash(code))
+	if strings.TrimSpace(lower) == "" {
+		return false
+	}
+	rel, _ := filepath.Rel(workspace, artifact)
+	candidates := []string{strings.ToLower(filepath.ToSlash(artifact)), strings.ToLower(filepath.ToSlash(rel)), strings.ToLower(filepath.Base(artifact))}
+	references := false
+	for _, candidate := range candidates {
+		if candidate != "" && candidate != "." && strings.Contains(lower, candidate) {
+			references = true
+			break
+		}
+	}
+	if !references {
+		return false
+	}
+	// run_script is an orchestration surface. Direct filesystem/process access
+	// would bypass the inner Mauler tool calls and their control-plane checks, so
+	// any such access to a sealed artifact must enter an explicit Fixer scope.
+	for _, marker := range []string{
+		"write(", "edit(", "open(", ".write_text(", ".write_bytes(",
+		"os.remove", "os.unlink", "os.rename", "os.replace", "shutil.", "subprocess.",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func constrainControlPlanningTools(run TaskRun, defs []llm.ToolDef, choice string) ([]llm.ToolDef, string, bool) {
@@ -331,8 +566,13 @@ func mutationEvidenceIDs(run TaskRun) []string {
 	return out
 }
 
-func mutationEvidenceIDForCall(tc llm.ToolCallDef) (string, string) {
+func mutationEvidenceIDForCall(run *TaskRun, tc llm.ToolCallDef) (string, string) {
 	path := pathFromToolInput(string(tc.Function.Arguments))
+	if run != nil && run.Contract != nil {
+		if canonical, ok := artifactPathInWorkspace(run.Contract.WorkspaceRoot, path); ok {
+			path = canonical
+		}
+	}
 	return mutationEvidenceIDForPath(path)
 }
 
@@ -430,10 +670,16 @@ func controlCanVerifyAtToolBudget(run TaskRun) bool {
 }
 
 func (a *App) passControlVerification(run *TaskRun, verdicts []VerifyVerdict) error {
-	return a.applyControlEvent(run, controlplane.Event{
+	satisfied := controlSatisfiedChecks(*run, verdicts)
+	if err := a.applyControlEvent(run, controlplane.Event{
 		Kind: controlplane.EventVerificationPassed, Detail: "all blocking acceptance checks have immutable evidence ids",
-		SatisfiedChecks: controlSatisfiedChecks(*run, verdicts),
-	})
+		SatisfiedChecks: satisfied,
+	}); err != nil {
+		return err
+	}
+	run.FinalizedArtifacts = sealFinalizedArtifacts(*run, satisfied)
+	a.persistControlRun(*run)
+	return nil
 }
 
 func (a *App) failControlVerification(run *TaskRun, verdicts []VerifyVerdict, detail string) error {
@@ -441,4 +687,68 @@ func (a *App) failControlVerification(run *TaskRun, verdicts []VerifyVerdict, de
 		Kind: controlplane.EventVerificationFailed, Detail: detail,
 		SatisfiedChecks: controlSatisfiedChecks(*run, verdicts),
 	})
+}
+
+func sealFinalizedArtifacts(run TaskRun, satisfied map[string][]string) []FinalizedArtifact {
+	verifiers := append([]string(nil), satisfied["project_verification"]...)
+	var sealed []FinalizedArtifact
+	for _, evidenceID := range satisfied["mutation_postcondition"] {
+		path, digest, ok := parseFileEvidenceID(evidenceID)
+		if !ok {
+			continue
+		}
+		info, err := os.Stat(filepath.FromSlash(path))
+		if err != nil || info.IsDir() {
+			continue
+		}
+		sealed = append(sealed, FinalizedArtifact{
+			Path: path, SHA256: digest, Size: info.Size(), RunID: run.ID,
+			Generation: run.Generation, ConversationEpoch: run.ConversationEpoch,
+			EvidenceID: evidenceID, VerifierEvidenceIDs: verifiers,
+			FinalizedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			Fresh:       true, Freshness: "fresh", CurrentSHA256: digest,
+		})
+	}
+	return sealed
+}
+
+func parseFileEvidenceID(id string) (path, digest string, ok bool) {
+	const prefix = "file_sha256:"
+	if !strings.HasPrefix(id, prefix) {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(id, prefix)
+	separator := strings.LastIndex(rest, ":")
+	if separator <= 0 || separator == len(rest)-1 {
+		return "", "", false
+	}
+	path, digest = rest[:separator], rest[separator+1:]
+	if len(digest) != 64 {
+		return "", "", false
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return "", "", false
+	}
+	return path, strings.ToLower(digest), true
+}
+
+func refreshFinalizedArtifactFreshness(artifacts []FinalizedArtifact) []FinalizedArtifact {
+	for i := range artifacts {
+		artifacts[i].Fresh = false
+		artifacts[i].Freshness = "missing"
+		artifacts[i].CurrentSHA256 = ""
+		id, _ := mutationEvidenceIDForPath(artifacts[i].Path)
+		_, digest, ok := parseFileEvidenceID(id)
+		if !ok {
+			continue
+		}
+		artifacts[i].CurrentSHA256 = digest
+		if strings.EqualFold(digest, artifacts[i].SHA256) {
+			artifacts[i].Fresh = true
+			artifacts[i].Freshness = "fresh"
+		} else {
+			artifacts[i].Freshness = "changed"
+		}
+	}
+	return artifacts
 }

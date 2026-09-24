@@ -8,6 +8,7 @@ import {channelbus} from '../models';
 import {ledger} from '../models';
 import {llm} from '../models';
 import {tools} from '../models';
+import {repoindex} from '../models';
 import {sessionstore} from '../models';
 
 export function AddEngagementEndpoint(arg1:string,arg2:engagement.EndpointInput):Promise<engagement.Endpoint>;
@@ -27,6 +28,10 @@ export function BenchmarkProfile(arg1:settings.Profile,arg2:settings.Provider):P
 export function BenchmarkProfileWithCases(arg1:settings.Profile,arg2:settings.Provider,arg3:Array<app.BenchmarkSpecInput>):Promise<app.ProfileBenchmarkResult>;
 
 export function CalibrateSpec(arg1:string):Promise<app.SpecCalibration>;
+
+export function CancelRepositorySplitReview():Promise<app.RepositoryReviewStatus>;
+
+export function CancelWorkspaceRepositoryIndex():Promise<app.RepositoryIndexStatus>;
 
 export function CheckEngagementTarget():Promise<app.EngagementTargetProbe>;
 
@@ -60,11 +65,17 @@ export function CreateEngagement(arg1:string,arg2:string,arg3:Array<string>):Pro
 
 export function CreateFile(arg1:string):Promise<void>;
 
+export function CreateScratchWorkspace(arg1:string):Promise<app.ScratchWorkspaceStatus>;
+
+export function CreateWorkspaceProject(arg1:string,arg2:string):Promise<string>;
+
 export function DeleteEngagement(arg1:string):Promise<void>;
 
 export function DeleteFile(arg1:string):Promise<void>;
 
 export function DeleteMemoryEntry(arg1:string):Promise<void>;
+
+export function DeleteResumableRun(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
@@ -96,7 +107,11 @@ export function GetAutoAgents():Promise<boolean>;
 
 export function GetAutonomous():Promise<boolean>;
 
+export function GetBrowserWorkflowStatus():Promise<app.BrowserWorkflowStatus>;
+
 export function GetChannelBusStatus():Promise<Record<string, string>>;
+
+export function GetConversationMode():Promise<string>;
 
 export function GetEngagement(arg1:string):Promise<engagement.Record>;
 
@@ -124,6 +139,16 @@ export function GetProjectInstructionsSummary():Promise<string>;
 
 export function GetProviderAPIKeyStatus(arg1:settings.Provider):Promise<settings.ProviderAPIKeyStatus>;
 
+export function GetRepositoryIndexSources():Promise<Array<settings.RepositoryIndexSource>>;
+
+export function GetRepositoryIndexStatus():Promise<app.RepositoryIndexStatus>;
+
+export function GetRepositoryReviewStatus():Promise<app.RepositoryReviewStatus>;
+
+export function GetRunEventDiagnostics():Promise<app.RunEventDiagnostics>;
+
+export function GetScratchWorkspaceStatus():Promise<app.ScratchWorkspaceStatus>;
+
 export function GetServiceHealth():Promise<Array<app.ServiceHealth>>;
 
 export function GetSettings():Promise<settings.Settings>;
@@ -148,9 +173,13 @@ export function ImportPackJSON(arg1:string,arg2:string):Promise<packlibrary.Summ
 
 export function ImportTaskRunsJSON(arg1:string):Promise<number>;
 
+export function IndexWorkspaceRepository():Promise<app.RepositoryIndexStatus>;
+
 export function IngestVideo(arg1:string,arg2:string):Promise<app.VideoIngest>;
 
 export function IngestVideoPath(arg1:string):Promise<app.VideoIngest>;
+
+export function InspectSessionRepair(arg1:string):Promise<app.SessionRepairReport>;
 
 export function InterruptShellTool():Promise<void>;
 
@@ -161,6 +190,8 @@ export function ListAgentDefinitions():Promise<Array<app.AgentDefinition>>;
 export function ListAgentSessions():Promise<Array<app.AgentSession>>;
 
 export function ListBenchmarkRuns():Promise<Array<app.ProfileBenchmarkResult>>;
+
+export function ListBrowserCheckpoints():Promise<Array<app.BrowserCheckpointStatus>>;
 
 export function ListChannelWorkQueue():Promise<Array<channelbus.WorkItem>>;
 
@@ -184,6 +215,8 @@ export function ListPackLibrary():Promise<packlibrary.Snapshot>;
 
 export function ListResumableRuns():Promise<Array<app.RunCheckpoint>>;
 
+export function ListSessionSummaries():Promise<Array<app.SessionSummary>>;
+
 export function ListSessions():Promise<Array<string>>;
 
 export function ListSkills():Promise<Array<app.Skill>>;
@@ -206,6 +239,8 @@ export function LoadSession(arg1:string):Promise<Array<app.SessionChatMessage>>;
 
 export function OpenShell():Promise<string>;
 
+export function PauseBrowserWorkflow():Promise<app.BrowserWorkflowStatus>;
+
 export function PickSaveFilePath(arg1:string):Promise<string>;
 
 export function Ping():Promise<string>;
@@ -215,6 +250,10 @@ export function PingProvider(arg1:settings.Provider):Promise<string>;
 export function PrepareChatAttachmentPath(arg1:string):Promise<app.ChatAttachment>;
 
 export function PreviewContext(arg1:string,arg2:string):Promise<app.ContextInspection>;
+
+export function PreviewRepositorySplitReview(arg1:number):Promise<repoindex.SplitReviewPreview>;
+
+export function PromoteScratchWorkspace(arg1:string):Promise<app.ScratchWorkspaceStatus>;
 
 export function PruneLedgerEvents(arg1:string,arg2:Array<string>):Promise<number>;
 
@@ -226,13 +265,21 @@ export function RecordLearningDecision(arg1:app.LearningCandidate,arg2:string,ar
 
 export function RecoverSharedTerminal():Promise<app.TerminalRecoveryResult>;
 
+export function RefreshWorkspaceRepositoryIndex():Promise<app.RepositoryIndexStatus>;
+
 export function ReindexSessionRecall():Promise<number>;
 
 export function ReleaseEngagementClaim(arg1:string,arg2:string):Promise<engagement.WorkState>;
 
+export function RemoveRepositoryIndexSource(arg1:string):Promise<app.RepositoryIndexStatus>;
+
 export function RemoveWorkspaceFolder(arg1:string):Promise<Array<settings.WorkspaceFolder>>;
 
 export function RenameFile(arg1:string,arg2:string):Promise<void>;
+
+export function RenameSession(arg1:string,arg2:string):Promise<void>;
+
+export function RepairSession(arg1:string):Promise<app.SessionRepairReport>;
 
 export function RespondConfirm(arg1:boolean):Promise<void>;
 
@@ -240,7 +287,15 @@ export function RestartAudioWorker():Promise<app.AudioHealth>;
 
 export function RestartWSL():Promise<app.MaintenanceResult>;
 
+export function ResumeBrowserWorkflow():Promise<app.BrowserWorkflowStatus>;
+
+export function ResumeBrowserWorkflowCheckpoint(arg1:string):Promise<app.BrowserWorkflowStatus>;
+
+export function ResumeRepositorySplitReview():Promise<app.RepositoryReviewStatus>;
+
 export function ResumeRun(arg1:string):Promise<void>;
+
+export function RetryRepositoryReviewShard(arg1:string):Promise<app.RepositoryReviewStatus>;
 
 export function RollbackDepth():Promise<number>;
 
@@ -264,6 +319,10 @@ export function RunJHUTBrowserVerification(arg1:string):Promise<app.JHUTBrowserR
 
 export function RunMiniAgentLoopBenchmark(arg1:settings.Profile,arg2:settings.Provider):Promise<app.AgentEvalResult>;
 
+export function SaveBrowserWorkflowCheckpoint(arg1:string):Promise<app.BrowserCheckpointStatus>;
+
+export function SaveConversationCheckpoint(arg1:string,arg2:string):Promise<app.RunCheckpoint>;
+
 export function SaveFileContent(arg1:string,arg2:string):Promise<void>;
 
 export function SaveMemoryEntry(arg1:app.MemoryEntry):Promise<app.MemoryEntry>;
@@ -284,6 +343,10 @@ export function SelectProjectInstructionDirectory(arg1:string):Promise<string>;
 
 export function SelectProjectInstructionFile(arg1:string):Promise<string>;
 
+export function SelectRepositoryIndexFiles():Promise<app.RepositoryIndexStatus>;
+
+export function SelectRepositoryIndexFolder():Promise<app.RepositoryIndexStatus>;
+
 export function SelectWorkingDir(arg1:string):Promise<string>;
 
 export function SelectWorkspaceFolder(arg1:string):Promise<string>;
@@ -300,6 +363,8 @@ export function SetAutoAgents(arg1:boolean):Promise<void>;
 
 export function SetAutonomous(arg1:boolean):Promise<void>;
 
+export function SetConversationMode(arg1:string,arg2:string):Promise<void>;
+
 export function SetEngagementEndpointGroup(arg1:string,arg2:string,arg3:string):Promise<engagement.Endpoint>;
 
 export function SetEngagementNotes(arg1:string,arg2:string,arg3:number):Promise<number>;
@@ -309,6 +374,12 @@ export function SetNextContextPacketClass(arg1:string):Promise<string>;
 export function SetPackArchived(arg1:string,arg2:boolean):Promise<packlibrary.Summary>;
 
 export function SetProviderAPIKey(arg1:string,arg2:string):Promise<void>;
+
+export function SetRepositoryIndexWatch(arg1:boolean):Promise<app.RepositoryIndexStatus>;
+
+export function SetSavedConversationMode(arg1:string,arg2:string):Promise<void>;
+
+export function SetSessionTags(arg1:string,arg2:Array<string>):Promise<void>;
 
 export function SetSpecMode(arg1:string):Promise<app.SpecPlan>;
 
@@ -320,13 +391,21 @@ export function ShellInput(arg1:string,arg2:string):Promise<void>;
 
 export function ShellResize(arg1:string,arg2:number,arg3:number):Promise<void>;
 
+export function StartBrowserWorkflow(arg1:string):Promise<app.BrowserWorkflowStatus>;
+
+export function StartRepositorySplitReview(arg1:number):Promise<app.RepositoryReviewStatus>;
+
 export function StopAgent():Promise<void>;
 
 export function StopArtifact():Promise<void>;
 
+export function StopBrowserWorkflow():Promise<app.BrowserWorkflowStatus>;
+
 export function SwitchProfile(arg1:string):Promise<void>;
 
 export function SynthesizeSpeech(arg1:string):Promise<app.SpeechAudio>;
+
+export function TakeOverBrowserWorkflow():Promise<app.BrowserWorkflowStatus>;
 
 export function TranscribeVoiceClip(arg1:string):Promise<string>;
 

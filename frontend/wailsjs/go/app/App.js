@@ -38,6 +38,14 @@ export function CalibrateSpec(arg1) {
   return window['go']['app']['App']['CalibrateSpec'](arg1);
 }
 
+export function CancelRepositorySplitReview() {
+  return window['go']['app']['App']['CancelRepositorySplitReview']();
+}
+
+export function CancelWorkspaceRepositoryIndex() {
+  return window['go']['app']['App']['CancelWorkspaceRepositoryIndex']();
+}
+
 export function CheckEngagementTarget() {
   return window['go']['app']['App']['CheckEngagementTarget']();
 }
@@ -102,6 +110,14 @@ export function CreateFile(arg1) {
   return window['go']['app']['App']['CreateFile'](arg1);
 }
 
+export function CreateScratchWorkspace(arg1) {
+  return window['go']['app']['App']['CreateScratchWorkspace'](arg1);
+}
+
+export function CreateWorkspaceProject(arg1, arg2) {
+  return window['go']['app']['App']['CreateWorkspaceProject'](arg1, arg2);
+}
+
 export function DeleteEngagement(arg1) {
   return window['go']['app']['App']['DeleteEngagement'](arg1);
 }
@@ -112,6 +128,10 @@ export function DeleteFile(arg1) {
 
 export function DeleteMemoryEntry(arg1) {
   return window['go']['app']['App']['DeleteMemoryEntry'](arg1);
+}
+
+export function DeleteResumableRun(arg1) {
+  return window['go']['app']['App']['DeleteResumableRun'](arg1);
 }
 
 export function DeleteSession(arg1) {
@@ -174,8 +194,16 @@ export function GetAutonomous() {
   return window['go']['app']['App']['GetAutonomous']();
 }
 
+export function GetBrowserWorkflowStatus() {
+  return window['go']['app']['App']['GetBrowserWorkflowStatus']();
+}
+
 export function GetChannelBusStatus() {
   return window['go']['app']['App']['GetChannelBusStatus']();
+}
+
+export function GetConversationMode() {
+  return window['go']['app']['App']['GetConversationMode']();
 }
 
 export function GetEngagement(arg1) {
@@ -230,6 +258,26 @@ export function GetProviderAPIKeyStatus(arg1) {
   return window['go']['app']['App']['GetProviderAPIKeyStatus'](arg1);
 }
 
+export function GetRepositoryIndexSources() {
+  return window['go']['app']['App']['GetRepositoryIndexSources']();
+}
+
+export function GetRepositoryIndexStatus() {
+  return window['go']['app']['App']['GetRepositoryIndexStatus']();
+}
+
+export function GetRepositoryReviewStatus() {
+  return window['go']['app']['App']['GetRepositoryReviewStatus']();
+}
+
+export function GetRunEventDiagnostics() {
+  return window['go']['app']['App']['GetRunEventDiagnostics']();
+}
+
+export function GetScratchWorkspaceStatus() {
+  return window['go']['app']['App']['GetScratchWorkspaceStatus']();
+}
+
 export function GetServiceHealth() {
   return window['go']['app']['App']['GetServiceHealth']();
 }
@@ -278,12 +326,20 @@ export function ImportTaskRunsJSON(arg1) {
   return window['go']['app']['App']['ImportTaskRunsJSON'](arg1);
 }
 
+export function IndexWorkspaceRepository() {
+  return window['go']['app']['App']['IndexWorkspaceRepository']();
+}
+
 export function IngestVideo(arg1, arg2) {
   return window['go']['app']['App']['IngestVideo'](arg1, arg2);
 }
 
 export function IngestVideoPath(arg1) {
   return window['go']['app']['App']['IngestVideoPath'](arg1);
+}
+
+export function InspectSessionRepair(arg1) {
+  return window['go']['app']['App']['InspectSessionRepair'](arg1);
 }
 
 export function InterruptShellTool() {
@@ -304,6 +360,10 @@ export function ListAgentSessions() {
 
 export function ListBenchmarkRuns() {
   return window['go']['app']['App']['ListBenchmarkRuns']();
+}
+
+export function ListBrowserCheckpoints() {
+  return window['go']['app']['App']['ListBrowserCheckpoints']();
 }
 
 export function ListChannelWorkQueue() {
@@ -350,6 +410,10 @@ export function ListResumableRuns() {
   return window['go']['app']['App']['ListResumableRuns']();
 }
 
+export function ListSessionSummaries() {
+  return window['go']['app']['App']['ListSessionSummaries']();
+}
+
 export function ListSessions() {
   return window['go']['app']['App']['ListSessions']();
 }
@@ -394,6 +458,10 @@ export function OpenShell() {
   return window['go']['app']['App']['OpenShell']();
 }
 
+export function PauseBrowserWorkflow() {
+  return window['go']['app']['App']['PauseBrowserWorkflow']();
+}
+
 export function PickSaveFilePath(arg1) {
   return window['go']['app']['App']['PickSaveFilePath'](arg1);
 }
@@ -412,6 +480,14 @@ export function PrepareChatAttachmentPath(arg1) {
 
 export function PreviewContext(arg1, arg2) {
   return window['go']['app']['App']['PreviewContext'](arg1, arg2);
+}
+
+export function PreviewRepositorySplitReview(arg1) {
+  return window['go']['app']['App']['PreviewRepositorySplitReview'](arg1);
+}
+
+export function PromoteScratchWorkspace(arg1) {
+  return window['go']['app']['App']['PromoteScratchWorkspace'](arg1);
 }
 
 export function PruneLedgerEvents(arg1, arg2) {
@@ -434,6 +510,10 @@ export function RecoverSharedTerminal() {
   return window['go']['app']['App']['RecoverSharedTerminal']();
 }
 
+export function RefreshWorkspaceRepositoryIndex() {
+  return window['go']['app']['App']['RefreshWorkspaceRepositoryIndex']();
+}
+
 export function ReindexSessionRecall() {
   return window['go']['app']['App']['ReindexSessionRecall']();
 }
@@ -442,12 +522,24 @@ export function ReleaseEngagementClaim(arg1, arg2) {
   return window['go']['app']['App']['ReleaseEngagementClaim'](arg1, arg2);
 }
 
+export function RemoveRepositoryIndexSource(arg1) {
+  return window['go']['app']['App']['RemoveRepositoryIndexSource'](arg1);
+}
+
 export function RemoveWorkspaceFolder(arg1) {
   return window['go']['app']['App']['RemoveWorkspaceFolder'](arg1);
 }
 
 export function RenameFile(arg1, arg2) {
   return window['go']['app']['App']['RenameFile'](arg1, arg2);
+}
+
+export function RenameSession(arg1, arg2) {
+  return window['go']['app']['App']['RenameSession'](arg1, arg2);
+}
+
+export function RepairSession(arg1) {
+  return window['go']['app']['App']['RepairSession'](arg1);
 }
 
 export function RespondConfirm(arg1) {
@@ -462,8 +554,24 @@ export function RestartWSL() {
   return window['go']['app']['App']['RestartWSL']();
 }
 
+export function ResumeBrowserWorkflow() {
+  return window['go']['app']['App']['ResumeBrowserWorkflow']();
+}
+
+export function ResumeBrowserWorkflowCheckpoint(arg1) {
+  return window['go']['app']['App']['ResumeBrowserWorkflowCheckpoint'](arg1);
+}
+
+export function ResumeRepositorySplitReview() {
+  return window['go']['app']['App']['ResumeRepositorySplitReview']();
+}
+
 export function ResumeRun(arg1) {
   return window['go']['app']['App']['ResumeRun'](arg1);
+}
+
+export function RetryRepositoryReviewShard(arg1) {
+  return window['go']['app']['App']['RetryRepositoryReviewShard'](arg1);
 }
 
 export function RollbackDepth() {
@@ -510,6 +618,14 @@ export function RunMiniAgentLoopBenchmark(arg1, arg2) {
   return window['go']['app']['App']['RunMiniAgentLoopBenchmark'](arg1, arg2);
 }
 
+export function SaveBrowserWorkflowCheckpoint(arg1) {
+  return window['go']['app']['App']['SaveBrowserWorkflowCheckpoint'](arg1);
+}
+
+export function SaveConversationCheckpoint(arg1, arg2) {
+  return window['go']['app']['App']['SaveConversationCheckpoint'](arg1, arg2);
+}
+
 export function SaveFileContent(arg1, arg2) {
   return window['go']['app']['App']['SaveFileContent'](arg1, arg2);
 }
@@ -550,6 +666,14 @@ export function SelectProjectInstructionFile(arg1) {
   return window['go']['app']['App']['SelectProjectInstructionFile'](arg1);
 }
 
+export function SelectRepositoryIndexFiles() {
+  return window['go']['app']['App']['SelectRepositoryIndexFiles']();
+}
+
+export function SelectRepositoryIndexFolder() {
+  return window['go']['app']['App']['SelectRepositoryIndexFolder']();
+}
+
 export function SelectWorkingDir(arg1) {
   return window['go']['app']['App']['SelectWorkingDir'](arg1);
 }
@@ -582,6 +706,10 @@ export function SetAutonomous(arg1) {
   return window['go']['app']['App']['SetAutonomous'](arg1);
 }
 
+export function SetConversationMode(arg1, arg2) {
+  return window['go']['app']['App']['SetConversationMode'](arg1, arg2);
+}
+
 export function SetEngagementEndpointGroup(arg1, arg2, arg3) {
   return window['go']['app']['App']['SetEngagementEndpointGroup'](arg1, arg2, arg3);
 }
@@ -600,6 +728,18 @@ export function SetPackArchived(arg1, arg2) {
 
 export function SetProviderAPIKey(arg1, arg2) {
   return window['go']['app']['App']['SetProviderAPIKey'](arg1, arg2);
+}
+
+export function SetRepositoryIndexWatch(arg1) {
+  return window['go']['app']['App']['SetRepositoryIndexWatch'](arg1);
+}
+
+export function SetSavedConversationMode(arg1, arg2) {
+  return window['go']['app']['App']['SetSavedConversationMode'](arg1, arg2);
+}
+
+export function SetSessionTags(arg1, arg2) {
+  return window['go']['app']['App']['SetSessionTags'](arg1, arg2);
 }
 
 export function SetSpecMode(arg1) {
@@ -622,6 +762,14 @@ export function ShellResize(arg1, arg2, arg3) {
   return window['go']['app']['App']['ShellResize'](arg1, arg2, arg3);
 }
 
+export function StartBrowserWorkflow(arg1) {
+  return window['go']['app']['App']['StartBrowserWorkflow'](arg1);
+}
+
+export function StartRepositorySplitReview(arg1) {
+  return window['go']['app']['App']['StartRepositorySplitReview'](arg1);
+}
+
 export function StopAgent() {
   return window['go']['app']['App']['StopAgent']();
 }
@@ -630,12 +778,20 @@ export function StopArtifact() {
   return window['go']['app']['App']['StopArtifact']();
 }
 
+export function StopBrowserWorkflow() {
+  return window['go']['app']['App']['StopBrowserWorkflow']();
+}
+
 export function SwitchProfile(arg1) {
   return window['go']['app']['App']['SwitchProfile'](arg1);
 }
 
 export function SynthesizeSpeech(arg1) {
   return window['go']['app']['App']['SynthesizeSpeech'](arg1);
+}
+
+export function TakeOverBrowserWorkflow() {
+  return window['go']['app']['App']['TakeOverBrowserWorkflow']();
 }
 
 export function TranscribeVoiceClip(arg1) {

@@ -82,7 +82,7 @@ func shellCallPrefersIsolatedBackend(tc llm.ToolCallDef) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(args.Backend)) {
-	case "powershell", "pwsh", "cmd":
+	case "powershell", "pwsh", "cmd", "wsl", "bash":
 		return true
 	}
 	_, nestedPowerShell := tools.UnwrapNestedPowerShellCommand(args.Command)

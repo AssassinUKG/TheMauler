@@ -1,5 +1,22 @@
 # Troubleshooting
 
+## A good answer is followed by `finalisation stopped: loop_circuit_breaker`
+
+The loop guard may correctly pause repeated cached reads even though enough evidence already exists
+to answer. Current builds tell the model to stop tools and synthesize first. If the model still
+repeats once more, Mauler keeps the blocked loop in RunLedger but delivers a substantive read-only
+recovery response as **Answer recovered** in desktop Chat and Telegram. Mutation/execution tasks,
+junk text, and answers without successful evidence never receive this recovered label.
+
+## Project removal appears stuck
+
+Project removal only updates Mauler's saved project list; it never deletes the workspace directory,
+evidence, notes, or sessions. Ordinary project saves must not restart Telegram, text-to-speech, or
+speech-to-text workers when those settings did not change. The confirmation has a bounded wait and
+shows an actionable error instead of remaining permanently on **Removing...**. If an older build
+already persisted the removal before hanging, restart Mauler and refresh Projects; the removed entry
+will be gone while its files remain on disk.
+
 ## WSL startup and Relay errors
 
 `CreateProcessCommon: chdir(/mnt/c/...) failed 2` means the saved workspace path no longer exists or
@@ -42,6 +59,16 @@ classified as API data: low-risk/read-only, no mutation acceptance checks, and n
 The Engagement tool must likewise be absent unless the prompt explicitly asks for Engagement Grid
 state. These are routing defects, not reasons to retry the build or Grid finalisation.
 
+If Inspector shows Write/Shell enabled but a run says it has only read/web tools, distinguish the
+active toolset from the model-facing per-task route. Open Inspector > Agent > Tools. **Automatic**
+keeps schemas compact, but an explicit request to save, place, or leave an artifact in the workspace
+must still include `write` and `edit`. Direct follow-ups such as “write the PoC in the directory” are
+artifact mutations too, while “show the PoC in chat; do not save it” remains read-only. Confirm the
+RunLedger `tool_routing`/`selected_tools` fields if
+it does not. **Selected tools** advertises every enabled member of the active toolset and is useful
+for unusual mixed tasks, at the cost of a larger prompt and potentially weaker small-model tool
+choice. The per-tool switches and toolset remain hard capability gates in either mode.
+
 If unrelated CVE/public research appears to carry repository handoff content, inspect the
 `context_packet` run event. It should show `minimal_external_research` and a short pointer packet.
 
@@ -77,6 +104,11 @@ prompts, memory contents, tool output, or provider secrets.
   chat/logs.
 - Use `terminal_send` only for the active interactive session. Use `http_probe` or isolated `shell`
   for independent probes so listener/terminal state is not corrupted.
+- Current builds deterministically rewrite a mistaken `terminal_send` `curl`/`wget` call to a
+  bounded, isolated WSL `shell` call before it enters history. Explicit WSL/bash shell backends also
+  bypass the shared PTY. This keeps a slow or non-HTTP port from owning the visible terminal and
+  exhausting loop recovery on repeated reads/Ctrl-C attempts; the circuit breaker remains the final
+  no-progress safety gate.
 
 Terminal is the live execution surface, so command output can appear there before the model's final
 Chat synthesis. If a read-only run later stops or trips the circuit breaker, current builds recover
@@ -84,6 +116,12 @@ the best successful non-verifier shell result into Chat instead of leaving the a
 Terminal. The fallback strips shell contracts and refuses guarded/untrusted output. If only the
 technical stopped-run summary appears, confirm that the successful tool was a read-only `shell`
 result rather than a failed command, mutation, project build/test, or prompt-injection finding.
+
+If the centre Chat pane goes empty while Terminal/AI Commands continues working, check for an older
+build where `http_probe` artifact creation emitted `mauler:workspace_changed`. That event cleared Chat
+and remounted the Terminal even though the root had not changed. Current builds use the separate
+`mauler:workspace_files_changed` refresh event and show a live run-status card instead of a blank
+surface if a stream has not produced visible text yet.
 
 ## Telegram results missing
 
@@ -162,3 +200,8 @@ start only after Wails `OnStartup`, otherwise headless tests may lock temporary 
 
 Repository-wide frontend lint is a known non-gate; production frontend build is the current check.
 Do not use destructive Git cleanup to make a dirty tree look clean.
+
+If Go reports a present GOROOT package such as `unsafe` as "not in std", its optional module index is
+stale. `build.ps1` probes that exact condition and temporarily sets `GODEBUG=goindex=0` for the Wails
+build, returning the previous environment value afterward. This uses direct standard-library source
+discovery; it does not change dependencies or persist a machine-wide workaround.

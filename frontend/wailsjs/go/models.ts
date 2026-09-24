@@ -1,3 +1,26 @@
+export namespace agent {
+	
+	export class RepairAction {
+	    phase: number;
+	    action: string;
+	    index: number;
+	    detail?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepairAction(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.phase = source["phase"];
+	        this.action = source["action"];
+	        this.index = source["index"];
+	        this.detail = source["detail"];
+	    }
+	}
+
+}
+
 export namespace app {
 	
 	export class AgentDefinition {
@@ -5,6 +28,7 @@ export namespace app {
 	    name: string;
 	    description: string;
 	    version: string;
+	    default_profile: string;
 	    default_toolset: string;
 	    default_autonomy: string;
 	    planning_only: boolean;
@@ -20,6 +44,7 @@ export namespace app {
 	        this.name = source["name"];
 	        this.description = source["description"];
 	        this.version = source["version"];
+	        this.default_profile = source["default_profile"];
 	        this.default_toolset = source["default_toolset"];
 	        this.default_autonomy = source["default_autonomy"];
 	        this.planning_only = source["planning_only"];
@@ -413,6 +438,64 @@ export namespace app {
 	        this.seed = source["seed"];
 	        this.expect_json = source["expect_json"];
 	        this.tool_mode = source["tool_mode"];
+	    }
+	}
+	export class BrowserCheckpointStatus {
+	    name: string;
+	    url: string;
+	    title?: string;
+	    visible: boolean;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BrowserCheckpointStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.url = source["url"];
+	        this.title = source["title"];
+	        this.visible = source["visible"];
+	        this.created_at = source["created_at"];
+	    }
+	}
+	export class BrowserWorkflowStatus {
+	    available: boolean;
+	    tool_enabled: boolean;
+	    active: boolean;
+	    visible: boolean;
+	    paused: boolean;
+	    state: string;
+	    url?: string;
+	    title?: string;
+	    last_action?: string;
+	    last_error?: string;
+	    updated_at?: string;
+	    guidance?: string;
+	    active_tab?: string;
+	    tab_count?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new BrowserWorkflowStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.tool_enabled = source["tool_enabled"];
+	        this.active = source["active"];
+	        this.visible = source["visible"];
+	        this.paused = source["paused"];
+	        this.state = source["state"];
+	        this.url = source["url"];
+	        this.title = source["title"];
+	        this.last_action = source["last_action"];
+	        this.last_error = source["last_error"];
+	        this.updated_at = source["updated_at"];
+	        this.guidance = source["guidance"];
+	        this.active_tab = source["active_tab"];
+	        this.tab_count = source["tab_count"];
 	    }
 	}
 	export class ChatAttachment {
@@ -1042,6 +1125,40 @@ export namespace app {
 		    return a;
 		}
 	}
+	export class FinalizedArtifact {
+	    path: string;
+	    sha256: string;
+	    size: number;
+	    run_id: string;
+	    generation: number;
+	    conversation_epoch?: number;
+	    evidence_id: string;
+	    verifier_evidence_ids?: string[];
+	    finalized_at: string;
+	    fresh: boolean;
+	    freshness: string;
+	    current_sha256?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FinalizedArtifact(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.sha256 = source["sha256"];
+	        this.size = source["size"];
+	        this.run_id = source["run_id"];
+	        this.generation = source["generation"];
+	        this.conversation_epoch = source["conversation_epoch"];
+	        this.evidence_id = source["evidence_id"];
+	        this.verifier_evidence_ids = source["verifier_evidence_ids"];
+	        this.finalized_at = source["finalized_at"];
+	        this.fresh = source["fresh"];
+	        this.freshness = source["freshness"];
+	        this.current_sha256 = source["current_sha256"];
+	    }
+	}
 	export class GrammarToolArgsProbeResult {
 	    profile: string;
 	    backend: string;
@@ -1433,8 +1550,287 @@ export namespace app {
 		}
 	}
 	
+	export class RepositoryIndexOmission {
+	    path: string;
+	    status: string;
+	    detail?: string;
+	    size?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryIndexOmission(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.status = source["status"];
+	        this.detail = source["detail"];
+	        this.size = source["size"];
+	    }
+	}
+	export class RepositoryIndexStatus {
+	    available: boolean;
+	    active: boolean;
+	    workspace: string;
+	    generation_id?: string;
+	    manifest_digest?: string;
+	    policy_digest?: string;
+	    status: string;
+	    complete: boolean;
+	    files_seen: number;
+	    files_indexed: number;
+	    bytes_read: number;
+	    chunk_count: number;
+	    omission_count: number;
+	    omissions_truncated: boolean;
+	    omissions: RepositoryIndexOmission[];
+	    error?: string;
+	    started_at?: string;
+	    completed_at?: string;
+	    indexing: boolean;
+	    can_cancel: boolean;
+	    current_path?: string;
+	    progress_files_seen: number;
+	    progress_files_indexed: number;
+	    progress_bytes_read: number;
+	    progress_chunk_count: number;
+	    sources: settings.RepositoryIndexSource[];
+	    refresh_mode?: string;
+	    files_reused: number;
+	    files_changed: number;
+	    files_deleted: number;
+	    watch_enabled: boolean;
+	    watch_state?: string;
+	    watch_error?: string;
+	    watch_last_check?: string;
+	    health: string;
+	    health_detail: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryIndexStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.active = source["active"];
+	        this.workspace = source["workspace"];
+	        this.generation_id = source["generation_id"];
+	        this.manifest_digest = source["manifest_digest"];
+	        this.policy_digest = source["policy_digest"];
+	        this.status = source["status"];
+	        this.complete = source["complete"];
+	        this.files_seen = source["files_seen"];
+	        this.files_indexed = source["files_indexed"];
+	        this.bytes_read = source["bytes_read"];
+	        this.chunk_count = source["chunk_count"];
+	        this.omission_count = source["omission_count"];
+	        this.omissions_truncated = source["omissions_truncated"];
+	        this.omissions = this.convertValues(source["omissions"], RepositoryIndexOmission);
+	        this.error = source["error"];
+	        this.started_at = source["started_at"];
+	        this.completed_at = source["completed_at"];
+	        this.indexing = source["indexing"];
+	        this.can_cancel = source["can_cancel"];
+	        this.current_path = source["current_path"];
+	        this.progress_files_seen = source["progress_files_seen"];
+	        this.progress_files_indexed = source["progress_files_indexed"];
+	        this.progress_bytes_read = source["progress_bytes_read"];
+	        this.progress_chunk_count = source["progress_chunk_count"];
+	        this.sources = this.convertValues(source["sources"], settings.RepositoryIndexSource);
+	        this.refresh_mode = source["refresh_mode"];
+	        this.files_reused = source["files_reused"];
+	        this.files_changed = source["files_changed"];
+	        this.files_deleted = source["files_deleted"];
+	        this.watch_enabled = source["watch_enabled"];
+	        this.watch_state = source["watch_state"];
+	        this.watch_error = source["watch_error"];
+	        this.watch_last_check = source["watch_last_check"];
+	        this.health = source["health"];
+	        this.health_detail = source["health_detail"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RepositoryReviewConflictStatus {
+	    id: string;
+	    evidence_digest: string;
+	    evidence: repoindex.ReviewFindingEvidence[];
+	    claims: repoindex.ReviewConflictClaim[];
+	    state: string;
+	    attempt: number;
+	    checker_id?: string;
+	    verdict?: string;
+	    supported_claim_ids: string[];
+	    reason?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryReviewConflictStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.evidence_digest = source["evidence_digest"];
+	        this.evidence = this.convertValues(source["evidence"], repoindex.ReviewFindingEvidence);
+	        this.claims = this.convertValues(source["claims"], repoindex.ReviewConflictClaim);
+	        this.state = source["state"];
+	        this.attempt = source["attempt"];
+	        this.checker_id = source["checker_id"];
+	        this.verdict = source["verdict"];
+	        this.supported_claim_ids = source["supported_claim_ids"];
+	        this.reason = source["reason"];
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RepositoryReviewShardStatus {
+	    id: string;
+	    digest: string;
+	    ordinal: number;
+	    state: string;
+	    attempt: number;
+	    claimant_id?: string;
+	    file_count: number;
+	    chunk_count: number;
+	    bytes: number;
+	    paths: string[];
+	    findings: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryReviewShardStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.digest = source["digest"];
+	        this.ordinal = source["ordinal"];
+	        this.state = source["state"];
+	        this.attempt = source["attempt"];
+	        this.claimant_id = source["claimant_id"];
+	        this.file_count = source["file_count"];
+	        this.chunk_count = source["chunk_count"];
+	        this.bytes = source["bytes"];
+	        this.paths = source["paths"];
+	        this.findings = source["findings"];
+	        this.error = source["error"];
+	    }
+	}
+	export class RepositoryReviewStatus {
+	    available: boolean;
+	    workspace: string;
+	    review_id?: string;
+	    generation_id?: string;
+	    manifest_digest?: string;
+	    plan_digest?: string;
+	    requested_shards: number;
+	    state: string;
+	    phase?: string;
+	    can_cancel: boolean;
+	    can_resume: boolean;
+	    current_shard?: string;
+	    current_conflict?: string;
+	    started_at?: string;
+	    completed_at?: string;
+	    shards: RepositoryReviewShardStatus[];
+	    findings: repoindex.MergedReviewFinding[];
+	    accepted: number;
+	    rejected: number;
+	    duplicates: number;
+	    conflicts: number;
+	    conflict_checks: RepositoryReviewConflictStatus[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryReviewStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.workspace = source["workspace"];
+	        this.review_id = source["review_id"];
+	        this.generation_id = source["generation_id"];
+	        this.manifest_digest = source["manifest_digest"];
+	        this.plan_digest = source["plan_digest"];
+	        this.requested_shards = source["requested_shards"];
+	        this.state = source["state"];
+	        this.phase = source["phase"];
+	        this.can_cancel = source["can_cancel"];
+	        this.can_resume = source["can_resume"];
+	        this.current_shard = source["current_shard"];
+	        this.current_conflict = source["current_conflict"];
+	        this.started_at = source["started_at"];
+	        this.completed_at = source["completed_at"];
+	        this.shards = this.convertValues(source["shards"], RepositoryReviewShardStatus);
+	        this.findings = this.convertValues(source["findings"], repoindex.MergedReviewFinding);
+	        this.accepted = source["accepted"];
+	        this.rejected = source["rejected"];
+	        this.duplicates = source["duplicates"];
+	        this.conflicts = source["conflicts"];
+	        this.conflict_checks = this.convertValues(source["conflict_checks"], RepositoryReviewConflictStatus);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class TaskRun {
 	    id: string;
+	    generation?: number;
+	    conversation_epoch?: number;
+	    parent_run_id?: string;
 	    prompt: string;
 	    mode: string;
 	    profile: string;
@@ -1457,6 +1853,7 @@ export namespace app {
 	    total_tokens?: number;
 	    summary?: string;
 	    response?: string;
+	    finalized_artifacts?: FinalizedArtifact[];
 	    tools?: TaskToolEvent[];
 	    events?: TaskRunEvent[];
 	
@@ -1467,6 +1864,9 @@ export namespace app {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
+	        this.generation = source["generation"];
+	        this.conversation_epoch = source["conversation_epoch"];
+	        this.parent_run_id = source["parent_run_id"];
 	        this.prompt = source["prompt"];
 	        this.mode = source["mode"];
 	        this.profile = source["profile"];
@@ -1489,6 +1889,7 @@ export namespace app {
 	        this.total_tokens = source["total_tokens"];
 	        this.summary = source["summary"];
 	        this.response = source["response"];
+	        this.finalized_artifacts = this.convertValues(source["finalized_artifacts"], FinalizedArtifact);
 	        this.tools = this.convertValues(source["tools"], TaskToolEvent);
 	        this.events = this.convertValues(source["events"], TaskRunEvent);
 	    }
@@ -1511,12 +1912,59 @@ export namespace app {
 		    return a;
 		}
 	}
+	export class SessionChatMessage {
+	    role: string;
+	    content: string;
+	    thinking?: string;
+	    tool_name?: string;
+	    tool_call_id?: string;
+	    images?: string[];
+	    attachments?: ChatAttachment[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionChatMessage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.role = source["role"];
+	        this.content = source["content"];
+	        this.thinking = source["thinking"];
+	        this.tool_name = source["tool_name"];
+	        this.tool_call_id = source["tool_call_id"];
+	        this.images = source["images"];
+	        this.attachments = this.convertValues(source["attachments"], ChatAttachment);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class RunCheckpoint {
 	    run_id: string;
+	    name?: string;
+	    conversation_name?: string;
+	    conversation_mode?: string;
+	    explicit?: boolean;
 	    prompt: string;
 	    mode: string;
 	    profile: string;
 	    messages: llm.Message[];
+	    chat_messages?: SessionChatMessage[];
 	    run: TaskRun;
 	    saved_at: string;
 	
@@ -1527,10 +1975,15 @@ export namespace app {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.run_id = source["run_id"];
+	        this.name = source["name"];
+	        this.conversation_name = source["conversation_name"];
+	        this.conversation_mode = source["conversation_mode"];
+	        this.explicit = source["explicit"];
 	        this.prompt = source["prompt"];
 	        this.mode = source["mode"];
 	        this.profile = source["profile"];
 	        this.messages = this.convertValues(source["messages"], llm.Message);
+	        this.chat_messages = this.convertValues(source["chat_messages"], SessionChatMessage);
 	        this.run = this.convertValues(source["run"], TaskRun);
 	        this.saved_at = source["saved_at"];
 	    }
@@ -1552,6 +2005,90 @@ export namespace app {
 		    }
 		    return a;
 		}
+	}
+	export class StaleRunEventRejection {
+	    event: string;
+	    run_id?: string;
+	    generation?: number;
+	    run_epoch?: number;
+	    conversation_epoch: number;
+	    rejected_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new StaleRunEventRejection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.event = source["event"];
+	        this.run_id = source["run_id"];
+	        this.generation = source["generation"];
+	        this.run_epoch = source["run_epoch"];
+	        this.conversation_epoch = source["conversation_epoch"];
+	        this.rejected_at = source["rejected_at"];
+	    }
+	}
+	export class RunEventDiagnostics {
+	    conversation_epoch: number;
+	    stale_events_dropped: number;
+	    last_rejection: StaleRunEventRejection;
+	
+	    static createFrom(source: any = {}) {
+	        return new RunEventDiagnostics(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.conversation_epoch = source["conversation_epoch"];
+	        this.stale_events_dropped = source["stale_events_dropped"];
+	        this.last_rejection = this.convertValues(source["last_rejection"], StaleRunEventRejection);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ScratchWorkspaceStatus {
+	    active: boolean;
+	    exists: boolean;
+	    review_due: boolean;
+	    name?: string;
+	    path?: string;
+	    created_unix?: number;
+	    review_after_unix?: number;
+	    retention_policy: string;
+	    promotion_eligible: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ScratchWorkspaceStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.active = source["active"];
+	        this.exists = source["exists"];
+	        this.review_due = source["review_due"];
+	        this.name = source["name"];
+	        this.path = source["path"];
+	        this.created_unix = source["created_unix"];
+	        this.review_after_unix = source["review_after_unix"];
+	        this.retention_policy = source["retention_policy"];
+	        this.promotion_eligible = source["promotion_eligible"];
+	    }
 	}
 	export class ServiceHealth {
 	    id: string;
@@ -1577,22 +2114,33 @@ export namespace app {
 	        this.metadata = source["metadata"];
 	    }
 	}
-	export class SessionChatMessage {
-	    role: string;
-	    content: string;
-	    images?: string[];
-	    attachments?: ChatAttachment[];
+	
+	export class SessionRepairReport {
+	    name: string;
+	    status: string;
+	    valid: boolean;
+	    before_messages: number;
+	    after_messages: number;
+	    actions: agent.RepairAction[];
+	    diagnostic?: string;
+	    applied: boolean;
+	    backup_path?: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new SessionChatMessage(source);
+	        return new SessionRepairReport(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.role = source["role"];
-	        this.content = source["content"];
-	        this.images = source["images"];
-	        this.attachments = this.convertValues(source["attachments"], ChatAttachment);
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.valid = source["valid"];
+	        this.before_messages = source["before_messages"];
+	        this.after_messages = source["after_messages"];
+	        this.actions = this.convertValues(source["actions"], agent.RepairAction);
+	        this.diagnostic = source["diagnostic"];
+	        this.applied = source["applied"];
+	        this.backup_path = source["backup_path"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1612,6 +2160,30 @@ export namespace app {
 		    }
 		    return a;
 		}
+	}
+	export class SessionSummary {
+	    name: string;
+	    updated_unix: number;
+	    message_count: number;
+	    size_bytes: number;
+	    status: string;
+	    tags: string[];
+	    conversation_mode: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionSummary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.updated_unix = source["updated_unix"];
+	        this.message_count = source["message_count"];
+	        this.size_bytes = source["size_bytes"];
+	        this.status = source["status"];
+	        this.tags = source["tags"];
+	        this.conversation_mode = source["conversation_mode"];
+	    }
 	}
 	export class Skill {
 	    name: string;
@@ -1750,6 +2322,7 @@ export namespace app {
 	        this.voice = source["voice"];
 	    }
 	}
+	
 	export class StorageItem {
 	    id: string;
 	    label: string;
@@ -2066,6 +2639,24 @@ export namespace controlplane {
 	        this.evidence_kinds = source["evidence_kinds"];
 	    }
 	}
+	export class ArtifactBoundary {
+	    path: string;
+	    sha256: string;
+	    source_run_id: string;
+	    generation: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ArtifactBoundary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.sha256 = source["sha256"];
+	        this.source_run_id = source["source_run_id"];
+	        this.generation = source["generation"];
+	    }
+	}
 	export class Deliverable {
 	    id: string;
 	    description: string;
@@ -2157,6 +2748,8 @@ export namespace controlplane {
 	    constraints?: string[];
 	    protected_resources?: string[];
 	    allowed_mutations?: PathRule[];
+	    protected_artifacts?: ArtifactBoundary[];
+	    repair_scope?: string[];
 	    acceptance_checks?: AcceptanceCheck[];
 	    required_evidence?: string[];
 	    risk: string;
@@ -2184,6 +2777,8 @@ export namespace controlplane {
 	        this.constraints = source["constraints"];
 	        this.protected_resources = source["protected_resources"];
 	        this.allowed_mutations = this.convertValues(source["allowed_mutations"], PathRule);
+	        this.protected_artifacts = this.convertValues(source["protected_artifacts"], ArtifactBoundary);
+	        this.repair_scope = source["repair_scope"];
 	        this.acceptance_checks = this.convertValues(source["acceptance_checks"], AcceptanceCheck);
 	        this.required_evidence = source["required_evidence"];
 	        this.risk = source["risk"];
@@ -2732,6 +3327,7 @@ export namespace engagement {
 	    path?: string;
 	    sha256?: string;
 	    size?: number;
+	    fingerprint_kind?: string;
 	    agent_composed: boolean;
 	    description: string;
 	    run: number;
@@ -2753,6 +3349,7 @@ export namespace engagement {
 	        this.path = source["path"];
 	        this.sha256 = source["sha256"];
 	        this.size = source["size"];
+	        this.fingerprint_kind = source["fingerprint_kind"];
 	        this.agent_composed = source["agent_composed"];
 	        this.description = source["description"];
 	        this.run = source["run"];
@@ -2777,6 +3374,24 @@ export namespace engagement {
 		    }
 		    return a;
 		}
+	}
+	export class EvidenceFreshness {
+	    state: string;
+	    detail?: string;
+	    current_sha256?: string;
+	    current_size?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new EvidenceFreshness(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.detail = source["detail"];
+	        this.current_sha256 = source["current_sha256"];
+	        this.current_size = source["current_size"];
+	    }
 	}
 	export class EvidenceInput {
 	    id?: string;
@@ -3199,6 +3814,7 @@ export namespace engagement {
 	    workflow: WorkflowDefinition;
 	    checklist: ChecklistDefinition;
 	    state?: State;
+	    evidence_freshness?: Record<string, EvidenceFreshness>;
 	
 	    static createFrom(source: any = {}) {
 	        return new Record(source);
@@ -3210,6 +3826,7 @@ export namespace engagement {
 	        this.workflow = this.convertValues(source["workflow"], WorkflowDefinition);
 	        this.checklist = this.convertValues(source["checklist"], ChecklistDefinition);
 	        this.state = this.convertValues(source["state"], State);
+	        this.evidence_freshness = this.convertValues(source["evidence_freshness"], EvidenceFreshness, true);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -3632,6 +4249,176 @@ export namespace packlibrary {
 
 }
 
+export namespace repoindex {
+	
+	export class ReviewFindingEvidence {
+	    chunk_id: string;
+	    file_sha256: string;
+	    start_line: number;
+	    end_line: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReviewFindingEvidence(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chunk_id = source["chunk_id"];
+	        this.file_sha256 = source["file_sha256"];
+	        this.start_line = source["start_line"];
+	        this.end_line = source["end_line"];
+	    }
+	}
+	export class MergedReviewFinding {
+	    id?: string;
+	    claim: string;
+	    severity: string;
+	    confidence: string;
+	    evidence: ReviewFindingEvidence[];
+	    follow_up?: string;
+	    state: string;
+	    evidence_valid: boolean;
+	    shard_ids: string[];
+	    claimants: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MergedReviewFinding(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.claim = source["claim"];
+	        this.severity = source["severity"];
+	        this.confidence = source["confidence"];
+	        this.evidence = this.convertValues(source["evidence"], ReviewFindingEvidence);
+	        this.follow_up = source["follow_up"];
+	        this.state = source["state"];
+	        this.evidence_valid = source["evidence_valid"];
+	        this.shard_ids = source["shard_ids"];
+	        this.claimants = source["claimants"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ReviewConflictClaim {
+	    claim_id: string;
+	    claim: string;
+	    severity: string;
+	    confidence: string;
+	    shard_ids: string[];
+	    claimants: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ReviewConflictClaim(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.claim_id = source["claim_id"];
+	        this.claim = source["claim"];
+	        this.severity = source["severity"];
+	        this.confidence = source["confidence"];
+	        this.shard_ids = source["shard_ids"];
+	        this.claimants = source["claimants"];
+	    }
+	}
+	
+	export class ReviewShardPreview {
+	    id: string;
+	    digest: string;
+	    ordinal: number;
+	    file_count: number;
+	    chunk_count: number;
+	    bytes: number;
+	    paths: string[];
+	    languages?: string[];
+	    evidence_digest: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReviewShardPreview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.digest = source["digest"];
+	        this.ordinal = source["ordinal"];
+	        this.file_count = source["file_count"];
+	        this.chunk_count = source["chunk_count"];
+	        this.bytes = source["bytes"];
+	        this.paths = source["paths"];
+	        this.languages = source["languages"];
+	        this.evidence_digest = source["evidence_digest"];
+	    }
+	}
+	export class SplitReviewPreview {
+	    version: number;
+	    generation_id: string;
+	    manifest_digest: string;
+	    plan_digest: string;
+	    requested_shards: number;
+	    shard_count: number;
+	    file_count: number;
+	    chunk_count: number;
+	    bytes: number;
+	    shards: ReviewShardPreview[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SplitReviewPreview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.generation_id = source["generation_id"];
+	        this.manifest_digest = source["manifest_digest"];
+	        this.plan_digest = source["plan_digest"];
+	        this.requested_shards = source["requested_shards"];
+	        this.shard_count = source["shard_count"];
+	        this.file_count = source["file_count"];
+	        this.chunk_count = source["chunk_count"];
+	        this.bytes = source["bytes"];
+	        this.shards = this.convertValues(source["shards"], ReviewShardPreview);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace sessionstore {
 	
 	export class SearchResult {
@@ -3721,6 +4508,7 @@ export namespace settings {
 	}
 	export class AgentsConfig {
 	    mode_override: string;
+	    default_conversation_mode: string;
 	    default_autonomy: string;
 	    offline_only: boolean;
 	    max_tool_calls: number;
@@ -3740,6 +4528,7 @@ export namespace settings {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.mode_override = source["mode_override"];
+	        this.default_conversation_mode = source["default_conversation_mode"];
 	        this.default_autonomy = source["default_autonomy"];
 	        this.offline_only = source["offline_only"];
 	        this.max_tool_calls = source["max_tool_calls"];
@@ -3929,6 +4718,54 @@ export namespace settings {
 		    return a;
 		}
 	}
+	export class RepositoryIndexSource {
+	    path: string;
+	    kind: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryIndexSource(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.kind = source["kind"];
+	    }
+	}
+	export class RepositoryIndexSourceSet {
+	    workspace: string;
+	    sources: RepositoryIndexSource[];
+	    watch: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepositoryIndexSourceSet(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.workspace = source["workspace"];
+	        this.sources = this.convertValues(source["sources"], RepositoryIndexSource);
+	        this.watch = source["watch"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class WorkspacePreference {
 	    path: string;
 	    agent_mode: string;
@@ -3970,6 +4807,11 @@ export namespace settings {
 	    workspace_dir: string;
 	    open_folders: WorkspaceFolder[];
 	    workspace_preferences: WorkspacePreference[];
+	    repository_index_source_sets: RepositoryIndexSourceSet[];
+	    scratch_workspace_dir: string;
+	    scratch_workspace_name: string;
+	    scratch_workspace_created_unix: number;
+	    scratch_workspace_review_unix: number;
 	    lab: LabContext;
 	    active_lab_profile: string;
 	    lab_profiles: LabProfile[];
@@ -3990,6 +4832,11 @@ export namespace settings {
 	        this.workspace_dir = source["workspace_dir"];
 	        this.open_folders = this.convertValues(source["open_folders"], WorkspaceFolder);
 	        this.workspace_preferences = this.convertValues(source["workspace_preferences"], WorkspacePreference);
+	        this.repository_index_source_sets = this.convertValues(source["repository_index_source_sets"], RepositoryIndexSourceSet);
+	        this.scratch_workspace_dir = source["scratch_workspace_dir"];
+	        this.scratch_workspace_name = source["scratch_workspace_name"];
+	        this.scratch_workspace_created_unix = source["scratch_workspace_created_unix"];
+	        this.scratch_workspace_review_unix = source["scratch_workspace_review_unix"];
 	        this.lab = this.convertValues(source["lab"], LabContext);
 	        this.active_lab_profile = source["active_lab_profile"];
 	        this.lab_profiles = this.convertValues(source["lab_profiles"], LabProfile);
@@ -4282,6 +5129,8 @@ export namespace settings {
 	    }
 	}
 	
+	
+	
 	export class UIConfig {
 	    theme: string;
 	    accent_color: string;
@@ -4423,6 +5272,7 @@ export namespace settings {
 	    protected_paths: string[];
 	    redact_secrets: boolean;
 	    active_toolset: string;
+	    task_routing_mode: string;
 	    toolsets: Record<string, Array<string>>;
 	    enabled_tools: Record<string, boolean>;
 	    safe_rules: ToolSafeRule[];
@@ -4458,6 +5308,7 @@ export namespace settings {
 	        this.protected_paths = source["protected_paths"];
 	        this.redact_secrets = source["redact_secrets"];
 	        this.active_toolset = source["active_toolset"];
+	        this.task_routing_mode = source["task_routing_mode"];
 	        this.toolsets = source["toolsets"];
 	        this.enabled_tools = source["enabled_tools"];
 	        this.safe_rules = this.convertValues(source["safe_rules"], ToolSafeRule);

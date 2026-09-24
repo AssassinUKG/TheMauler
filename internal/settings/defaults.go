@@ -27,6 +27,7 @@ func DefaultSettings() Settings {
 			ToolResultAggregateChars: 24000,
 			ProtectedPaths:           nil,
 			ActiveToolset:            "run-lean",
+			TaskRoutingMode:          "auto",
 			Toolsets:                 DefaultToolsets(),
 			EnabledTools: map[string]bool{
 				"read":                 true,
@@ -59,15 +60,16 @@ func DefaultSettings() Settings {
 			},
 		},
 		Agents: AgentsConfig{
-			ModeOverride:          "Auto",
-			DefaultAutonomy:       "balanced",
-			OfflineOnly:           false,
-			MaxToolCalls:          200,
-			MaxRunSeconds:         1800,
-			RequirePlan:           true,
-			NoThinkAfterToolCalls: 2,
-			ReasoningEffort:       "auto",
-			ThinkingMode:          "auto",
+			ModeOverride:            "Auto",
+			DefaultConversationMode: "adaptive",
+			DefaultAutonomy:         "balanced",
+			OfflineOnly:             false,
+			MaxToolCalls:            200,
+			MaxRunSeconds:           1800,
+			RequirePlan:             true,
+			NoThinkAfterToolCalls:   2,
+			ReasoningEffort:         "auto",
+			ThinkingMode:            "auto",
 			ReviewLoop: ReviewLoopConfig{
 				Enabled:            true,
 				OnlyAutonomous:     true,
@@ -225,6 +227,7 @@ func defaultAgentPresets() map[string]AgentModePreset {
 	return map[string]AgentModePreset{
 		"Ops": {
 			Enabled:       true,
+			Profile:       "qwen3.8-uncensored-agent-stability",
 			Autonomy:      "balanced",
 			Toolset:       "ops-lean",
 			ContextBudget: 32768,
@@ -291,6 +294,7 @@ func defaultAgentPresets() map[string]AgentModePreset {
 		},
 		"Bug Bounty Hunter": {
 			Enabled:       true,
+			Profile:       "qwen3.8-uncensored-agent-stability",
 			Autonomy:      "ask",
 			Toolset:       "bug-bounty-review",
 			ContextBudget: 32768,

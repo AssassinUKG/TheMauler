@@ -147,15 +147,22 @@ func replaceTaskRunTx(tx *sql.Tx, run TaskRun) error {
 	if run.Control != nil {
 		controlPhase = string(run.Control.Phase)
 	}
+	finalizedArtifactsJSON, err := marshalFinalizedArtifacts(run.FinalizedArtifacts)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`
 insert into task_runs (
-  id, prompt, mode, profile, model, claimant_id, claimant_alias, origin,
+  id, generation, conversation_epoch, parent_run_id, prompt, mode, profile, model, claimant_id, claimant_alias, origin,
   contract_json, contract_digest, control_phase, control_state_json,
   status, state, stop_reason, stop_detail,
   started_at, ended_at, duration_ms, prompt_tokens, completion_tokens,
-  total_tokens, summary, response
-) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  total_tokens, summary, response, finalized_artifacts_json
+) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 on conflict(id) do update set
+  generation=excluded.generation,
+  conversation_epoch=excluded.conversation_epoch,
+  parent_run_id=excluded.parent_run_id,
   prompt=excluded.prompt,
   mode=excluded.mode,
   profile=excluded.profile,
@@ -178,10 +185,11 @@ on conflict(id) do update set
   completion_tokens=excluded.completion_tokens,
   total_tokens=excluded.total_tokens,
   summary=excluded.summary,
-  response=excluded.response
-`, run.ID, run.Prompt, run.Mode, run.Profile, run.Model, run.ClaimantID, run.ClaimantAlias, run.Origin,
+  response=excluded.response,
+  finalized_artifacts_json=excluded.finalized_artifacts_json
+`, run.ID, run.Generation, run.ConversationEpoch, run.ParentRunID, run.Prompt, run.Mode, run.Profile, run.Model, run.ClaimantID, run.ClaimantAlias, run.Origin,
 		contractJSON, contractDigest, controlPhase, controlJSON, run.Status, run.State, run.StopReason, run.StopDetail,
-		run.StartedAt, run.EndedAt, run.DurationMs, run.PromptTokens, run.CompletionTokens, run.TotalTokens, run.Summary, run.Response); err != nil {
+		run.StartedAt, run.EndedAt, run.DurationMs, run.PromptTokens, run.CompletionTokens, run.TotalTokens, run.Summary, run.Response, finalizedArtifactsJSON); err != nil {
 		return err
 	}
 	for i, tool := range run.Tools {
@@ -201,10 +209,10 @@ on conflict(id) do update set
 
 func loadTaskRunsDB(db *sql.DB) ([]TaskRun, error) {
 	rows, err := db.Query(`
-select id, prompt, mode, profile, model, coalesce(claimant_id, ''), coalesce(claimant_alias, ''), coalesce(origin, ''), status, state, stop_reason, stop_detail,
+select id, coalesce(generation, 0), coalesce(conversation_epoch, 0), coalesce(parent_run_id, ''), prompt, mode, profile, model, coalesce(claimant_id, ''), coalesce(claimant_alias, ''), coalesce(origin, ''), status, state, stop_reason, stop_detail,
        coalesce(contract_json, ''), coalesce(control_state_json, ''),
        started_at, ended_at, duration_ms, prompt_tokens, completion_tokens,
-       total_tokens, summary, response
+       total_tokens, summary, response, coalesce(finalized_artifacts_json, '[]')
 from task_runs
 order by started_at desc`)
 	if err != nil {
@@ -214,15 +222,19 @@ order by started_at desc`)
 	var runs []TaskRun
 	for rows.Next() {
 		var run TaskRun
-		var contractJSON, controlJSON string
-		if err := rows.Scan(&run.ID, &run.Prompt, &run.Mode, &run.Profile, &run.Model, &run.ClaimantID, &run.ClaimantAlias, &run.Origin, &run.Status, &run.State,
+		var contractJSON, controlJSON, finalizedArtifactsJSON string
+		if err := rows.Scan(&run.ID, &run.Generation, &run.ConversationEpoch, &run.ParentRunID, &run.Prompt, &run.Mode, &run.Profile, &run.Model, &run.ClaimantID, &run.ClaimantAlias, &run.Origin, &run.Status, &run.State,
 			&run.StopReason, &run.StopDetail, &contractJSON, &controlJSON, &run.StartedAt, &run.EndedAt, &run.DurationMs, &run.PromptTokens,
-			&run.CompletionTokens, &run.TotalTokens, &run.Summary, &run.Response); err != nil {
+			&run.CompletionTokens, &run.TotalTokens, &run.Summary, &run.Response, &finalizedArtifactsJSON); err != nil {
 			return nil, err
 		}
 		if err := unmarshalTaskRunControl(&run, contractJSON, controlJSON); err != nil {
 			return nil, fmt.Errorf("load task run %s control state: %w", run.ID, err)
 		}
+		if err := json.Unmarshal([]byte(finalizedArtifactsJSON), &run.FinalizedArtifacts); err != nil {
+			return nil, fmt.Errorf("load task run %s finalized artifacts: %w", run.ID, err)
+		}
+		run.FinalizedArtifacts = refreshFinalizedArtifactFreshness(run.FinalizedArtifacts)
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {
@@ -247,6 +259,20 @@ order by started_at desc`)
 		return []TaskRun{}, nil
 	}
 	return runs, nil
+}
+
+func marshalFinalizedArtifacts(artifacts []FinalizedArtifact) (string, error) {
+	clone := append([]FinalizedArtifact(nil), artifacts...)
+	for i := range clone {
+		clone[i].Fresh = false
+		clone[i].Freshness = ""
+		clone[i].CurrentSHA256 = ""
+	}
+	data, err := json.Marshal(clone)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func marshalTaskRunControl(run TaskRun) (string, string, error) {

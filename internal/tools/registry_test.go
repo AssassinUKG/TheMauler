@@ -35,6 +35,16 @@ func TestBashToolIsNotRegistered(t *testing.T) {
 	}
 }
 
+func TestNewEmptyHasNoAmbientCapabilities(t *testing.T) {
+	registry := NewEmpty()
+	if got := registry.All(); len(got) != 0 {
+		t.Fatalf("sealed registry inherited ambient tools: %#v", got)
+	}
+	if defs := registry.ToToolDefs(); len(defs) != 0 {
+		t.Fatalf("sealed registry advertised ambient tools: %#v", defs)
+	}
+}
+
 func TestMissingEnabledMapEntriesAreHidden(t *testing.T) {
 	registry := New()
 	defs := registry.ToEnabledToolDefs(map[string]bool{

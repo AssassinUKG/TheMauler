@@ -28,7 +28,7 @@ func enforceAgentModeToolPolicy(mode AgentMode, activeToolset string, call llm.T
 		return fmt.Errorf("Bug Bounty Hunter browser policy could not classify malformed arguments: %w", err)
 	}
 	switch strings.ToLower(strings.TrimSpace(input.Action)) {
-	case "open", "snapshot", "extract", "screenshot", "close":
+	case "open", "snapshot", "extract", "screenshot", "status", "pause", "takeover", "resume", "close":
 		return nil
 	case "click", "type", "agent":
 		return fmt.Errorf("Bug Bounty Hunter is a planning-only agent; browser action %q is blocked by default. Switch to an explicitly authorised active-testing agent or toolset for stateful interaction", input.Action)

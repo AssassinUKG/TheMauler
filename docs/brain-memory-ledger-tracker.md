@@ -91,6 +91,10 @@ All tool calls, model responses, state changes, confirmations, errors, terminal 
    - Give the user edit/delete/approve controls for learned items.
    - First slice is implemented: a full-page Brain tab reads `ListLedgerEvents`, supports search/source/kind filters, event limits, JSON export, ledger clear, KPI counts, problem signals, selected-event expansion, and event-kind distribution.
    - Approval slice is implemented: Brain can save learning candidates as Memory entries or Skills through existing Wails bindings.
+   - Repository-health slice landed 2026-09-23: Brain projects the authoritative workspace-index
+     health, coverage, immutable provenance, Watch status, incremental refresh facts, omissions and
+     live progress, with Refresh/Watch/Rebuild/Cancel controls. It deliberately owns no parallel
+     index state or policy.
 
 8. **Files & Knowledge corpus index and split retrieval**
    - Keep curated Memory and prior-session recall separate from a source-corpus index; arbitrary
@@ -238,3 +242,4 @@ Note: two pre-existing `internal/llm/backends` tests (`ActualContextLength*`) fa
 - Post-run memory/reflection extraction: first reviewable candidate pass implemented.
 - Retrieval planner: first prompt-packet slice implemented for durable memory, prior-session recall pointers, and evidence/artifact pointers; Brain/replay rendering still planned.
 - Brain UI: first ledger-backed inspection page implemented.
+- Brain repository index health/actions: implemented over the shared backend status and lifecycle.

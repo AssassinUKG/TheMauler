@@ -11,6 +11,7 @@ import (
 
 	"mauler/internal/llm"
 	"mauler/internal/settings"
+	"mauler/internal/tools"
 )
 
 type ContextInspection struct {
@@ -142,6 +143,7 @@ func (a *App) PreviewContext(taskText, requestedClass string) (ContextInspection
 	var toolDefs []llm.ToolDef
 	if a.registry != nil {
 		toolDefs, toolChoice = toolDefsAndChoiceForTurn(a.registry, cfg.Tools, taskText, 0, 0)
+		toolDefs, toolChoice, _ = applyActiveBrowserTurnRouting(a.registry, cfg.Tools, taskText, toolDefs, toolChoice, tools.GetBrowserWorkflowStatus(a.browserWorkflowOwnerID()))
 	}
 	toolSchemaBytes := 0
 	if data, err := json.Marshal(toolDefs); err == nil {

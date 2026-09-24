@@ -111,6 +111,7 @@ func cloneRecordForExport(record Record) (Record, error) {
 	}
 	clone.Workflow.Digest = record.Workflow.Digest
 	clone.Checklist.Digest = record.Checklist.Digest
+	clone.EvidenceFreshness = nil
 	clone.State.ensureCollections()
 	root, _ := filepath.Abs(record.Workspace)
 	for _, evidence := range clone.State.Evidence {

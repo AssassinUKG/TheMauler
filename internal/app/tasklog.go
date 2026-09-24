@@ -16,6 +16,9 @@ import (
 
 type TaskRun struct {
 	ID                 string                     `json:"id"`
+	Generation         uint64                     `json:"generation,omitempty"`
+	ConversationEpoch  uint64                     `json:"conversation_epoch,omitempty"`
+	ParentRunID        string                     `json:"parent_run_id,omitempty"`
 	Prompt             string                     `json:"prompt"`
 	Mode               string                     `json:"mode"`
 	Profile            string                     `json:"profile"`
@@ -38,15 +41,36 @@ type TaskRun struct {
 	TotalTokens        int                        `json:"total_tokens,omitempty"`
 	Summary            string                     `json:"summary,omitempty"`
 	Response           string                     `json:"response,omitempty"`
+	FinalizedArtifacts []FinalizedArtifact        `json:"finalized_artifacts,omitempty"`
 	Tools              []TaskToolEvent            `json:"tools,omitempty"`
 	Events             []TaskRunEvent             `json:"events,omitempty"`
 
 	startMs              int64 // not serialised; used to compute DurationMs
 	ledger               *ledger.Ledger
 	memoryConflictEvents map[string]int
+	conversationMode     string // adaptive/direct/agent; captured at run intake
+	persistentCheckpoint bool   // named checkpoints remain reusable after resume
+}
+
+// FinalizedArtifact seals the exact bytes handed off by a verified run. Fresh
+// fields are derived when runs are loaded and are not themselves evidence.
+type FinalizedArtifact struct {
+	Path                string   `json:"path"`
+	SHA256              string   `json:"sha256"`
+	Size                int64    `json:"size"`
+	RunID               string   `json:"run_id"`
+	Generation          uint64   `json:"generation"`
+	ConversationEpoch   uint64   `json:"conversation_epoch,omitempty"`
+	EvidenceID          string   `json:"evidence_id"`
+	VerifierEvidenceIDs []string `json:"verifier_evidence_ids,omitempty"`
+	FinalizedAt         string   `json:"finalized_at"`
+	Fresh               bool     `json:"fresh"`
+	Freshness           string   `json:"freshness"`
+	CurrentSHA256       string   `json:"current_sha256,omitempty"`
 }
 
 var taskRunSequence atomic.Uint64
+var taskRunGeneration atomic.Uint64
 
 type TaskRunEvent struct {
 	Kind      string `json:"kind"`
@@ -97,17 +121,35 @@ func (a *App) ImportTaskRunsJSON(raw string) (int, error) {
 
 func startTaskRun(prompt, mode, profile, model string) TaskRun {
 	now := time.Now()
+	generation := nextTaskRunGeneration(now)
 	return TaskRun{
 		ID: "task-" + strings.ReplaceAll(now.Format(time.RFC3339Nano), ":", "-") +
 			"-" + strconv.FormatUint(taskRunSequence.Add(1), 36),
-		Prompt:    strings.TrimSpace(prompt),
-		Mode:      mode,
-		Profile:   profile,
-		Model:     model,
-		Status:    "running",
-		State:     "planning",
-		StartedAt: now.Format(time.RFC3339),
-		startMs:   now.UnixMilli(),
+		Generation: generation,
+		Prompt:     strings.TrimSpace(prompt),
+		Mode:       mode,
+		Profile:    profile,
+		Model:      model,
+		Status:     "running",
+		State:      "planning",
+		StartedAt:  now.Format(time.RFC3339),
+		startMs:    now.UnixMilli(),
+	}
+}
+
+// nextTaskRunGeneration returns a JavaScript-safe, process-monotonic generation.
+// Unix milliseconds keep generations ordered across normal restarts; the CAS path
+// preserves strict ordering when two runs are accepted inside the same millisecond.
+func nextTaskRunGeneration(now time.Time) uint64 {
+	candidate := uint64(now.UnixMilli())
+	for {
+		previous := taskRunGeneration.Load()
+		if candidate <= previous {
+			candidate = previous + 1
+		}
+		if taskRunGeneration.CompareAndSwap(previous, candidate) {
+			return candidate
+		}
 	}
 }
 

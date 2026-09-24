@@ -459,11 +459,20 @@ func buildManifestProjectInstructionPacket(cfg settings.ContextConfig, taskText 
 	}
 	remainingSource := maxSourceBytes
 	docs := make([]manifestInstructionDoc, 0, len(selection.Documents))
-	for _, selected := range selection.Documents {
+	for i, selected := range selection.Documents {
 		if remainingSource <= 0 {
 			break
 		}
-		doc, err := readManifestInstructionDoc(selected, remainingSource)
+		// Reserve source bytes for every selected document. Reading each source
+		// greedily meant a growing AGENTS/current-state pair could consume the
+		// entire source allowance and silently omit a later route-specific file
+		// before the fair heading-aware prompt compiler even saw it.
+		remainingDocs := len(selection.Documents) - i
+		share := remainingSource / remainingDocs
+		if share <= 0 {
+			break
+		}
+		doc, err := readManifestInstructionDoc(selected, share)
 		if err != nil {
 			return projectInstructionPacket{}, err
 		}

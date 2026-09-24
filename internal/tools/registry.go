@@ -48,6 +48,12 @@ func New() *Registry {
 	return r
 }
 
+// NewEmpty returns a registry with no ambient tools. It is intended for sealed
+// task contracts that must explicitly opt into every capability.
+func NewEmpty() *Registry {
+	return &Registry{tools: make(map[string]Tool)}
+}
+
 // Register adds a tool, overwriting any existing tool with the same name.
 func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t

@@ -61,6 +61,7 @@ interface Props {
   agentMode: string
   doctorRunRequest: number
   taskRunVersion: number
+  settingsVersion: number
   skillSuggestion: SkillSuggestion | null
   onDismissSkillSuggestion: () => void
 }
@@ -70,13 +71,18 @@ const toolLabels: Record<string, string> = {
   write: 'Write',
   edit: 'Edit',
   shell: 'Shell',
+	 run_script: 'Run script',
   terminal_send: 'Terminal send',
   terminal_read: 'Terminal read',
+	 start_listener: 'Start listener',
   glob: 'Glob',
   grep: 'Grep',
   session_search: 'Session search',
   file_changes: 'File changes',
   sqlite: 'SQLite',
+	 memory: 'Memory',
+	 progress: 'Progress',
+	 read_tool_result: 'Read full result',
   web_search: 'Web search',
   fetch_url: 'Fetch URL',
   browser: 'Browser',
@@ -85,6 +91,9 @@ const toolLabels: Record<string, string> = {
   http_probe: 'HTTP probe',
   evidence_bundle: 'Evidence bundle',
   task: 'Task',
+	 engagement: 'Engagement',
+	 set_reasoning_effort: 'Reasoning effort',
+	 generate_image: 'Generate image',
 }
 
 type ToolRisk = 'low' | 'medium' | 'high'
@@ -119,12 +128,19 @@ const toolRisk: Record<string, ToolRisk> = {
   write: 'high',
   edit: 'high',
   shell: 'high',
+	 run_script: 'high',
   terminal_send: 'high',
   terminal_read: 'low',
+	 start_listener: 'high',
   todo_write: 'low',
   engagement: 'medium',
   skill: 'low',
   task: 'medium',
+	 memory: 'low',
+	 progress: 'low',
+	 read_tool_result: 'low',
+	 set_reasoning_effort: 'low',
+	 generate_image: 'medium',
 }
 
 type AgentTab = 'agent' | 'plan' | 'activity' | 'tools' | 'browser' | 'memory' | 'skills' | 'logs'
@@ -143,6 +159,7 @@ export function AgentPanel({
   agentMode,
   doctorRunRequest,
   taskRunVersion,
+  settingsVersion,
   skillSuggestion,
   onDismissSkillSuggestion,
 }: Props) {
@@ -203,7 +220,7 @@ export function AgentPanel({
 
   useEffect(() => {
     void load()
-  }, [taskRunVersion])
+  }, [taskRunVersion, settingsVersion])
 
   useEffect(() => {
     if (doctorRunRequest <= 0) return
@@ -490,6 +507,9 @@ export function AgentPanel({
       : 'Balanced'
   const shellBackend = settings?.tools.shell_backend || 'auto'
   const activeToolset = settings?.tools.active_toolset || 'balanced'
+	 const activeToolMembers = new Set(settings?.tools.toolsets?.[activeToolset] ?? [])
+	 const effectiveSelectedTools = [...activeToolMembers]
+	   .filter(name => enabledTools[name] ?? true)
   const showWSLBoundaryNote = shellBackend === 'wsl' && activeToolset !== 'local-code'
 
   const applyAutonomyPreset = async (preset: 'unrestricted' | 'balanced' | 'offline') => {
@@ -759,24 +779,51 @@ export function AgentPanel({
               >
                 {toolsetNames.map(name => <option key={name} value={name}>{name}</option>)}
               </select>
+			  <label className="agent-setting-row agent-setting-select-row">
+				<div>
+				  <div className="agent-setting-name">Per-task routing</div>
+				  <div className="agent-setting-desc">
+					{(settings?.tools.task_routing_mode || 'auto') === 'selected'
+					  ? `Advertise all ${effectiveSelectedTools.length} enabled tools from this toolset.`
+					  : 'Task-aware and compact; explicit create/save requests always retain Write and Edit.'}
+				  </div>
+				</div>
+				<select
+				  className="agent-compact-select agent-routing-select"
+				  value={settings?.tools.task_routing_mode || 'auto'}
+				  onChange={e => settings && void updateTools({ ...settings.tools, task_routing_mode: e.target.value })}
+				  disabled={!settings || streaming || saving}
+				  aria-label="Per-task tool routing"
+				>
+				  <option value="auto">Automatic</option>
+				  <option value="selected">Selected tools</option>
+				</select>
+			  </label>
             </div>
-            <div className="agent-risk-note">Risk labels are visibility only. Autonomous mode can still run enabled tools without confirmation.</div>
+			<div className="agent-risk-note">
+			  The switches below are capability limits. <strong>Automatic</strong> narrows them per task for speed and reliability; <strong>Selected tools</strong> sends every enabled member of the active toolset. Confirmation and scope policy still apply.
+			</div>
             <div className="agent-tool-list">
-              {names.map(name => (
-                <label key={name} className="agent-tool">
+              {names.map(name => {
+				const availableInToolset = activeToolMembers.has(name)
+				return (
+                <label key={name} className={`agent-tool${availableInToolset ? '' : ' unavailable'}`} title={availableInToolset ? '' : `Not available in the ${activeToolset} toolset`}>
                   <span className="toggle-switch">
                     <input
                       type="checkbox"
-                      checked={enabledTools[name] ?? true}
-                      disabled={!settings?.tools.enabled}
+					  checked={availableInToolset && (enabledTools[name] ?? true)}
+					  disabled={!settings?.tools.enabled || !availableInToolset}
                       onChange={e => setToolEnabled(name, e.target.checked)}
                     />
                     <span className="toggle-track" />
                   </span>
                   <span className="agent-tool-name">{toolLabels[name]}</span>
-                  <span className={`agent-risk agent-risk-${toolRisk[name] ?? 'medium'}`}>{toolRiskLabels[toolRisk[name] ?? 'medium']}</span>
+				  <span className={`agent-risk ${availableInToolset ? `agent-risk-${toolRisk[name] ?? 'medium'}` : 'agent-risk-unavailable'}`}>
+					{availableInToolset ? toolRiskLabels[toolRisk[name] ?? 'medium'] : 'Not in set'}
+				  </span>
                 </label>
-              ))}
+				)
+			  })}
             </div>
           </>
         )}

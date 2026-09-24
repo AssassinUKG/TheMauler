@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 12
+const CurrentSchemaVersion = 18
 
 func DefaultPath() (string, error) {
 	dir, err := settings.ConfigDir()
@@ -102,9 +102,213 @@ func runMigration(db *sql.DB, version int) error {
 		return migrateV11TaskRunClaimants(db)
 	case 12:
 		return migrateV12TaskRunControlPlane(db)
+	case 13:
+		return migrateV13TaskRunGeneration(db)
+	case 14:
+		return migrateV14TaskRunParent(db)
+	case 15:
+		return migrateV15TaskRunConversationEpoch(db)
+	case 16:
+		return migrateV16TaskRunFinalizedArtifacts(db)
+	case 17:
+		return migrateV17RepositoryIndex(db)
+	case 18:
+		return migrateV18RepositoryReviews(db)
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}
+}
+
+func migrateV18RepositoryReviews(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS repository_reviews (
+  review_id TEXT PRIMARY KEY,
+  workspace TEXT NOT NULL,
+  generation_id TEXT NOT NULL,
+  manifest_digest TEXT NOT NULL,
+  plan_digest TEXT NOT NULL,
+  requested_shards INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  status_json TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  submissions_json TEXT NOT NULL DEFAULT '[]',
+  merge_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_repository_reviews_workspace ON repository_reviews(workspace, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repository_reviews_generation ON repository_reviews(generation_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repository_reviews_state ON repository_reviews(state, updated_at DESC);
+PRAGMA user_version=18;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV17RepositoryIndex(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS repo_index_generations (
+  id TEXT PRIMARY KEY,
+  policy_digest TEXT NOT NULL,
+  manifest_digest TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  complete INTEGER NOT NULL DEFAULT 0,
+  policy_json TEXT NOT NULL,
+  manifest_json TEXT NOT NULL DEFAULT '',
+  files_seen INTEGER NOT NULL DEFAULT 0,
+  files_indexed INTEGER NOT NULL DEFAULT 0,
+  bytes_read INTEGER NOT NULL DEFAULT 0,
+  chunk_count INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_repo_index_generations_policy ON repo_index_generations(policy_digest, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_repo_index_generations_status ON repo_index_generations(status, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS repo_index_roots (
+  generation_id TEXT NOT NULL REFERENCES repo_index_generations(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  root TEXT NOT NULL,
+  PRIMARY KEY (generation_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS repo_index_files (
+  generation_id TEXT NOT NULL REFERENCES repo_index_generations(id) ON DELETE CASCADE,
+  root TEXT NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT NOT NULL DEFAULT '',
+  encoding TEXT NOT NULL DEFAULT '',
+  extractor TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  mod_time TEXT NOT NULL DEFAULT '',
+  sha256 TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  chunk_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (generation_id, root, path)
+);
+CREATE INDEX IF NOT EXISTS idx_repo_index_files_status ON repo_index_files(generation_id, status, path);
+CREATE INDEX IF NOT EXISTS idx_repo_index_files_sha ON repo_index_files(sha256);
+
+CREATE TABLE IF NOT EXISTS repo_index_chunks (
+  chunk_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+  generation_id TEXT NOT NULL REFERENCES repo_index_generations(id) ON DELETE CASCADE,
+  chunk_id TEXT NOT NULL,
+  root TEXT NOT NULL,
+  path TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  text_sha256 TEXT NOT NULL,
+  trust_label TEXT NOT NULL,
+  extractor_version TEXT NOT NULL,
+  UNIQUE (generation_id, chunk_id)
+);
+CREATE INDEX IF NOT EXISTS idx_repo_index_chunks_file ON repo_index_chunks(generation_id, root, path, ordinal);
+CREATE VIRTUAL TABLE IF NOT EXISTS repo_index_chunks_fts USING fts5(
+  text,
+  content='repo_index_chunks',
+  content_rowid='chunk_pk',
+  tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS repo_index_chunks_ai AFTER INSERT ON repo_index_chunks BEGIN
+  INSERT INTO repo_index_chunks_fts(rowid, text) VALUES (new.chunk_pk, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS repo_index_chunks_ad AFTER DELETE ON repo_index_chunks BEGIN
+  INSERT INTO repo_index_chunks_fts(repo_index_chunks_fts, rowid, text) VALUES ('delete', old.chunk_pk, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS repo_index_chunks_au AFTER UPDATE ON repo_index_chunks BEGIN
+  INSERT INTO repo_index_chunks_fts(repo_index_chunks_fts, rowid, text) VALUES ('delete', old.chunk_pk, old.text);
+  INSERT INTO repo_index_chunks_fts(rowid, text) VALUES (new.chunk_pk, new.text);
+END;
+
+CREATE TABLE IF NOT EXISTS repo_index_active (
+  policy_digest TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL REFERENCES repo_index_generations(id) ON DELETE CASCADE,
+  updated_at TEXT NOT NULL
+);
+PRAGMA user_version=17;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV16TaskRunFinalizedArtifacts(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN finalized_artifacts_json TEXT NOT NULL DEFAULT '[]';
+PRAGMA user_version=16;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV15TaskRunConversationEpoch(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN conversation_epoch INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_task_runs_conversation_epoch ON task_runs(conversation_epoch);
+PRAGMA user_version=15;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV14TaskRunParent(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN parent_run_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_task_runs_parent_run_id ON task_runs(parent_run_id);
+PRAGMA user_version=14;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV13TaskRunGeneration(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_task_runs_generation ON task_runs(generation);
+PRAGMA user_version=13;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func migrateV12TaskRunControlPlane(db *sql.DB) error {

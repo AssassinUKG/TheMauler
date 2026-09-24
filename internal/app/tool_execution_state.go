@@ -18,6 +18,14 @@ func adviseTerminalRun(state TerminalStateSnapshot, command string) toolExecutio
 		stateName = "unknown"
 	}
 	command = strings.TrimSpace(command)
+	if isIndependentHTTPCLICommand(command) {
+		tool := independentCommandTool(command)
+		return toolExecutionDecision{
+			State:           stateName,
+			RecommendedTool: tool,
+			Message:         independentCommandRoutingMessage(stateName, tool),
+		}
+	}
 	switch stateName {
 	case "missing", "ready", "closed":
 		return toolExecutionDecision{

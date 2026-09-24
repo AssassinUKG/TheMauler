@@ -706,6 +706,14 @@
   padding: 4px 6px;
 }
 
+.agent-routing-select {
+  flex-basis: 112px;
+}
+
+.agent-risk-note strong {
+  color: var(--text-bright);
+}
+
 .agent-setting-name {
   font-size: 12px;
   color: var(--text);
@@ -754,6 +762,15 @@
 .agent-tool-name {
   flex: 1;
   min-width: 0;
+}
+
+.agent-tool.unavailable {
+  opacity: .58;
+}
+
+.agent-risk-unavailable {
+  color: var(--text-dim);
+  border-color: var(--border);
 }
 
 .agent-risk {

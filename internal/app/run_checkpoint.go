@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"mauler/internal/agent"
 	"mauler/internal/llm"
@@ -14,19 +15,24 @@ import (
 )
 
 type RunCheckpoint struct {
-	RunID    string        `json:"run_id"`
-	Prompt   string        `json:"prompt"`
-	Mode     string        `json:"mode"`
-	Profile  string        `json:"profile"`
-	Messages []llm.Message `json:"messages"`
-	Run      TaskRun       `json:"run"`
-	SavedAt  string        `json:"saved_at"`
+	RunID            string               `json:"run_id"`
+	Name             string               `json:"name,omitempty"`
+	ConversationName string               `json:"conversation_name,omitempty"`
+	ConversationMode string               `json:"conversation_mode,omitempty"`
+	Explicit         bool                 `json:"explicit,omitempty"`
+	Prompt           string               `json:"prompt"`
+	Mode             string               `json:"mode"`
+	Profile          string               `json:"profile"`
+	Messages         []llm.Message        `json:"messages"`
+	ChatMessages     []SessionChatMessage `json:"chat_messages,omitempty"`
+	Run              TaskRun              `json:"run"`
+	SavedAt          string               `json:"saved_at"`
 }
 
 func (a *App) ListResumableRuns() ([]RunCheckpoint, error) {
 	store := a.sessionStore()
 	if store == nil {
-		return nil, nil
+		return []RunCheckpoint{}, nil
 	}
 	records, err := store.ListCheckpoints()
 	if err != nil {
@@ -43,15 +49,134 @@ func (a *App) ListResumableRuns() ([]RunCheckpoint, error) {
 	return out, nil
 }
 
+// SaveConversationCheckpoint creates an operator-named, reusable snapshot of
+// the current conversation. It uses the same immutable run-checkpoint store as
+// automatic crash recovery, but is never consumed merely because it resumes.
+func (a *App) SaveConversationCheckpoint(name, conversationName string) (RunCheckpoint, error) {
+	name, err := validateCheckpointName(name)
+	if err != nil {
+		return RunCheckpoint{}, err
+	}
+	conversationName = strings.TrimSpace(conversationName)
+	if len([]rune(conversationName)) > 120 {
+		return RunCheckpoint{}, fmt.Errorf("conversation name is too long")
+	}
+	for _, r := range conversationName {
+		if unicode.IsControl(r) {
+			return RunCheckpoint{}, fmt.Errorf("conversation name contains control characters")
+		}
+	}
+
+	a.mu.Lock()
+	if a.agentRunning || a.evalRunning {
+		a.mu.Unlock()
+		return RunCheckpoint{}, fmt.Errorf("cannot checkpoint while an agent run or eval is active")
+	}
+	if a.history == nil || a.cfg == nil || a.profiles == nil {
+		a.mu.Unlock()
+		return RunCheckpoint{}, fmt.Errorf("conversation state is unavailable")
+	}
+	messages := a.history.Messages()
+	cfg := *a.cfg
+	profiles := *a.profiles
+	modeName := firstNonEmpty(strings.TrimSpace(a.currentMode), "Auto")
+	conversationMode := normalizeConversationMode(a.conversationMode)
+	conversationEpoch := a.currentConversationEpoch()
+	a.mu.Unlock()
+	if len(messages) == 0 {
+		return RunCheckpoint{}, fmt.Errorf("the current conversation is empty")
+	}
+	prompt := checkpointResumePrompt(messages)
+	if prompt == "" {
+		return RunCheckpoint{}, fmt.Errorf("the conversation has no user task to resume")
+	}
+	existingCheckpoints, err := a.ListResumableRuns()
+	if err != nil {
+		return RunCheckpoint{}, err
+	}
+	for _, existing := range existingCheckpoints {
+		if existing.Explicit && strings.EqualFold(existing.Name, name) {
+			return RunCheckpoint{}, fmt.Errorf("checkpoint %q already exists", name)
+		}
+	}
+
+	profile := activeProfile(&cfg, &profiles)
+	run := startTaskRun(prompt, modeName, cfg.ActiveProfile, profile.ModelID)
+	run.Status = "paused"
+	run.State = "checkpointed"
+	run.Origin = "desktop"
+	run.ConversationEpoch = conversationEpoch
+	run.conversationMode = conversationMode
+	cp := RunCheckpoint{
+		RunID: run.ID, Name: name, ConversationName: conversationName,
+		ConversationMode: conversationMode, Explicit: true,
+		Prompt: prompt, Mode: modeName, Profile: cfg.ActiveProfile,
+		Messages: messages, ChatMessages: toSessionChatMessages(messages), Run: run,
+		SavedAt: time.Now().Format(time.RFC3339),
+	}
+	if err := a.persistRunCheckpoint(cp); err != nil {
+		return RunCheckpoint{}, err
+	}
+	return cp, nil
+}
+
+func validateCheckpointName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("checkpoint name is required")
+	}
+	if len([]rune(name)) > 80 {
+		return "", fmt.Errorf("checkpoint name must be 80 characters or fewer")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("checkpoint name contains control characters")
+		}
+	}
+	return name, nil
+}
+
+func checkpointResumePrompt(messages []llm.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != llm.RoleUser {
+			continue
+		}
+		if text := strings.TrimSpace(messageText(messages[i])); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func namedCheckpointResumeInstruction(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "Resume the saved conversation from its captured state. Reconcile the existing evidence first and do not repeat completed work unless verification requires it."
+	}
+	return "Resume the saved conversation from its captured state. Reconcile the existing evidence first and do not repeat completed work unless verification requires it.\n\nOriginal task: " + prompt
+}
+
+func (a *App) DeleteResumableRun(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	store := a.sessionStore()
+	if store == nil {
+		return fmt.Errorf("session store is unavailable")
+	}
+	return store.DeleteCheckpoint(runID)
+}
+
 func (a *App) ResumeRun(runID string) error {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return fmt.Errorf("run_id is required")
 	}
 	a.mu.Lock()
-	if a.agentRunning {
+	if a.agentRunning || a.evalRunning {
 		a.mu.Unlock()
-		return fmt.Errorf("agent is already running")
+		return fmt.Errorf("agent run or eval is already active")
 	}
 	a.mu.Unlock()
 
@@ -89,19 +214,44 @@ func (a *App) ResumeRun(runID string) error {
 	a.cancelAgent = cancel
 	a.stopReason = ""
 	a.stopDetail = ""
+	a.advanceConversationEpochLocked()
+	conversationEpoch := a.currentConversationEpoch()
 	a.history = agent.NewHistory(profile.CtxTokens)
 	a.history.Replace(cp.Messages)
 	a.currentMode = mode.Name
+	a.conversationMode = normalizeConversationMode(cp.ConversationMode)
 	a.mu.Unlock()
 	a.emit("mauler:agent_mode", mode.Name)
 
-	run := cp.Run
-	if strings.TrimSpace(run.ID) == "" {
-		run = startTaskRun(cp.Prompt, mode.Name, cfg.ActiveProfile, profile.ModelID)
+	run := resumedTaskRun(cp, mode.Name, cfg.ActiveProfile, profile.ModelID)
+	run.conversationMode = normalizeConversationMode(cp.ConversationMode)
+	run.ConversationEpoch = conversationEpoch
+	parentRunID := run.ParentRunID
+	run.addEvent("resume", "Resuming checkpoint as a new owned run generation", fmt.Sprintf("parent_run_id=%s saved_at=%s", parentRunID, cp.SavedAt))
+	firstMsg := llm.Message{}
+	if cp.Explicit {
+		firstMsg = llm.NewTextMessage(llm.RoleUser, namedCheckpointResumeInstruction(cp.Prompt))
 	}
-	run.addEvent("resume", "Resuming run from checkpoint", cp.SavedAt)
-	go a.runAgentLoop(agentCtx, llm.Message{}, profile, &cfg, autonomous, mode, nil, nil, run)
+	go a.runAgentLoop(agentCtx, firstMsg, profile, &cfg, autonomous, mode, nil, nil, run)
 	return nil
+}
+
+func resumedTaskRun(cp RunCheckpoint, mode, profile, model string) TaskRun {
+	parentRunID := strings.TrimSpace(cp.Run.ID)
+	if parentRunID == "" {
+		parentRunID = strings.TrimSpace(cp.RunID)
+	}
+	run := startTaskRun(cp.Prompt, mode, profile, model)
+	run.ParentRunID = parentRunID
+	run.Origin = strings.TrimSpace(cp.Run.Origin)
+	if run.Origin == "" {
+		run.Origin = "desktop"
+	}
+	run.ClaimantID = cp.Run.ClaimantID
+	run.ClaimantAlias = cp.Run.ClaimantAlias
+	run.ContextPacketClass = cp.Run.ContextPacketClass
+	run.persistentCheckpoint = cp.Explicit
+	return run
 }
 
 func (a *App) maybeCheckpoint(run TaskRun, cfg settings.Settings, every int) {
@@ -120,29 +270,39 @@ func (a *App) saveRunCheckpoint(run TaskRun, cfg settings.Settings) {
 	messages := a.history.Messages()
 	a.mu.Unlock()
 	cp := RunCheckpoint{
-		RunID:    run.ID,
-		Prompt:   run.Prompt,
-		Mode:     run.Mode,
-		Profile:  cfg.ActiveProfile,
-		Messages: messages,
-		Run:      run,
-		SavedAt:  time.Now().Format(time.RFC3339),
+		RunID:            run.ID,
+		ConversationMode: normalizeConversationMode(run.conversationMode),
+		Prompt:           run.Prompt,
+		Mode:             run.Mode,
+		Profile:          cfg.ActiveProfile,
+		Messages:         messages,
+		Run:              run,
+		SavedAt:          time.Now().Format(time.RFC3339),
 	}
-	payload, err := json.Marshal(cp)
+	if err := a.persistRunCheckpoint(cp); err != nil {
+		run.addEvent("checkpoint_error", "Could not save run checkpoint", err.Error())
+	}
+}
+
+func (a *App) persistRunCheckpoint(cp RunCheckpoint) error {
+	store := a.sessionStore()
+	if store == nil {
+		return fmt.Errorf("session store is unavailable")
+	}
+	persisted := cp
+	persisted.ChatMessages = nil
+	payload, err := json.Marshal(persisted)
 	if err != nil {
-		run.addEvent("checkpoint_error", "Could not encode run checkpoint", err.Error())
-		return
+		return fmt.Errorf("encode run checkpoint: %w", err)
 	}
-	if err := store.SaveCheckpoint(sessionstore.CheckpointRecord{
+	return store.SaveCheckpoint(sessionstore.CheckpointRecord{
 		RunID:   cp.RunID,
 		Prompt:  cp.Prompt,
 		Mode:    cp.Mode,
 		Profile: cp.Profile,
 		Payload: string(payload),
 		SavedAt: cp.SavedAt,
-	}); err != nil {
-		run.addEvent("checkpoint_error", "Could not save run checkpoint", err.Error())
-	}
+	})
 }
 
 func (a *App) deleteRunCheckpoint(runID string) {
@@ -171,5 +331,7 @@ func checkpointFromRecord(record sessionstore.CheckpointRecord) (RunCheckpoint, 
 	if cp.SavedAt == "" {
 		cp.SavedAt = record.SavedAt
 	}
+	cp.ConversationMode = normalizeConversationMode(cp.ConversationMode)
+	cp.ChatMessages = toSessionChatMessages(cp.Messages)
 	return cp, nil
 }

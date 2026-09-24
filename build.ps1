@@ -69,7 +69,30 @@ if (Test-Path $plainGoBinary) {
     Remove-Item -LiteralPath $plainGoBinary -Force
 }
 
-Invoke-Checked wails build -clean
+# Go's optional module index can become stale independently of the source tree
+# and report present GOROOT packages as "not in std". Probe the smallest
+# standard package and use direct source discovery only for this build when
+# that exact local-cache failure is present.
+$previousGoDebug = $env:GODEBUG
+$stdProbe = & go list unsafe 2>&1
+$stdProbeExit = $LASTEXITCODE
+if ($stdProbeExit -ne 0 -and (($stdProbe | Out-String) -match "not in std")) {
+    Write-Warning "Go module index is stale; building with direct standard-library discovery."
+    if ($env:GODEBUG -notmatch '(^|,)goindex=') {
+        $env:GODEBUG = if ($env:GODEBUG) { "$env:GODEBUG,goindex=0" } else { "goindex=0" }
+    }
+}
+
+try {
+    Invoke-Checked wails build -clean
+}
+finally {
+    if ($null -eq $previousGoDebug) {
+        Remove-Item Env:GODEBUG -ErrorAction SilentlyContinue
+    } else {
+        $env:GODEBUG = $previousGoDebug
+    }
+}
 
 $exe = Join-Path $Root "build\bin\TheMauler.exe"
 Write-Host "Built $exe"

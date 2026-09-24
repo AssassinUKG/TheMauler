@@ -103,6 +103,11 @@ func applyAgentPreset(cfg *settings.Settings, pf *settings.ProfilesFile, mode Ag
 	if preset.Profile != "" {
 		if p, ok := pf.Profiles[preset.Profile]; ok && strings.TrimSpace(p.ModelID) != "" {
 			*profile = applyProvider(p, pf)
+			// Keep run metadata, reviewer passes, checkpoints, and the UI's
+			// stream-start profile aligned with the model actually selected by
+			// the agent preset. This is run-local; it does not overwrite the
+			// user's persistent chat default.
+			cfg.ActiveProfile = strings.TrimSpace(preset.Profile)
 		}
 	}
 	if strings.EqualFold(preset.Autonomy, "full") {

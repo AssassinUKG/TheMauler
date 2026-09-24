@@ -138,7 +138,20 @@ func (a *App) runPythonToolScript(parent context.Context, userCode string, timeo
 			continue
 		}
 		start := time.Now()
-		result, runErr := a.registry.Run(ctx, llm.ToolCallDef{Function: llm.FunctionCall{Name: req.Tool, Arguments: req.Args}})
+		call := llm.ToolCallDef{Function: llm.FunctionCall{Name: req.Tool, Arguments: req.Args}}
+		run := runControlFromContext(ctx)
+		controlled, controlBlock := false, ""
+		if run != nil {
+			controlled, controlBlock = a.prepareControlledTool(run, call)
+		}
+		var result string
+		var runErr error
+		if controlBlock != "" {
+			result = "control plane blocked run_script inner tool call: " + controlBlock
+			runErr = fmt.Errorf("%s", result)
+		} else {
+			result, runErr = a.registry.Run(ctx, call)
+		}
 		durMs := time.Since(start).Milliseconds()
 		status := "done"
 		resp := scriptToolResponse{OK: true, Result: result}
@@ -147,6 +160,10 @@ func (a *App) runPythonToolScript(parent context.Context, userCode string, timeo
 			failedTool = req.Tool
 			failedError = runErr.Error()
 			resp = scriptToolResponse{OK: false, Result: result, Error: runErr.Error()}
+		}
+		if run != nil {
+			run.addTool(req.Tool, trimRunText(string(req.Args)), trimRunText(result), status, durMs)
+			a.recordControlledToolOutcome(run, controlled, call, runErr)
 		}
 		a.recordLedger(ledger.Event{
 			Kind:       "run_script_tool_call",

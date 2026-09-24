@@ -38,6 +38,9 @@
   white-space: nowrap;
 }
 
+.inspector-head-actions { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.inspector-head button.inspector-close { width: 27px; padding: 0; font-size: 16px; }
+
 .inspector-head div {
   min-width: 0;
 }

@@ -13,10 +13,11 @@ import (
 var ErrEngagementNotFound = errors.New("engagement not found")
 
 type Record struct {
-	Workspace string              `json:"workspace"`
-	Workflow  WorkflowDefinition  `json:"workflow"`
-	Checklist ChecklistDefinition `json:"checklist"`
-	State     *State              `json:"state"`
+	Workspace         string                       `json:"workspace"`
+	Workflow          WorkflowDefinition           `json:"workflow"`
+	Checklist         ChecklistDefinition          `json:"checklist"`
+	State             *State                       `json:"state"`
+	EvidenceFreshness map[string]EvidenceFreshness `json:"evidence_freshness,omitempty"`
 }
 
 type Summary struct {

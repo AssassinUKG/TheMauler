@@ -102,6 +102,12 @@ Reasoning Effort still chooses its depth. **Off** selects the direct sampler and
 reasoning. Mauler only forces On for a template that declares thinking support, so an unknown or
 direct-only fine-tune is not given invented protocol capabilities.
 
+Chat also exposes this contract as a compact model/effort picker beside the composer. It does not
+approximate Qwen3.8 effort with an arbitrary token slider: the visible ladder is Profile, Direct,
+Low, Medium, and XHigh, matching the model card's supported reasoning values. Profile is the normal
+mixed agent default because it retains Mauler's bounded switch to direct sampling after repeated
+tool work; Always think is an explicit operator override for reasoning-heavy tasks.
+
 When preservation is enabled, Mauler now stores the model's separate `reasoning_content` beside the
 assistant turn and sends it back only through the local llama.cpp-compatible path. This is reasoning
 continuity, not a UI transcript setting. Older reasoning is included in token accounting and removed

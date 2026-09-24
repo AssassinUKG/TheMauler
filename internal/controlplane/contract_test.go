@@ -80,3 +80,17 @@ func TestReviseTaskContractLinksInstructionHistory(t *testing.T) {
 		t.Fatal("expected stale instruction revision to fail")
 	}
 }
+
+func TestTaskContractRepairScopeMustReferenceProtectedArtifact(t *testing.T) {
+	root := t.TempDir()
+	artifact := filepath.Join(root, "report.md")
+	_, err := NewTaskContract(ContractInput{
+		RunID: "repair", Objective: "fix report.md", WorkspaceRoot: root,
+		ProtectedArtifacts: []ArtifactBoundary{{Path: artifact, SHA256: strings.Repeat("a", 64), SourceRunID: "prior", Generation: 1}},
+		RepairScope:        []string{filepath.Join(root, "other.md")},
+		Risk:               RiskMedium, InstructionRevision: 1, CreatedAt: time.Now(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a protected finalized artifact") {
+		t.Fatalf("repair scope validation error = %v", err)
+	}
+}

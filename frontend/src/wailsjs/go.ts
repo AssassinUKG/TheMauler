@@ -39,6 +39,7 @@ export interface Settings {
     redact_secrets: boolean
     protected_paths: string[]
     active_toolset: string
+    task_routing_mode: string
     toolsets: Record<string, string[]>
     enabled_tools: Record<string, boolean>
     safe_rules: ToolSafeRule[]
@@ -46,6 +47,7 @@ export interface Settings {
   }
   agents: {
     mode_override: string
+    default_conversation_mode: 'adaptive' | 'direct' | 'agent' | string
     default_autonomy: string
     offline_only: boolean
     max_tool_calls: number
@@ -70,6 +72,11 @@ export interface Settings {
     workspace_dir: string
     open_folders: WorkspaceFolder[]
     workspace_preferences: WorkspacePreference[]
+    repository_index_source_sets: RepositoryIndexSourceSet[]
+    scratch_workspace_dir: string
+    scratch_workspace_name: string
+    scratch_workspace_created_unix: number
+    scratch_workspace_review_unix: number
     lab: LabContext
     active_lab_profile: string
     lab_profiles: LabProfile[]
@@ -182,6 +189,201 @@ export interface ServiceHealth {
   metadata?: Record<string, string>
 }
 
+export interface StaleRunEventRejection {
+  event: string
+  run_id?: string
+  generation?: number
+  run_epoch?: number
+  conversation_epoch: number
+  rejected_at: string
+}
+
+export interface RunEventDiagnostics {
+  conversation_epoch: number
+  stale_events_dropped: number
+  last_rejection: StaleRunEventRejection
+}
+
+export interface RepositoryIndexOmission {
+  path: string
+  status: string
+  detail?: string
+  size?: number
+}
+
+export interface RepositoryIndexStatus {
+  available: boolean
+  active: boolean
+  workspace: string
+  generation_id?: string
+  manifest_digest?: string
+  policy_digest?: string
+  status: string
+  complete: boolean
+  files_seen: number
+  files_indexed: number
+  bytes_read: number
+  chunk_count: number
+  omission_count: number
+  omissions_truncated: boolean
+  omissions: RepositoryIndexOmission[]
+  error?: string
+  started_at?: string
+  completed_at?: string
+	indexing: boolean
+	can_cancel: boolean
+	current_path?: string
+	progress_files_seen: number
+	progress_files_indexed: number
+	progress_bytes_read: number
+	progress_chunk_count: number
+	sources: RepositoryIndexSource[]
+	refresh_mode?: string
+	files_reused: number
+	files_changed: number
+	files_deleted: number
+	watch_enabled: boolean
+	watch_state?: string
+	watch_error?: string
+	watch_last_check?: string
+	health: string
+	health_detail: string
+}
+
+export interface ReviewShardPreview {
+  id: string
+  digest: string
+  ordinal: number
+  file_count: number
+  chunk_count: number
+  bytes: number
+  paths: string[]
+  languages?: string[]
+  evidence_digest: string
+}
+
+export interface SplitReviewPreview {
+  version: number
+  generation_id: string
+  manifest_digest: string
+  plan_digest: string
+  requested_shards: number
+  shard_count: number
+  file_count: number
+  chunk_count: number
+  bytes: number
+  shards: ReviewShardPreview[]
+}
+
+export interface ReviewFindingEvidence {
+  chunk_id: string
+  file_sha256: string
+  start_line: number
+  end_line: number
+}
+
+export interface MergedReviewFinding {
+  id?: string
+  claim: string
+  severity: string
+  confidence: string
+  evidence: ReviewFindingEvidence[]
+  follow_up?: string
+  state: string
+  evidence_valid: boolean
+  shard_ids: string[]
+  claimants: string[]
+}
+
+export interface ReviewConflictClaim {
+  claim_id: string
+  claim: string
+  severity: string
+  confidence: string
+  shard_ids: string[]
+  claimants: string[]
+}
+
+export interface RepositoryReviewConflictStatus {
+  id: string
+  evidence_digest: string
+  evidence: ReviewFindingEvidence[]
+  claims: ReviewConflictClaim[]
+  state: string
+  attempt: number
+  checker_id?: string
+  verdict?: string
+  supported_claim_ids: string[]
+  reason?: string
+  error?: string
+}
+
+export interface RepositoryReviewShardStatus {
+  id: string
+  digest: string
+  ordinal: number
+  state: string
+  attempt: number
+  claimant_id?: string
+  file_count: number
+  chunk_count: number
+  bytes: number
+  paths: string[]
+  findings: number
+  error?: string
+}
+
+export interface RepositoryReviewStatus {
+  available: boolean
+  workspace: string
+  review_id?: string
+  generation_id?: string
+  manifest_digest?: string
+  plan_digest?: string
+  requested_shards: number
+  state: string
+  phase?: string
+  can_cancel: boolean
+  can_resume: boolean
+  current_shard?: string
+  current_conflict?: string
+  started_at?: string
+  completed_at?: string
+  shards: RepositoryReviewShardStatus[]
+  findings: MergedReviewFinding[]
+  accepted: number
+  rejected: number
+  duplicates: number
+  conflicts: number
+  conflict_checks: RepositoryReviewConflictStatus[]
+  error?: string
+}
+
+export interface BrowserWorkflowStatus {
+  available: boolean
+  tool_enabled: boolean
+  active: boolean
+  visible: boolean
+  paused: boolean
+  state: string
+  url?: string
+  title?: string
+  last_action?: string
+  last_error?: string
+  updated_at?: string
+  guidance?: string
+  active_tab?: string
+  tab_count?: number
+}
+
+export interface BrowserCheckpointStatus {
+  name: string
+  url: string
+  title?: string
+  visible: boolean
+  created_at: string
+}
+
 export interface JHUTBrowserReport {
   pass: boolean; url: string; desktop_screenshot: string; mobile_screenshot: string
   canvas_width: number; canvas_height: number; pixel_variance: number; pixel_coverage: number
@@ -246,6 +448,17 @@ export interface WorkspaceFolder {
 export interface WorkspacePreference {
   path: string
   agent_mode: string
+}
+
+export interface RepositoryIndexSource {
+  path: string
+  kind: 'file' | 'folder' | string
+}
+
+export interface RepositoryIndexSourceSet {
+  workspace: string
+  sources: RepositoryIndexSource[]
+  watch: boolean
 }
 
 export interface ContextInspectionRange {
@@ -326,6 +539,7 @@ export interface AgentDefinition {
   name: string
   description: string
   version: string
+  default_profile: string
   default_toolset: string
   default_autonomy: string
   planning_only: boolean
@@ -509,8 +723,52 @@ export interface HistoryStats {
 export interface SessionChatMessage {
   role: ChatRole
   content: string
+  thinking?: string
+  tool_name?: string
+  tool_call_id?: string
   images?: string[]
   attachments?: ChatAttachment[]
+}
+
+export interface SessionSummary {
+  name: string
+  updated_unix: number
+  message_count: number
+  size_bytes: number
+  status: 'saved' | 'needs-review' | string
+  tags: string[]
+  conversation_mode: 'adaptive' | 'direct' | 'agent' | string
+}
+
+export interface ScratchWorkspaceStatus {
+  active: boolean
+  exists: boolean
+  review_due: boolean
+  name?: string
+  path?: string
+  created_unix?: number
+  review_after_unix?: number
+  retention_policy: string
+  promotion_eligible: boolean
+}
+
+export interface SessionRepairAction {
+  phase: number
+  action: string
+  index: number
+  detail?: string
+}
+
+export interface SessionRepairReport {
+  name: string
+  status: 'clean' | 'repaired' | 'rejected' | string
+  valid: boolean
+  before_messages: number
+  after_messages: number
+  actions: SessionRepairAction[]
+  diagnostic?: string
+  applied: boolean
+  backup_path?: string
 }
 
 export interface ChatAttachment {
@@ -618,6 +876,8 @@ export interface TaskContract {
   constraints?: string[]
   protected_resources?: string[]
   allowed_mutations?: Array<{ root: string; access: string }>
+  protected_artifacts?: Array<{ path: string; sha256: string; source_run_id: string; generation: number }>
+  repair_scope?: string[]
   acceptance_checks?: TaskContractCheck[]
   required_evidence?: string[]
   risk: 'low' | 'medium' | 'high'
@@ -648,6 +908,9 @@ export interface RunControlState {
 
 export interface TaskRun {
   id: string
+  generation?: number
+  conversation_epoch?: number
+  parent_run_id?: string
   prompt: string
   mode: string
   profile: string
@@ -669,8 +932,24 @@ export interface TaskRun {
   total_tokens?: number
   summary?: string
   response?: string
+  finalized_artifacts?: FinalizedArtifact[]
   tools?: TaskToolEvent[]
   events?: TaskRunEvent[]
+}
+
+export interface FinalizedArtifact {
+  path: string
+  sha256: string
+  size: number
+  run_id: string
+  generation: number
+  conversation_epoch?: number
+  evidence_id: string
+  verifier_evidence_ids?: string[]
+  finalized_at: string
+  fresh: boolean
+  freshness: 'fresh' | 'changed' | 'missing' | string
+  current_sha256?: string
 }
 
 export interface ChannelAttachment {
@@ -868,10 +1147,15 @@ export interface StorageItem {
 
 export interface RunCheckpoint {
   run_id: string
+  name?: string
+  conversation_name?: string
+  conversation_mode?: 'adaptive' | 'direct' | 'agent' | string
+  explicit?: boolean
   prompt: string
   mode: string
   profile: string
   messages: unknown[]
+  chat_messages?: SessionChatMessage[]
   run: TaskRun
   saved_at: string
 }
@@ -1085,11 +1369,19 @@ export interface EngagementEvidence {
   path?: string
   sha256?: string
   size?: number
+  fingerprint_kind?: 'file_sha256' | 'ledger_payload_sha256'
   agent_composed: boolean
   description: string
   run: number
   created_by: { id: string; alias?: string }
   created_at: string
+}
+
+export interface EngagementEvidenceFreshness {
+  state: 'fresh' | 'stale' | 'immutable' | 'unverifiable'
+  detail?: string
+  current_sha256?: string
+  current_size?: number
 }
 
 export interface EngagementFinding {
@@ -1171,6 +1463,7 @@ export interface EngagementRecord {
   workflow: { id: string; version?: string; name: string; checklist?: string; phases: unknown[]; digest?: string }
   checklist: { id: string; version?: string; name: string; items: Array<{ id: string; title: string; scope: string; category?: string; category_name?: string; verified?: boolean }>; digest?: string }
   state: EngagementState
+  evidence_freshness?: Record<string, EngagementEvidenceFreshness>
 }
 
 export interface EngagementNextAction {
@@ -1300,6 +1593,18 @@ export const GetHistoryStats = (): Promise<HistoryStats> =>
 export const ClearHistory = (): Promise<void> =>
   call('app.App.ClearHistory')
 
+export const StartConversation = (title: string): Promise<string> =>
+  call('app.App.StartConversation', title)
+
+export const GetConversationMode = (): Promise<string> =>
+  call('app.App.GetConversationMode')
+
+export const SetConversationMode = (sessionName: string, mode: string): Promise<void> =>
+  call('app.App.SetConversationMode', sessionName, mode)
+
+export const SetSavedConversationMode = (sessionName: string, mode: string): Promise<void> =>
+  call('app.App.SetSavedConversationMode', sessionName, mode)
+
 export const SaveSession = (name: string): Promise<void> =>
   call('app.App.SaveSession', name)
 
@@ -1309,8 +1614,23 @@ export const LoadSession = (name: string): Promise<SessionChatMessage[]> =>
 export const ListSessions = (): Promise<string[]> =>
   call('app.App.ListSessions')
 
+export const ListSessionSummaries = (): Promise<SessionSummary[]> =>
+  call('app.App.ListSessionSummaries')
+
+export const RenameSession = (oldName: string, newName: string): Promise<void> =>
+  call('app.App.RenameSession', oldName, newName)
+
+export const SetSessionTags = (name: string, tags: string[]): Promise<void> =>
+  call('app.App.SetSessionTags', name, tags)
+
 export const DeleteSession = (name: string): Promise<void> =>
   call('app.App.DeleteSession', name)
+
+export const InspectSessionRepair = (name: string): Promise<SessionRepairReport> =>
+  call('app.App.InspectSessionRepair', name)
+
+export const RepairSession = (name: string): Promise<SessionRepairReport> =>
+  call('app.App.RepairSession', name)
 
 export const ListMemory = (): Promise<MemoryEntry[]> =>
   call('app.App.ListMemory')
@@ -1486,6 +1806,78 @@ export const ListKokoroVoices = (): Promise<string[]> =>
 export const GetServiceHealth = (): Promise<ServiceHealth[]> =>
   call('app.App.GetServiceHealth')
 
+export const GetRunEventDiagnostics = (): Promise<RunEventDiagnostics> =>
+  call('app.App.GetRunEventDiagnostics')
+
+export const GetRepositoryIndexStatus = (): Promise<RepositoryIndexStatus> =>
+  call('app.App.GetRepositoryIndexStatus')
+
+export const PreviewRepositorySplitReview = (shardCount: number): Promise<SplitReviewPreview> =>
+  call('app.App.PreviewRepositorySplitReview', shardCount)
+
+export const GetRepositoryReviewStatus = (): Promise<RepositoryReviewStatus> =>
+  call('app.App.GetRepositoryReviewStatus')
+
+export const StartRepositorySplitReview = (shardCount: number): Promise<RepositoryReviewStatus> =>
+  call('app.App.StartRepositorySplitReview', shardCount)
+
+export const CancelRepositorySplitReview = (): Promise<RepositoryReviewStatus> =>
+  call('app.App.CancelRepositorySplitReview')
+
+export const ResumeRepositorySplitReview = (): Promise<RepositoryReviewStatus> =>
+  call('app.App.ResumeRepositorySplitReview')
+
+export const RetryRepositoryReviewShard = (shardID: string): Promise<RepositoryReviewStatus> =>
+  call('app.App.RetryRepositoryReviewShard', shardID)
+
+export const IndexWorkspaceRepository = (): Promise<RepositoryIndexStatus> =>
+  call('app.App.IndexWorkspaceRepository')
+
+export const RefreshWorkspaceRepositoryIndex = (): Promise<RepositoryIndexStatus> =>
+  call('app.App.RefreshWorkspaceRepositoryIndex')
+
+export const CancelWorkspaceRepositoryIndex = (): Promise<RepositoryIndexStatus> =>
+  call('app.App.CancelWorkspaceRepositoryIndex')
+
+export const SelectRepositoryIndexFolder = (): Promise<RepositoryIndexStatus> =>
+  call('app.App.SelectRepositoryIndexFolder')
+
+export const SelectRepositoryIndexFiles = (): Promise<RepositoryIndexStatus> =>
+  call('app.App.SelectRepositoryIndexFiles')
+
+export const RemoveRepositoryIndexSource = (path: string): Promise<RepositoryIndexStatus> =>
+  call('app.App.RemoveRepositoryIndexSource', path)
+
+export const SetRepositoryIndexWatch = (enabled: boolean): Promise<RepositoryIndexStatus> =>
+  call('app.App.SetRepositoryIndexWatch', enabled)
+
+export const GetBrowserWorkflowStatus = (): Promise<BrowserWorkflowStatus> =>
+  call('app.App.GetBrowserWorkflowStatus')
+
+export const StartBrowserWorkflow = (url: string): Promise<BrowserWorkflowStatus> =>
+  call('app.App.StartBrowserWorkflow', url)
+
+export const PauseBrowserWorkflow = (): Promise<BrowserWorkflowStatus> =>
+  call('app.App.PauseBrowserWorkflow')
+
+export const TakeOverBrowserWorkflow = (): Promise<BrowserWorkflowStatus> =>
+  call('app.App.TakeOverBrowserWorkflow')
+
+export const ResumeBrowserWorkflow = (): Promise<BrowserWorkflowStatus> =>
+  call('app.App.ResumeBrowserWorkflow')
+
+export const ListBrowserCheckpoints = (): Promise<BrowserCheckpointStatus[]> =>
+  call('app.App.ListBrowserCheckpoints')
+
+export const SaveBrowserWorkflowCheckpoint = (name: string): Promise<BrowserCheckpointStatus> =>
+  call('app.App.SaveBrowserWorkflowCheckpoint', name)
+
+export const ResumeBrowserWorkflowCheckpoint = (name: string): Promise<BrowserWorkflowStatus> =>
+  call('app.App.ResumeBrowserWorkflowCheckpoint', name)
+
+export const StopBrowserWorkflow = (): Promise<BrowserWorkflowStatus> =>
+  call('app.App.StopBrowserWorkflow')
+
 export const InterruptShellTool = (): Promise<void> =>
   call('app.App.InterruptShellTool')
 
@@ -1512,6 +1904,18 @@ export const GetWorkingDir = (): Promise<string> =>
 
 export const SetWorkingDir = (dir: string): Promise<void> =>
   call('app.App.SetWorkingDir', dir)
+
+export const CreateScratchWorkspace = (name: string): Promise<ScratchWorkspaceStatus> =>
+  call('app.App.CreateScratchWorkspace', name)
+
+export const CreateWorkspaceProject = (name: string, defaultParent: string): Promise<string> =>
+  call('app.App.CreateWorkspaceProject', name, defaultParent)
+
+export const GetScratchWorkspaceStatus = (): Promise<ScratchWorkspaceStatus> =>
+  call('app.App.GetScratchWorkspaceStatus')
+
+export const PromoteScratchWorkspace = (name: string): Promise<ScratchWorkspaceStatus> =>
+  call('app.App.PromoteScratchWorkspace', name)
 
 export const SelectWorkingDir = (defaultDir: string): Promise<string> =>
   call('app.App.SelectWorkingDir', defaultDir)
@@ -1789,8 +2193,14 @@ export const RunGrammarToolArgsProbe = (profileName: string): Promise<GrammarToo
 export const ListResumableRuns = (): Promise<RunCheckpoint[]> =>
   call('app.App.ListResumableRuns')
 
+export const SaveConversationCheckpoint = (name: string, conversationName: string): Promise<RunCheckpoint> =>
+  call('app.App.SaveConversationCheckpoint', name, conversationName)
+
 export const ResumeRun = (runID: string): Promise<void> =>
   call('app.App.ResumeRun', runID)
+
+export const DeleteResumableRun = (runID: string): Promise<void> =>
+  call('app.App.DeleteResumableRun', runID)
 
 // User profile bindings
 export const GetUserProfile = (): Promise<string> =>
