@@ -1,0 +1,18 @@
+{
+  "updated_at": "2026-11-17T20:31:53Z",
+  "profile_name": "local-qualification",
+  "provider_name": "local-qualification",
+  "backend": "llamacpp",
+  "base_url": "http://127.0.0.1:8804/v1",
+  "model_id": "RVN-Q4_K_M-multilingual-mtp.gguf",
+  "model_hash": "3b84cb4774ed03a0",
+  "adapter": "qwen38",
+  "tool_protocol": "native-openai",
+  "ctx_tokens": 35072,
+  "thinking": false,
+  "preserve_thinking": false,
+  "kv_cache_precision": "f16",
+  "kv_cache_type_k": "f16",
+  "kv_cache_type_v": "f16",
+  "launch_signature": "local-qualification | local-qualification | llamacpp | http://127.0.0.1:8804/v1 | RVN-Q4_K_M-multilingual-mtp.gguf |  | f16 | f16 | f16 |  | "
+}

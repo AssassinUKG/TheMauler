@@ -105,6 +105,16 @@ var builtinAgentDefinitions = []AgentDefinition{
 	{ID: "ops", Name: "Ops", Description: "Operate inside an authorised target with evidence gathering.", Version: "1", DefaultToolset: "ops-lean", DefaultAutonomy: "balanced", Builtin: true},
 }
 
+func builtinAgentDefinition(name string) (AgentDefinition, bool) {
+	name = strings.TrimSpace(name)
+	for _, definition := range builtinAgentDefinitions {
+		if strings.EqualFold(name, definition.Name) || strings.EqualFold(name, definition.ID) {
+			return definition, true
+		}
+	}
+	return AgentDefinition{}, false
+}
+
 // ListAgentDefinitions returns one ordered source of truth for Chat, AgentPanel,
 // Settings, Telegram, and future workspace selectors.
 func (a *App) ListAgentDefinitions() []AgentDefinition {

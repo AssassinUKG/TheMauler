@@ -634,3 +634,51 @@ port = 8802
 		t.Fatalf("port=%q ok=%v, want 8802 true", port, ok)
 	}
 }
+
+func TestProviderAuthenticationDoctorReportsPresenceWithoutSecretValue(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	const secret = "doctor-must-never-return-this-secret"
+	if err := settings.SaveProviderAPIKey("inference-bridge-test", secret); err != nil {
+		t.Fatal(err)
+	}
+	var checks []DoctorCheck
+	addProviderAuthenticationCheck(func(check DoctorCheck) { checks = append(checks, check) }, settings.Provider{
+		Name: "inference-bridge-test", Backend: "llamacpp", BaseURL: "http://127.0.0.1:8804/v1",
+	})
+	if len(checks) != 1 || checks[0].Status != "ok" || !strings.Contains(checks[0].Detail, "local provider secret store") {
+		t.Fatalf("provider authentication check = %#v", checks)
+	}
+	raw, _ := json.Marshal(checks)
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("Doctor exposed provider secret: %s", raw)
+	}
+}
+
+func TestInferenceBridgePortCheckPrefersLiveLocalConfigOverStaleCandidate(t *testing.T) {
+	local := t.TempDir()
+	roaming := t.TempDir()
+	t.Setenv("LOCALAPPDATA", local)
+	t.Setenv("APPDATA", roaming)
+	writeDoctorPortConfig := func(root string, port int) {
+		path := filepath.Join(root, "InferenceBridge", "inference-bridge.toml")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("[server]\nport = %d\n", port)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeDoctorPortConfig(local, 8804)
+	writeDoctorPortConfig(roaming, 8800)
+
+	var checks []DoctorCheck
+	addInferenceBridgePortConfigCheck(func(check DoctorCheck) { checks = append(checks, check) }, settings.Provider{
+		Name: "inference-bridge", Backend: "llamacpp", BaseURL: "http://127.0.0.1:8804/v1",
+	})
+	if len(checks) != 1 || checks[0].Status != "ok" || !strings.Contains(checks[0].Message, "port 8804") {
+		t.Fatalf("port check = %#v", checks)
+	}
+	if !strings.Contains(checks[0].Detail, "inactive candidate") || !strings.Contains(checks[0].Detail, "server.port=8800") {
+		t.Fatalf("stale candidate should be visible but non-authoritative: %#v", checks[0])
+	}
+}

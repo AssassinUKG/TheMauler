@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -96,6 +97,41 @@ func isLowSignalArtLine(line string) bool {
 }
 
 var ffufInvocationRE = regexp.MustCompile(`(^|[\s;&|(])ffuf(\s+)`)
+
+var nmapInvocationRE = regexp.MustCompile(`(?i)(^|[\s;&|(])(?:sudo\s+)?(?:[^\s;&|]*/)?nmap(?:\.exe)?(?:\s|$)`)
+
+// validateScanCommand rejects an ambiguous nmap scope before any network work
+// starts. nmap accepts both --top-ports and -p on the same command line but one
+// selector wins, which can make a nominal full-port scan silently cover only the
+// top ports. A saved scan from such a command is not reliable completion evidence.
+func validateScanCommand(command string) error {
+	if !nmapInvocationRE.MatchString(command) {
+		return nil
+	}
+	tokens := strings.Fields(command)
+	hasTopPorts := false
+	hasExplicitPorts := false
+	for i, token := range tokens {
+		trimmed := strings.Trim(token, `"'`)
+		lower := strings.ToLower(trimmed)
+		switch {
+		case lower == "--top-ports" || strings.HasPrefix(lower, "--top-ports="):
+			hasTopPorts = true
+		case lower == "-p" || lower == "--ports":
+			if i+1 < len(tokens) {
+				hasExplicitPorts = true
+			}
+		case strings.HasPrefix(trimmed, "-p"):
+			hasExplicitPorts = true
+		case strings.HasPrefix(lower, "--ports="):
+			hasExplicitPorts = true
+		}
+	}
+	if hasTopPorts && hasExplicitPorts {
+		return fmt.Errorf("nmap command has conflicting port scopes: choose either --top-ports N for a bounded scan or -p-/-p 1-65535 for a full TCP scan, not both")
+	}
+	return nil
+}
 
 // ApplyScanToolHygiene quiets noisy scan tools at the source so their output is
 // findings-only. Currently: ffuf gets `-s` (silent: no banner, no progress, just

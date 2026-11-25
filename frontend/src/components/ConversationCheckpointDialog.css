@@ -50,6 +50,7 @@
 .conversation-checkpoint-list article strong { color: var(--text-bright); font-size: 11px; }
 .conversation-checkpoint-list article span { color: var(--text-muted); font: 8px var(--font-mono); }
 .conversation-checkpoint-list article p { margin: 0; color: var(--text-dim); font-size: 10px; }
+.conversation-checkpoint-list article p[role="status"] { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; color: var(--text-bright); }
 .conversation-checkpoint-list article > div:last-child { display: flex; gap: 6px; }
 .conversation-checkpoint-list article button { min-height: 31px; }
 .conversation-checkpoint-list article button.danger { color: #fca5a5; }

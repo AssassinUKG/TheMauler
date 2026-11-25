@@ -38,10 +38,11 @@ func runIsGateable(run TaskRun, mode AgentMode) bool {
 	if runHasFileMutation(run) {
 		return true
 	}
-	if promptLooksReadOnly(run.Prompt) {
+	trustedPrompt := taskRoutingPrompt(run)
+	if promptLooksReadOnly(trustedPrompt) {
 		return false
 	}
-	return promptImpliesConcreteDeliverable(run.Prompt)
+	return promptImpliesConcreteDeliverable(trustedPrompt)
 }
 
 func reviewGateableMode(modeName string) bool {
@@ -55,6 +56,9 @@ func reviewGateableMode(modeName string) bool {
 
 func promptLooksReadOnly(prompt string) bool {
 	lower := strings.ToLower(prompt)
+	if promptRequestsTextComposition(prompt) {
+		return true
+	}
 	if explicitlyForbidsToolUse(prompt) {
 		return true
 	}
@@ -168,6 +172,9 @@ func promptClearlyRequestsPlanOutput(lower string) bool {
 
 func promptAlsoRequestsWorkspaceMutation(lower string) bool {
 	lower = strings.ToLower(strings.TrimSpace(lower))
+	if promptHasNamedFileMutation(lower) {
+		return true
+	}
 	return hasAny(lower,
 		"then fix", "and fix", "also fix", "please fix",
 		"then repair", "and repair", "also repair", "please repair",

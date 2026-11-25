@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -114,6 +115,16 @@ func snapshotElementRef(t *testing.T, snapshot, name string) string {
 		}
 	}
 	t.Fatalf("snapshot element %q not found: %#v", name, elements)
+	return ""
+}
+
+func browserEvidenceField(output, name string) string {
+	prefix := name + ": "
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
 	return ""
 }
 
@@ -274,6 +285,101 @@ func TestBrowserWorkflowStableRefsUploadDownloadReliabilityPass5(t *testing.T) {
 		if _, err := CloseBrowserWorkflow(owner); err != nil {
 			t.Fatalf("pass %d close: %v", pass, err)
 		}
+	}
+}
+
+func TestBrowserScreenshotMultiSizeEvidenceAndFreshness(t *testing.T) {
+	requireBrowserRuntime(t)
+	server, _, _, _ := browserFixture(t)
+	defer server.Close()
+	root := t.TempDir()
+	owner := "responsive-screenshot-evidence"
+	ctx := WithBrowserWorkspaceRoot(WithBrowserSessionOwner(context.Background(), owner), root)
+	t.Cleanup(func() { _, _ = CloseBrowserWorkflow(owner) })
+	runBrowserTool(t, &BrowserOpen{}, ctx, fmt.Sprintf(`{"url":%q}`, server.URL+"/files"))
+
+	sizes := [][2]int{{375, 667}, {1024, 768}, {1440, 900}}
+	paths := make([]string, 0, len(sizes))
+	for _, size := range sizes {
+		out := runBrowserTool(t, &BrowserScreenshot{}, ctx, fmt.Sprintf(`{"viewport_width":%d,"viewport_height":%d,"full_page":false}`, size[0], size[1]))
+		relative := browserEvidenceField(out, "workspace_file")
+		if relative == "" || browserEvidenceField(out, "sha256") == "" || browserEvidenceField(out, "manifest_file") == "" {
+			t.Fatalf("screenshot evidence is incomplete: %s", out)
+		}
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, err := png.DecodeConfig(file)
+		_ = file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if config.Width != size[0] || config.Height != size[1] {
+			t.Fatalf("screenshot dimensions = %dx%d, want %dx%d", config.Width, config.Height, size[0], size[1])
+		}
+		paths = append(paths, path)
+	}
+
+	records, err := ListBrowserEvidence(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != len(sizes) {
+		t.Fatalf("browser evidence records = %d, want %d: %#v", len(records), len(sizes), records)
+	}
+	for _, record := range records {
+		if !record.Fresh || record.SHA256 == "" || record.CurrentSHA256 != record.SHA256 || record.Kind != "screenshot" {
+			t.Fatalf("fresh screenshot evidence = %#v", record)
+		}
+		if strings.Contains(record.URL, "?") || strings.Contains(record.URL, "#") {
+			t.Fatalf("evidence URL was not sanitized: %q", record.URL)
+		}
+	}
+
+	if err := os.WriteFile(paths[0], []byte("changed after capture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records, err = ListBrowserEvidence(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := 0
+	for _, record := range records {
+		if !record.Fresh {
+			stale++
+			if record.CurrentSHA256 == record.SHA256 || !strings.Contains(record.ReviewDetail, "differ") {
+				t.Fatalf("stale evidence review did not preserve the captured fingerprint: %#v", record)
+			}
+		}
+	}
+	if stale != 1 {
+		t.Fatalf("stale screenshot records = %d, want 1: %#v", stale, records)
+	}
+}
+
+func TestBrowserEvidenceReviewRejectsManifestPathEscape(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".mauler", "browser-evidence", "owner")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := BrowserEvidenceRecord{
+		Version: browserEvidenceVersion, ID: "browser-path-escape", Kind: "screenshot",
+		CapturedAt: time.Now().UTC().Format(time.RFC3339Nano), WorkspaceFile: "../../../../outside.png",
+		SHA256: strings.Repeat("0", 64), Size: 10, Width: 320, Height: 240,
+	}
+	raw, _ := json.Marshal(record)
+	if err := os.WriteFile(filepath.Join(dir, record.ID+".json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records, err := ListBrowserEvidence(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Fresh || !strings.Contains(records[0].ReviewDetail, "escapes") {
+		t.Fatalf("path escape manifest review = %#v", records)
 	}
 }
 

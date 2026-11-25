@@ -13,7 +13,8 @@ const readOnlyAnswerFallbackLimit = 4000
 // to Chat. It is intentionally narrow: mutation runs, failed tools, project
 // verification commands, and prompt-injection-guarded output are never copied.
 func successfulReadOnlyToolAnswer(run TaskRun) string {
-	if !promptLooksReadOnly(run.Prompt) || runHasFileMutation(run) {
+	trustedPrompt := taskRoutingPrompt(run)
+	if !promptLooksReadOnly(trustedPrompt) || runHasFileMutation(run) {
 		return ""
 	}
 
@@ -34,7 +35,7 @@ func successfulReadOnlyToolAnswer(run TaskRun) string {
 		if body == "" {
 			continue
 		}
-		score := scoreReadOnlyAnswerCandidate(run.Prompt, body)
+		score := scoreReadOnlyAnswerCandidate(trustedPrompt, body)
 		if score >= best.score {
 			best = candidate{body: body, score: score}
 		}

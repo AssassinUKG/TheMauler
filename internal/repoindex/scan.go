@@ -66,6 +66,7 @@ type ExtractorPolicy struct {
 	ChunkBytes        int   `json:"chunk_bytes"`
 	MaxExpandedBytes  int64 `json:"max_expanded_bytes"`
 	MaxArchiveEntries int   `json:"max_archive_entries"`
+	MaxOCRPages       int   `json:"max_ocr_pages"`
 	TimeoutMillis     int   `json:"timeout_millis"`
 }
 
@@ -165,6 +166,7 @@ func DefaultPolicy(roots ...string) IndexPolicy {
 			ChunkBytes:        32 * 1024,
 			MaxExpandedBytes:  16 * 1024 * 1024,
 			MaxArchiveEntries: 4096,
+			MaxOCRPages:       32,
 			TimeoutMillis:     15_000,
 		},
 	}
@@ -456,6 +458,12 @@ func normalizePolicy(policy IndexPolicy) (IndexPolicy, []string, error) {
 	}
 	if policy.ExtractorPolicy.MaxArchiveEntries > 100_000 {
 		policy.ExtractorPolicy.MaxArchiveEntries = 100_000
+	}
+	if policy.ExtractorPolicy.MaxOCRPages <= 0 {
+		policy.ExtractorPolicy.MaxOCRPages = 32
+	}
+	if policy.ExtractorPolicy.MaxOCRPages > 200 {
+		policy.ExtractorPolicy.MaxOCRPages = 200
 	}
 	if policy.ExtractorPolicy.TimeoutMillis <= 0 {
 		policy.ExtractorPolicy.TimeoutMillis = 15_000

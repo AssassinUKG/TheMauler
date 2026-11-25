@@ -1459,6 +1459,38 @@ export namespace app {
 		    return a;
 		}
 	}
+	export class NanoCyberHealth {
+	    enabled: boolean;
+	    compatible: boolean;
+	    endpoint?: string;
+	    api_version?: string;
+	    credential_configured: boolean;
+	    status: string;
+	    summary: string;
+	    detail?: string;
+	    capabilities?: string[];
+	    environment_profiles?: string[];
+	    lease_schema_version?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new NanoCyberHealth(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.compatible = source["compatible"];
+	        this.endpoint = source["endpoint"];
+	        this.api_version = source["api_version"];
+	        this.credential_configured = source["credential_configured"];
+	        this.status = source["status"];
+	        this.summary = source["summary"];
+	        this.detail = source["detail"];
+	        this.capabilities = source["capabilities"];
+	        this.environment_profiles = source["environment_profiles"];
+	        this.lease_schema_version = source["lease_schema_version"];
+	    }
+	}
 	export class ProfileBenchmarkResult {
 	    status: string;
 	    id?: string;
@@ -1832,7 +1864,10 @@ export namespace app {
 	    conversation_epoch?: number;
 	    parent_run_id?: string;
 	    prompt: string;
+	    routing_prompt?: string;
 	    mode: string;
+	    agent_definition_id?: string;
+	    agent_definition_version?: string;
 	    profile: string;
 	    model?: string;
 	    context_packet_class?: string;
@@ -1868,7 +1903,10 @@ export namespace app {
 	        this.conversation_epoch = source["conversation_epoch"];
 	        this.parent_run_id = source["parent_run_id"];
 	        this.prompt = source["prompt"];
+	        this.routing_prompt = source["routing_prompt"];
 	        this.mode = source["mode"];
+	        this.agent_definition_id = source["agent_definition_id"];
+	        this.agent_definition_version = source["agent_definition_version"];
 	        this.profile = source["profile"];
 	        this.model = source["model"];
 	        this.context_packet_class = source["context_packet_class"];
@@ -1916,6 +1954,8 @@ export namespace app {
 	    role: string;
 	    content: string;
 	    thinking?: string;
+	    delivery_status?: string;
+	    stop_reason?: string;
 	    tool_name?: string;
 	    tool_call_id?: string;
 	    images?: string[];
@@ -1930,6 +1970,8 @@ export namespace app {
 	        this.role = source["role"];
 	        this.content = source["content"];
 	        this.thinking = source["thinking"];
+	        this.delivery_status = source["delivery_status"];
+	        this.stop_reason = source["stop_reason"];
 	        this.tool_name = source["tool_name"];
 	        this.tool_call_id = source["tool_call_id"];
 	        this.images = source["images"];
@@ -1967,6 +2009,8 @@ export namespace app {
 	    chat_messages?: SessionChatMessage[];
 	    run: TaskRun;
 	    saved_at: string;
+	    recovery_version?: number;
+	    resume_blocked_reason?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RunCheckpoint(source);
@@ -1986,6 +2030,8 @@ export namespace app {
 	        this.chat_messages = this.convertValues(source["chat_messages"], SessionChatMessage);
 	        this.run = this.convertValues(source["run"], TaskRun);
 	        this.saved_at = source["saved_at"];
+	        this.recovery_version = source["recovery_version"];
+	        this.resume_blocked_reason = source["resume_blocked_reason"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2619,12 +2665,31 @@ export namespace checkpacks {
 
 export namespace controlplane {
 	
+	export class ExactFileExpectation {
+	    path: string;
+	    sha256: string;
+	    size: number;
+	    exclusive: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExactFileExpectation(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.sha256 = source["sha256"];
+	        this.size = source["size"];
+	        this.exclusive = source["exclusive"];
+	    }
+	}
 	export class AcceptanceCheck {
 	    id: string;
 	    description: string;
 	    verifier: string;
 	    blocking: boolean;
 	    evidence_kinds?: string[];
+	    exact_file?: ExactFileExpectation;
 	
 	    static createFrom(source: any = {}) {
 	        return new AcceptanceCheck(source);
@@ -2637,7 +2702,26 @@ export namespace controlplane {
 	        this.verifier = source["verifier"];
 	        this.blocking = source["blocking"];
 	        this.evidence_kinds = source["evidence_kinds"];
+	        this.exact_file = this.convertValues(source["exact_file"], ExactFileExpectation);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class ArtifactBoundary {
 	    path: string;
@@ -2673,6 +2757,7 @@ export namespace controlplane {
 	        this.kind = source["kind"];
 	    }
 	}
+	
 	export class MachineState {
 	    version: number;
 	    contract_digest: string;
@@ -4041,6 +4126,8 @@ export namespace llm {
 	    tool_call_id?: string;
 	    tool_calls?: ToolCallDef[];
 	    name?: string;
+	    delivery_status?: string;
+	    stop_reason?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Message(source);
@@ -4056,6 +4143,8 @@ export namespace llm {
 	        this.tool_call_id = source["tool_call_id"];
 	        this.tool_calls = this.convertValues(source["tool_calls"], ToolCallDef);
 	        this.name = source["name"];
+	        this.delivery_status = source["delivery_status"];
+	        this.stop_reason = source["stop_reason"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -4077,11 +4166,52 @@ export namespace llm {
 		}
 	}
 	
+	export class ModelArchitecture {
+	    input_modalities?: string[];
+	    output_modalities?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelArchitecture(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.input_modalities = source["input_modalities"];
+	        this.output_modalities = source["output_modalities"];
+	    }
+	}
+	export class ModelReasoningCapability {
+	    supported: boolean;
+	    separates_content: boolean;
+	    effort_values?: string[];
+	    supports_reasoning_tokens: boolean;
+	    default_effort?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelReasoningCapability(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.supported = source["supported"];
+	        this.separates_content = source["separates_content"];
+	        this.effort_values = source["effort_values"];
+	        this.supports_reasoning_tokens = source["supports_reasoning_tokens"];
+	        this.default_effort = source["default_effort"];
+	    }
+	}
 	export class ModelMetadata {
 	    id: string;
 	    context_length?: number;
 	    max_completion_tokens?: number;
 	    supported_parameters?: string[];
+	    active?: boolean;
+	    state?: string;
+	    architecture?: ModelArchitecture;
+	    reasoning?: ModelReasoningCapability;
+	    supports_vision?: boolean;
+	    vision_runtime_ready?: boolean;
+	    mmproj_status?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ModelMetadata(source);
@@ -4093,6 +4223,71 @@ export namespace llm {
 	        this.context_length = source["context_length"];
 	        this.max_completion_tokens = source["max_completion_tokens"];
 	        this.supported_parameters = source["supported_parameters"];
+	        this.active = source["active"];
+	        this.state = source["state"];
+	        this.architecture = this.convertValues(source["architecture"], ModelArchitecture);
+	        this.reasoning = this.convertValues(source["reasoning"], ModelReasoningCapability);
+	        this.supports_vision = source["supports_vision"];
+	        this.vision_runtime_ready = source["vision_runtime_ready"];
+	        this.mmproj_status = source["mmproj_status"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+
+}
+
+export namespace mcpclient {
+	
+	export class ServerStatus {
+	    id: string;
+	    name: string;
+	    transport: string;
+	    configured: boolean;
+	    connected: boolean;
+	    state: string;
+	    tool_count: number;
+	    protocol_version?: string;
+	    server_name?: string;
+	    server_version?: string;
+	    last_error?: string;
+	    updated_at?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServerStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.transport = source["transport"];
+	        this.configured = source["configured"];
+	        this.connected = source["connected"];
+	        this.state = source["state"];
+	        this.tool_count = source["tool_count"];
+	        this.protocol_version = source["protocol_version"];
+	        this.server_name = source["server_name"];
+	        this.server_version = source["server_version"];
+	        this.last_error = source["last_error"];
+	        this.updated_at = source["updated_at"];
 	    }
 	}
 
@@ -4971,6 +5166,75 @@ export namespace settings {
 	        this.max_runs = source["max_runs"];
 	    }
 	}
+	export class MCPServerConfig {
+	    id: string;
+	    name: string;
+	    enabled: boolean;
+	    transport: string;
+	    command: string;
+	    args: string[];
+	    working_dir: string;
+	    url: string;
+	    bearer_token_env: string;
+	    http_host_header: string;
+	    http_origin: string;
+	    env_allowlist: string[];
+	    timeout_seconds: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPServerConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.enabled = source["enabled"];
+	        this.transport = source["transport"];
+	        this.command = source["command"];
+	        this.args = source["args"];
+	        this.working_dir = source["working_dir"];
+	        this.url = source["url"];
+	        this.bearer_token_env = source["bearer_token_env"];
+	        this.http_host_header = source["http_host_header"];
+	        this.http_origin = source["http_origin"];
+	        this.env_allowlist = source["env_allowlist"];
+	        this.timeout_seconds = source["timeout_seconds"];
+	    }
+	}
+	export class MCPConfig {
+	    enabled: boolean;
+	    servers: MCPServerConfig[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.servers = this.convertValues(source["servers"], MCPServerConfig);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class MemoryConfig {
 	    enabled: boolean;
 	    auto_inject: boolean;
@@ -4991,6 +5255,26 @@ export namespace settings {
 	        this.max_entries = source["max_entries"];
 	        this.max_inject = source["max_inject"];
 	        this.max_entry_chars = source["max_entry_chars"];
+	    }
+	}
+	export class NanoCyberConfig {
+	    enabled: boolean;
+	    endpoint: string;
+	    api_version: string;
+	    credential_env: string;
+	    credential_ref: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new NanoCyberConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.endpoint = source["endpoint"];
+	        this.api_version = source["api_version"];
+	        this.credential_env = source["credential_env"];
+	        this.credential_ref = source["credential_ref"];
 	    }
 	}
 	export class Profile {
@@ -5131,6 +5415,24 @@ export namespace settings {
 	
 	
 	
+	export class ServiceCredentialStatus {
+	    service: string;
+	    environment_configured: boolean;
+	    stored_configured: boolean;
+	    effective_configured: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceCredentialStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.service = source["service"];
+	        this.environment_configured = source["environment_configured"];
+	        this.stored_configured = source["stored_configured"];
+	        this.effective_configured = source["effective_configured"];
+	    }
+	}
 	export class UIConfig {
 	    theme: string;
 	    accent_color: string;
@@ -5338,6 +5640,8 @@ export namespace settings {
 	    tools: ToolsConfig;
 	    agents: AgentsConfig;
 	    environment: EnvironmentConfig;
+	    nanocyber: NanoCyberConfig;
+	    mcp: MCPConfig;
 	    context: ContextConfig;
 	    memory: MemoryConfig;
 	    skills: SkillsConfig;
@@ -5358,6 +5662,8 @@ export namespace settings {
 	        this.tools = this.convertValues(source["tools"], ToolsConfig);
 	        this.agents = this.convertValues(source["agents"], AgentsConfig);
 	        this.environment = this.convertValues(source["environment"], EnvironmentConfig);
+	        this.nanocyber = this.convertValues(source["nanocyber"], NanoCyberConfig);
+	        this.mcp = this.convertValues(source["mcp"], MCPConfig);
 	        this.context = this.convertValues(source["context"], ContextConfig);
 	        this.memory = this.convertValues(source["memory"], MemoryConfig);
 	        this.skills = this.convertValues(source["skills"], SkillsConfig);
@@ -5398,6 +5704,48 @@ export namespace settings {
 
 export namespace tools {
 	
+	export class BrowserEvidenceRecord {
+	    version: number;
+	    id: string;
+	    kind: string;
+	    captured_at: string;
+	    workspace_file: string;
+	    manifest_file: string;
+	    sha256: string;
+	    size: number;
+	    width: number;
+	    height: number;
+	    full_page: boolean;
+	    url?: string;
+	    title?: string;
+	    fresh: boolean;
+	    current_sha256?: string;
+	    review_detail?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BrowserEvidenceRecord(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.captured_at = source["captured_at"];
+	        this.workspace_file = source["workspace_file"];
+	        this.manifest_file = source["manifest_file"];
+	        this.sha256 = source["sha256"];
+	        this.size = source["size"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.full_page = source["full_page"];
+	        this.url = source["url"];
+	        this.title = source["title"];
+	        this.fresh = source["fresh"];
+	        this.current_sha256 = source["current_sha256"];
+	        this.review_detail = source["review_detail"];
+	    }
+	}
 	export class TodoItem {
 	    id: string;
 	    text: string;

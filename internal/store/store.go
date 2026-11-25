@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 18
+const CurrentSchemaVersion = 20
 
 func DefaultPath() (string, error) {
 	dir, err := settings.ConfigDir()
@@ -114,9 +114,55 @@ func runMigration(db *sql.DB, version int) error {
 		return migrateV17RepositoryIndex(db)
 	case 18:
 		return migrateV18RepositoryReviews(db)
+	case 19:
+		return migrateV19TaskRunAgentDefinition(db)
+	case 20:
+		return migrateV20TaskRunRoutingPrompt(db)
 	default:
 		return fmt.Errorf("unknown schema migration %d", version)
 	}
+}
+
+func migrateV20TaskRunRoutingPrompt(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Some builds included routing_prompt in v19. Preserve it when present.
+	var hasRoutingPrompt bool
+	if err := tx.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM pragma_table_info('task_runs') WHERE name = 'routing_prompt'
+	)`).Scan(&hasRoutingPrompt); err != nil {
+		return err
+	}
+	if !hasRoutingPrompt {
+		if _, err := tx.Exec(`ALTER TABLE task_runs ADD COLUMN routing_prompt TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`PRAGMA user_version=20`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func migrateV19TaskRunAgentDefinition(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+ALTER TABLE task_runs ADD COLUMN agent_definition_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_runs ADD COLUMN agent_definition_version TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_task_runs_agent_definition ON task_runs(agent_definition_id, agent_definition_version);
+PRAGMA user_version=19;
+`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func migrateV18RepositoryReviews(db *sql.DB) error {

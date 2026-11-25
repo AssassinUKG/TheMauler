@@ -1,0 +1,42 @@
+{
+  "schema": "mauler.telegram-news-parity/v1",
+  "date": "2026-11-23",
+  "status": "implemented_built_restarted_and_verified",
+  "inference": "already-loaded loopback RVN-Q4_K_M-multilingual-mtp.gguf; 35072 context tokens; no cloud model",
+  "exact_prompt": "What’s the latest news headlines today?",
+  "preserved": ["actionable-request routing", "existing agent execution and final-answer pipeline", "queue ownership", "configured search-service preferences", "bot credentials and local profiles", "saved chats"],
+  "added": [
+    "Dated publisher-feed observation for default general headline searches, retaining ordinary search fallback",
+    "One editable progress card and exact terminal-answer handoff",
+    "Verbatim long-answer preview with Full report, exact .md download and tool-observed Sources",
+    "Bounded callback store: 128 entries, 8 MiB total, 64 KiB report, 15-minute expiry",
+    "Callbacks bind original user, chat, topic, acknowledged message, nonce and one-shot view; never dispatch work",
+    "Balanced visible-UTF16 HTML chunks retain entities, code and emoji",
+    "Explicit bounded 429 retry; no blind resend after disconnect, 5xx, malformed/missing acknowledgement or uncertain edit",
+    "Topics/reply targets retained; uncertain initial status does not duplicate heartbeat cards"
+  ],
+  "verification": {
+    "full_go_suite": "passed; build/telegram-news-20261123-tests-final.log",
+    "go_vet": "passed; build/telegram-news-20261123-vet.log",
+    "focused_telegram_race": "passed; build/telegram-news-20261123-race.log",
+    "broad_app_tools_telegram_race": "passed; app 388.860s, tools 51.067s, telegram 2.598s; build/telegram-news-20261123-race-quiescent.log",
+    "frontend_production": "passed; build/telegram-news-20261123-frontend.log",
+    "native_wails_build": "passed; build/telegram-news-20261123-build.log",
+    "live_public_feed": "passed; zero model calls and zero Telegram messages",
+    "exact_local_model_news_pipeline": "passed; build/telegram-news-20261123-local-model-qualified.log",
+    "configured_bot_getMe": "passed; build/telegram-news-20261123-bot-identity.log; no messages, polling or webhook changes",
+    "test_fixtures": "Loopback fake Bot API covers full report/download bytes, topic/reply routing, ownership/expiry/replay, malformed acknowledgements, explicit 429 and ambiguous delivery. Test-only fixture/grader corrections are recorded in the Helix evidence file.",
+    "earlier_broad_race_attempt": "Not a qualification pass: documentation was edited while the canonical context test compared repeated packet identities. With no product-code change and source held still, the complete app/tools/telegram race suite passed. Original failed log retained at build/telegram-news-20261123-race-full.log."
+  },
+  "deployment": {
+    "normal_process_id": 37676,
+    "executable": "build/bin/TheMauler.exe",
+    "sha256": "C751496C245071C3A979D0F537E2BF5E1DF16816AFBBC7EF319C08FF05C8D60B",
+    "previous_executable_backup": "build/bin/TheMauler.pre-telegram-20261123.exe",
+    "native_window": "reopened; Tools idle; original saved conversations and repository workspace observed",
+    "settings_profiles_provider_secrets": "all byte-identical after restart",
+    "reboot": false,
+    "production_test_messages": 0
+  },
+  "remaining": ["real-phone button/layout qualification", "durable inbox/outbox and restart-persistent result views", "safe selective multipart retry", "independent article verification", "broader reboot/descendant/unattended gates remain unchanged"]
+}

@@ -38,6 +38,13 @@ func TestVerifyGateParsesPassFail(t *testing.T) {
 	}
 }
 
+func TestVerifyGateMaskedExitIsInconclusive(t *testing.T) {
+	verdict := verifyVerdictFromCommand(verifyCommand{Gate: "build", Command: "go build ./... || true"}, "BUILD_OK", nil)
+	if verdict.Status != "inconclusive" || !verdict.Blocking || len(verdict.Improvements) == 0 {
+		t.Fatalf("masked exit certified verification: %#v", verdict)
+	}
+}
+
 func TestVerifyGateBlockingSplit(t *testing.T) {
 	tests := []struct {
 		gate string

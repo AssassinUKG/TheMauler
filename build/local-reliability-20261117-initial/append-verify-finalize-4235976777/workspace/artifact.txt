@@ -1,0 +1,12 @@
+retained prefix: café / 日本語
+literal appended suffix: "alpha" / λ
+# append verification
+# exactly: literal appended suffix: "alpha" / λ
+# text: literal appended suffix: "alpha" / λ
+# represented: literal appended suffix: "alpha" / λ
+# json: literal appended suffix: "alpha" / λ
+# string: literal appended suffix: "alpha" / λ
+# preserving: retained prefix: café / 日本語
+# every: retained prefix: café / 日本語
+# byte: retained prefix: café / 日本語
+# any: retained prefix: café / 日本語

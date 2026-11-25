@@ -17,7 +17,7 @@ func TestReviewPhaseProceedsWhenAllPass(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, false)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{})
 
 	if !decision.Proceed || decision.InjectedPrompt != "" || cycles != 0 {
 		t.Fatalf("decision = %#v cycles=%d, want proceed without injection", decision, cycles)
@@ -51,7 +51,7 @@ func TestReviewPhaseLoopsOnBlockingVerdict(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, false)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{})
 
 	if decision.Proceed || cycles != 1 {
 		t.Fatalf("decision = %#v cycles=%d, want retry", decision, cycles)
@@ -74,7 +74,7 @@ func TestReviewPhaseRespectsMaxCycles(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, false)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{})
 
 	if !decision.Proceed || decision.StopReason != "review_incomplete" || decision.SummaryNote == "" {
 		t.Fatalf("decision = %#v, want honest capped stop", decision)
@@ -87,7 +87,7 @@ func TestReviewPhaseSkipsNonGateableRun(t *testing.T) {
 	run := startTaskRun("map this repo", "Researcher", "profile", "model")
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Researcher"}, true, &cycles, false)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Researcher"}, true, &cycles, reviewPhaseLimits{})
 
 	if !decision.Proceed || cycles != 0 || len(run.Events) != 0 {
 		t.Fatalf("decision = %#v cycles=%d events=%#v, want skip", decision, cycles, run.Events)
@@ -103,10 +103,63 @@ func TestReviewPhaseLoopsOnBlockingCompletionRail(t *testing.T) {
 	run.Tools = append(run.Tools, TaskToolEvent{Name: "edit", Status: "done", Input: `{"path":"math.go"}`, Result: "updated min helper"})
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, false)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{})
 
 	if decision.Proceed || cycles != 1 || !strings.Contains(decision.InjectedPrompt, "max") {
 		t.Fatalf("decision = %#v cycles=%d, want completion retry for max", decision, cycles)
+	}
+}
+
+func TestRecoveredReplyUsesConfiguredVerificationBeforeKeywordCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		pass bool
+	}{
+		{name: "verified", want: "2", pass: true},
+		{name: "verification failed", want: "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempWorkingDir(t)
+			mustWriteFile(t, "go.mod", "module example.com/verified\n\ngo 1.23\n")
+			mustWriteFile(t, "math.go", "package verified\n\nfunc twice(x int) int { return x * 2 }\n")
+			mustWriteFile(t, "math_test.go", "package verified\n\nimport \"testing\"\n\nfunc TestTwice(t *testing.T) { if twice(1) != "+tc.want+" { t.Fatal(\"incorrect value\") } }\n")
+			cfg := settings.DefaultSettings()
+			cfg.Agents.ReviewLoop.VerifyGate = false
+			cfg.Agents.ReviewLoop.VerifyCommands = []string{"go test ./..."}
+			client := &reviewerMockClient{responses: []reviewerMockResponse{
+				{text: `{"verdict":"approve","severity":"advisory","items":["test scope"]}`},
+			}}
+			defer mockReviewerClient(t, client)()
+			a := &App{}
+			mode := baseMode("Builder")
+			run := startTaskRun("Implement doubling in math.go. Include a closing statement in the report.", mode.Name, "local", "mock-reviewer")
+			run.Tools = []TaskToolEvent{{Name: "edit", Status: "done", Input: `{"path":"math.go"}`}}
+			if err := a.initializeRunControlPlane(&run, &cfg, mode, true); err != nil {
+				t.Fatal(err)
+			}
+			if !controlNeedsProjectVerification(run) {
+				t.Fatal("configured tests were not sealed into the contract")
+			}
+			cycles := 0
+			decision := a.runReviewPhase(context.Background(), &run, reviewerTestProfile(), &cfg, mode, true, &cycles, reviewPhaseLimits{replyRecovered: true})
+			if cycles != 0 {
+				t.Fatalf("recovered reply reopened repair: %#v", decision)
+			}
+			if !tc.pass {
+				if decision.StopReason != "review_incomplete" || len(blockingReviewVerdicts(decision.Verdicts)) != 1 || len(client.requests) != 0 || !strings.Contains(decision.StopDetail, "go test") {
+					t.Fatalf("failing verification was not retained: %#v", decision)
+				}
+				return
+			}
+			if !decision.Proceed || decision.StopReason != "" || len(blockingReviewVerdicts(decision.Verdicts)) != 0 || len(client.requests) != 1 {
+				t.Fatalf("verified completion was blocked: %#v (reviewer requests=%d)", decision, len(client.requests))
+			}
+			req := client.requests[0]
+			if len(req.Tools) != 0 || req.ToolChoice != "none" || !strings.Contains(messageText(req.Messages[1]), "test passed: go test") {
+				t.Fatalf("reviewer did not use just the saved evidence: %#v", req)
+			}
+		})
 	}
 }
 
@@ -124,7 +177,7 @@ func TestReviewPhaseLoopsOnReviewerRequestChanges(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := ((*App)(nil)).runReviewPhase(context.Background(), &run, reviewerTestProfile(), &cfg, AgentMode{Name: "Builder"}, true, &cycles, false)
+	decision := ((*App)(nil)).runReviewPhase(context.Background(), &run, reviewerTestProfile(), &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{})
 
 	if decision.Proceed || cycles != 1 || !strings.Contains(decision.InjectedPrompt, "nil-input") {
 		t.Fatalf("decision = %#v cycles=%d, want reviewer retry", decision, cycles)
@@ -145,7 +198,7 @@ func TestReviewPhaseStopsWhenReviewerIsInconclusive(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := ((*App)(nil)).runReviewPhase(context.Background(), &run, reviewerTestProfile(), &cfg, AgentMode{Name: "Builder"}, true, &cycles, false)
+	decision := ((*App)(nil)).runReviewPhase(context.Background(), &run, reviewerTestProfile(), &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{})
 
 	if !decision.Proceed || decision.StopReason != "review_incomplete" || cycles != 0 || !strings.Contains(decision.StopDetail, "malformed") {
 		t.Fatalf("decision = %#v cycles=%d, want explicit inconclusive stop", decision, cycles)
@@ -158,7 +211,7 @@ func TestReviewPhaseHonorsBudgetExhaustion(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, true)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, true, &cycles, reviewPhaseLimits{budgetsExhausted: true})
 
 	if !decision.Proceed || cycles != 0 {
 		t.Fatalf("decision = %#v cycles=%d, want budget skip", decision, cycles)
@@ -195,7 +248,7 @@ func TestReviewPhaseOnlyAutonomous(t *testing.T) {
 	run := gateableReviewRun()
 	cycles := 0
 
-	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, false, &cycles, false)
+	decision := (&App{}).runReviewPhase(context.Background(), &run, settings.Profile{}, &cfg, AgentMode{Name: "Builder"}, false, &cycles, reviewPhaseLimits{})
 
 	if !decision.Proceed || cycles != 0 {
 		t.Fatalf("decision = %#v cycles=%d, want non-autonomous skip", decision, cycles)

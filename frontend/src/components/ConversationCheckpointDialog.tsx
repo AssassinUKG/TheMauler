@@ -68,9 +68,10 @@ export function ConversationCheckpointDialog({ checkpoints, defaultName, canCrea
                   <strong>{checkpointTitle(checkpoint)}</strong>
                   <span>{savedLabel(checkpoint.saved_at)}{checkpoint.conversation_name ? ` · ${checkpoint.conversation_name}` : ''}</span>
                   <p>{checkpoint.prompt || 'Saved conversation state'}</p>
+                  {checkpoint.resume_blocked_reason && <p role="status">Review required: {checkpoint.resume_blocked_reason}</p>}
                 </div>
                 <div>
-                  <button className="primary" onClick={() => void onResume(checkpoint)} disabled={busy || runActive}>Resume</button>
+                  <button className="primary" onClick={() => void onResume(checkpoint)} disabled={busy || runActive || Boolean(checkpoint.resume_blocked_reason)}>Resume</button>
                   <button className="danger" onClick={() => { if (window.confirm(`Delete checkpoint “${checkpointTitle(checkpoint)}”?`)) void onDelete(checkpoint) }} disabled={busy || runActive}>Delete</button>
                 </div>
               </article>
@@ -85,9 +86,10 @@ export function ConversationCheckpointDialog({ checkpoints, defaultName, canCrea
                   <strong>{checkpointTitle(checkpoint)}</strong>
                   <span>{savedLabel(checkpoint.saved_at)} · {checkpoint.mode || 'Agent'}</span>
                   <p>{checkpoint.prompt || 'Interrupted run'}</p>
+                  {checkpoint.resume_blocked_reason && <p role="status">Review required: {checkpoint.resume_blocked_reason}</p>}
                 </div>
                 <div>
-                  <button className="primary" onClick={() => void onResume(checkpoint)} disabled={busy || runActive}>Resume</button>
+                  <button className="primary" onClick={() => void onResume(checkpoint)} disabled={busy || runActive || Boolean(checkpoint.resume_blocked_reason)}>Resume</button>
                   <button onClick={() => { if (window.confirm('Remove this automatic recovery snapshot?')) void onDelete(checkpoint) }} disabled={busy || runActive}>Remove</button>
                 </div>
               </article>

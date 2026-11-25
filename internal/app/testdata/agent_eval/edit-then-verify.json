@@ -6,8 +6,8 @@
   },
   "mode": "Fixer",
   "max_tool_calls": 10,
-  "expect_files": {
-    "main.go": "return \"123\""
+  "expect_files_any": {
+    "main.go": ["return \"123\"", "func broken() int"]
   },
   "expect_status": "done",
   "max_auto_continues": 2

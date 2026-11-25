@@ -30,6 +30,40 @@ func TestTaskToolExposesExpectedSubagentTypes(t *testing.T) {
 			t.Fatalf("missing task type %q in %#v", name, got)
 		}
 	}
+	if testFix := mustSubagentSpec(t, "subagent_testfix"); testFix.EnvironmentProfile != "offline-code" {
+		t.Fatalf("Test/Fix environment requirement = %q", testFix.EnvironmentProfile)
+	}
+	for _, name := range []string{"subagent_explore", "subagent_research", "subagent_review", "subagent_summarize"} {
+		if spec := mustSubagentSpec(t, name); spec.EnvironmentProfile != "" {
+			t.Fatalf("read-only %s unexpectedly requires %q", name, spec.EnvironmentProfile)
+		}
+	}
+}
+
+func TestNanoCyberEnabledTestFixFailsClosedWithoutHostFallback(t *testing.T) {
+	app := New()
+	app.suppressEvents = true
+	app.mu.Lock()
+	app.cfg.NanoCyber.Enabled = true
+	app.cfg.NanoCyber.Endpoint = ""
+	cfg := *app.cfg
+	app.mu.Unlock()
+	run := &TaskRun{ID: "task-fixture", Generation: 7}
+	err := app.enforceSubagentEnvironment(withRunControlContext(context.Background(), run), mustSubagentSpec(t, "subagent_testfix"), cfg)
+	if err == nil || !strings.Contains(err.Error(), "no local host fallback") {
+		t.Fatalf("enabled NanoCyber Test/Fix did not fail closed: %v", err)
+	}
+}
+
+func TestNanoCyberRequirementDoesNotBlockReadOnlySubagents(t *testing.T) {
+	app := New()
+	app.mu.Lock()
+	app.cfg.NanoCyber.Enabled = true
+	cfg := *app.cfg
+	app.mu.Unlock()
+	if err := app.enforceSubagentEnvironment(context.Background(), mustSubagentSpec(t, "subagent_review"), cfg); err != nil {
+		t.Fatalf("read-only review was unnecessarily blocked: %v", err)
+	}
 }
 
 func TestSubagentExploreReadOnlyToolset(t *testing.T) {

@@ -45,7 +45,7 @@ func TestReviewerPassParsesVerdict(t *testing.T) {
 	cfg := settings.DefaultSettings()
 	run := gateableReviewRun()
 
-	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg)
+	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg, reviewerPassOptions{})
 
 	if verdict.Status != "fail" || !verdict.Blocking || !strings.Contains(strings.Join(verdict.Improvements, "\n"), "empty input") {
 		t.Fatalf("verdict = %#v, want blocking request_changes", verdict)
@@ -65,7 +65,7 @@ func TestReviewerPassIsInconclusiveOnGarbage(t *testing.T) {
 	cfg := settings.DefaultSettings()
 	run := gateableReviewRun()
 
-	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg)
+	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg, reviewerPassOptions{})
 
 	if verdict.Status != "inconclusive" || !verdict.Blocking {
 		t.Fatalf("garbage reviewer output should be blocking/inconclusive, got %#v", verdict)
@@ -78,7 +78,7 @@ func TestReviewerPassIsInconclusiveOnProviderFailure(t *testing.T) {
 	cfg := settings.DefaultSettings()
 	run := gateableReviewRun()
 
-	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg)
+	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg, reviewerPassOptions{})
 
 	if verdict.Status != "inconclusive" || !verdict.Blocking || !strings.Contains(verdict.Summary, "provider offline") {
 		t.Fatalf("provider failure should be blocking/inconclusive, got %#v", verdict)
@@ -105,7 +105,7 @@ func TestReviewerPassRespectsToolCap(t *testing.T) {
 	cfg.Agents.ReviewLoop.ReviewerMaxTools = 1
 	run := gateableReviewRun()
 
-	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg)
+	verdict := ((*App)(nil)).runReviewerPass(context.Background(), &run, reviewerTestProfile(), &cfg, reviewerPassOptions{})
 
 	if verdict.Status != "pass" {
 		t.Fatalf("verdict = %#v, want pass", verdict)

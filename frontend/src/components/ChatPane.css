@@ -3138,3 +3138,18 @@
   .reasoning-mode-picker { grid-template-columns:1fr; }
   .reasoning-mode-picker button { min-height:44px; }
 }
+.msg-outcome-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border: 1px solid #a3813e;
+  border-radius: 8px;
+  background: #a3813e12;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.msg-outcome-notice span { color: var(--text-secondary); }
+.msg-outcome-notice button { margin-left: auto; white-space: nowrap; }

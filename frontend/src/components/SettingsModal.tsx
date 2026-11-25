@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   GetSettings,
   ListAgentDefinitions,
@@ -10,6 +10,13 @@ import {
   GetProviderAPIKeyStatus,
   SetProviderAPIKey,
   ClearProviderAPIKey,
+  GetNanoCyberCredentialStatus,
+  SetNanoCyberCredential,
+  ClearNanoCyberCredential,
+  GetNanoCyberHealth,
+  GetMCPStatus,
+  TestMCPServer,
+  DisconnectMCPServer,
   ListWSLDistros,
   BenchmarkProfile,
   RecommendModelProfileTemplate,
@@ -27,6 +34,8 @@ import {
   type Profile,
   type Provider,
   type ProviderAPIKeyStatus,
+  type ServiceCredentialStatus,
+  type NanoCyberHealth,
   type ModelMetadata,
   type GenerationParams,
   type ProfileBenchmarkResult,
@@ -34,6 +43,8 @@ import {
   type ChannelWorkItem,
   type AudioHealth,
   type AgentDefinition,
+  type MCPServerConfig,
+  type MCPServerStatus,
 } from '../wailsjs/go'
 import { ConfirmDialog } from './ConfirmDialog'
 import { isQwen38Profile, QwenProfileGuide } from './QwenProfileGuide'
@@ -43,9 +54,10 @@ import './SettingsModal.css'
 interface Props {
   onClose: () => void
   onSaved?: () => void
+  onBeforeWorkspaceChange?: (nextPath?: string) => Promise<boolean>
 }
 
-type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'environment' | 'tools' | 'telegram' | 'audio' | 'context' | 'storage' | 'ui' | 'image'
+type Tab = 'general' | 'providers' | 'profiles' | 'agents' | 'environment' | 'sandbox' | 'tools' | 'mcp' | 'telegram' | 'audio' | 'context' | 'storage' | 'ui' | 'image'
 
 type ToolRisk = 'low' | 'medium' | 'high'
 
@@ -55,7 +67,9 @@ const settingsTabs: Array<{ id: Tab; label: string; description: string }> = [
   { id: 'profiles', label: 'Profiles', description: 'Models and generation' },
   { id: 'agents', label: 'Agents', description: 'Modes and autonomy' },
   { id: 'environment', label: 'Environment', description: 'VPN, listener, shell paths' },
+  { id: 'sandbox', label: 'Sandbox', description: 'NanoCyber execution boundary' },
   { id: 'tools', label: 'Tools', description: 'Toolsets, shell, web limits' },
+  { id: 'mcp', label: 'MCP', description: 'stdio, SSE, and /mcp servers' },
   { id: 'telegram', label: 'Telegram', description: 'Bot, voice, remote control' },
   { id: 'audio', label: 'Audio / Voice', description: 'Microphone and spoken replies' },
   { id: 'context', label: 'Context', description: 'Workspace and memory' },
@@ -86,6 +100,7 @@ const toolRisk: Record<string, ToolRisk> = {
   shell: 'high',
   terminal_send: 'high',
   terminal_read: 'low',
+  mcp: 'high',
 }
 
 const toolRiskLabel: Record<ToolRisk, string> = {
@@ -204,13 +219,21 @@ function compactTokenCount(tokens: number): string {
 }
 
 function modelCatalogueLabel(model: ModelMetadata, cloud: boolean): string {
-  if (!model.context_length) return model.id
-  const maximum = `${compactTokenCount(model.context_length)} maximum`
-  if (!cloud) return `${model.id} - ${maximum}`
-  return `${model.id} - ${maximum} - ${compactTokenCount(recommendedCloudContext(model))} standard`
+  const details: string[] = []
+  if (model.context_length) details.push(`${compactTokenCount(model.context_length)} maximum`)
+  if (!cloud) {
+    if (model.active) details.push(model.state || 'active')
+    else if (model.state) details.push(model.state)
+    if (model.vision_runtime_ready) details.push('vision ready')
+    else if (model.supports_vision) details.push('vision capable')
+    if (model.reasoning?.supported) details.push('reasoning')
+  } else if (model.context_length) {
+    details.push(`${compactTokenCount(recommendedCloudContext(model))} standard`)
+  }
+  return details.length > 0 ? `${model.id} - ${details.join(' - ')}` : model.id
 }
 
-export function SettingsModal({ onClose, onSaved }: Props) {
+export function SettingsModal({ onClose, onSaved, onBeforeWorkspaceChange }: Props) {
   const [tab, setTab] = useState<Tab>('providers')
   const [settings, setSettings] = useState<Settings | null>(null)
   const [profilesFile, setProfilesFile] = useState<ProfilesFile | null>(null)
@@ -227,6 +250,10 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [providerAPIKeyStatus, setProviderAPIKeyStatus] = useState<ProviderAPIKeyStatus | null>(null)
   const [providerAPIKeySaving, setProviderAPIKeySaving] = useState(false)
   const [showProviderAPIKey, setShowProviderAPIKey] = useState(false)
+  const nanoCyberCredentialInput = useRef<HTMLInputElement>(null)
+  const [nanoCyberCredentialStatus, setNanoCyberCredentialStatus] = useState<ServiceCredentialStatus | null>(null)
+  const [nanoCyberHealth, setNanoCyberHealth] = useState<NanoCyberHealth | null>(null)
+  const [nanoCyberBusy, setNanoCyberBusy] = useState(false)
   const [selectedProfile, setSelectedProfile] = useState('')
   const [deleteProfileConfirm, setDeleteProfileConfirm] = useState<string | null>(null)
   const [benchmarking, setBenchmarking] = useState(false)
@@ -239,6 +266,8 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const [audioTesting, setAudioTesting] = useState(false)
   const [kokoroVoices, setKokoroVoices] = useState<string[]>([])
   const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([])
+  const [mcpStatuses, setMCPStatuses] = useState<MCPServerStatus[]>([])
+  const [mcpBusy, setMCPBusy] = useState('')
 
   useEffect(() => {
     void Promise.all([GetSettings(), GetProfiles(), ListAgentDefinitions().catch(() => [] as AgentDefinition[])]).then(([s, pf, definitions]) => {
@@ -260,6 +289,7 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     void refreshChannelBus()
     void refreshAudioHealth()
     void ListKokoroVoices().then(setKokoroVoices).catch(() => setKokoroVoices(['af_heart']))
+    void refreshMCPStatus()
   }, [])
 
   useEffect(() => {
@@ -288,6 +318,16 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     return () => window.clearInterval(id)
   }, [tab])
 
+  useEffect(() => {
+    if (tab !== 'sandbox') return
+    void refreshNanoCyber()
+  }, [tab])
+
+  useEffect(() => {
+    if (tab !== 'mcp') return
+    void refreshMCPStatus()
+  }, [tab])
+
   const refreshStorage = async () => {
     const items = await ListStorageItems().catch(() => [] as StorageItem[])
     setStorageItems(items)
@@ -306,10 +346,23 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     setAudioHealth(await GetAudioHealth().catch(() => null))
   }
 
+  const refreshNanoCyber = async () => {
+    const [credentialStatus, health] = await Promise.all([
+      GetNanoCyberCredentialStatus().catch(() => null),
+      GetNanoCyberHealth().catch(() => null),
+    ])
+    setNanoCyberCredentialStatus(credentialStatus)
+    setNanoCyberHealth(health)
+  }
+
+  const refreshMCPStatus = async () => {
+    setMCPStatuses(await GetMCPStatus().catch(() => [] as MCPServerStatus[]))
+  }
+
   const testVoice = async () => {
     setAudioTesting(true)
     try {
-      if (dirty) await save(false)
+      if (dirty && !(await save(false))) return
       const result = await SynthesizeSpeech('Voice system is ready.')
       const player = new Audio(result.data_uri)
       await player.play()
@@ -347,8 +400,12 @@ export function SettingsModal({ onClose, onSaved }: Props) {
     setSaveStatus('')
   }
 
-  const save = async (closeAfter = false) => {
-    if (!settings || !profilesFile) return
+  const save = async (closeAfter = false): Promise<boolean> => {
+    if (!settings || !profilesFile) return false
+    if (onBeforeWorkspaceChange && !(await onBeforeWorkspaceChange(settings.context.workspace_dir || ''))) {
+      setSaveStatus('Workspace change cancelled; editor changes kept')
+      return false
+    }
     setSaving(true)
     try {
       await UpdateSettings(settings)
@@ -358,8 +415,10 @@ export function SettingsModal({ onClose, onSaved }: Props) {
       setSaveStatus('Saved')
       onSaved?.()
       if (closeAfter) onClose()
+      return true
     } catch (e) {
       alert(`Save failed: ${e}`)
+      return false
     } finally {
       setSaving(false)
     }
@@ -378,6 +437,124 @@ export function SettingsModal({ onClose, onSaved }: Props) {
   const updateEnvironment = (patch: Partial<Settings['environment']>) => {
     if (!settings) return
     updateSettings('environment', { ...settings.environment, ...patch })
+  }
+
+  const updateNanoCyber = (patch: Partial<Settings['nanocyber']>) => {
+    if (!settings) return
+    updateSettings('nanocyber', { ...settings.nanocyber, ...patch })
+  }
+
+  const updateMCP = (patch: Partial<Settings['mcp']>) => {
+    if (!settings) return
+    updateSettings('mcp', { ...settings.mcp, ...patch })
+  }
+
+  const updateMCPServer = (index: number, patch: Partial<MCPServerConfig>) => {
+    if (!settings) return
+    const servers = [...(settings.mcp.servers ?? [])]
+    servers[index] = { ...servers[index], ...patch }
+    updateMCP({ servers })
+  }
+
+  const changeMCPTransport = (index: number, transport: MCPServerConfig['transport']) => {
+    const clear = transport === 'stdio'
+      ? { transport, url: '', bearer_token_env: '', http_host_header: '', http_origin: '' }
+      : { transport, command: '', args: [], working_dir: '', env_allowlist: [] }
+    updateMCPServer(index, clear)
+  }
+
+  const addMCPServer = () => {
+    if (!settings) return
+    const suffix = Date.now().toString(36)
+    updateMCP({
+      servers: [...(settings.mcp.servers ?? []), {
+        id: `mcp_${suffix}`,
+        name: 'New MCP server',
+        enabled: true,
+        transport: 'streamable_http',
+        command: '',
+        args: [],
+        working_dir: '',
+        url: '',
+        bearer_token_env: '',
+        http_host_header: '',
+        http_origin: '',
+        env_allowlist: [],
+        timeout_seconds: 30,
+      }],
+    })
+  }
+
+  const removeMCPServer = (index: number) => {
+    if (!settings) return
+    updateMCP({ servers: (settings.mcp.servers ?? []).filter((_, serverIndex) => serverIndex !== index) })
+  }
+
+  const testMCPServer = async (serverID: string) => {
+    setMCPBusy(serverID)
+    try {
+      if (dirty && !(await save(false))) return
+      const status = await TestMCPServer(serverID)
+      setMCPStatuses(current => [status, ...current.filter(item => item.id !== status.id)])
+      setSaveStatus(`${status.name || status.id}: ${status.tool_count} MCP tools available`)
+    } catch (error) {
+      setSaveStatus(`MCP test failed: ${String(error)}`)
+      await refreshMCPStatus()
+    } finally {
+      setMCPBusy('')
+    }
+  }
+
+  const disconnectMCPServer = async (serverID: string) => {
+    setMCPBusy(serverID)
+    try {
+      await DisconnectMCPServer(serverID)
+      await refreshMCPStatus()
+    } finally {
+      setMCPBusy('')
+    }
+  }
+
+  const saveNanoCyberCredential = async () => {
+    const input = nanoCyberCredentialInput.current
+    const credential = input?.value.trim() ?? ''
+    if (!credential) return
+    setNanoCyberBusy(true)
+    try {
+      await SetNanoCyberCredential(credential)
+      if (input) input.value = ''
+      await refreshNanoCyber()
+      setSaveStatus('NanoCyber token stored locally')
+    } catch (error) {
+      setSaveStatus(`NanoCyber token save failed: ${String(error)}`)
+    } finally {
+      setNanoCyberBusy(false)
+    }
+  }
+
+  const clearNanoCyberCredential = async () => {
+    if (!confirm('Clear the locally stored NanoCyber token?')) return
+    setNanoCyberBusy(true)
+    try {
+      await ClearNanoCyberCredential()
+      if (nanoCyberCredentialInput.current) nanoCyberCredentialInput.current.value = ''
+      await refreshNanoCyber()
+      setSaveStatus('Stored NanoCyber token cleared')
+    } catch (error) {
+      setSaveStatus(`NanoCyber token clear failed: ${String(error)}`)
+    } finally {
+      setNanoCyberBusy(false)
+    }
+  }
+
+  const saveAndCheckNanoCyber = async () => {
+    setNanoCyberBusy(true)
+    try {
+      if (dirty && !(await save(false))) return
+      await refreshNanoCyber()
+    } finally {
+      setNanoCyberBusy(false)
+    }
   }
 
   const updateTelegram = (patch: Partial<Settings['telegram']>) => {
@@ -1890,6 +2067,210 @@ export function SettingsModal({ onClose, onSaved }: Props) {
                       </div>
                     ))}
                   </div>
+                </Field>
+              </div>
+            )}
+
+            {tab === 'sandbox' && (
+              <div className="settings-section">
+                <h3>NanoCyber Sandbox</h3>
+                <p className="field-hint">
+                  Optional local execution boundary for generated-code subagents. It is fail-closed: Mauler will not advertise sandbox execution or fall back to a host shell unless the authenticated v1 API is healthy and reports the required capabilities.
+                </p>
+                <Field label="Enable NanoCyber">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.nanocyber.enabled}
+                      onChange={e => updateNanoCyber({ enabled: e.target.checked })}
+                    />
+                    Use NanoCyber for execution-bearing subagents when compatible
+                  </label>
+                </Field>
+                <Field label="Loopback endpoint">
+                  <input
+                    value={settings.nanocyber.endpoint}
+                    onChange={e => updateNanoCyber({ endpoint: e.target.value })}
+                    placeholder="http://127.0.0.1:9443"
+                  />
+                  <span className="field-hint">Must be an explicit localhost or loopback HTTP URL with a port. Paths, redirects, remote hosts, and embedded credentials are rejected.</span>
+                </Field>
+                <Field label="API contract">
+                  <input value={settings.nanocyber.api_version || 'v1'} readOnly />
+                </Field>
+                <Field label="Token environment variable">
+                  <input
+                    value={settings.nanocyber.credential_env}
+                    onChange={e => updateNanoCyber({ credential_env: e.target.value })}
+                    placeholder="NANOCYBER_API_TOKEN"
+                  />
+                  <span className="field-hint">An environment token takes precedence over the protected local token.</span>
+                </Field>
+                <Field label="Bearer token">
+                  <div className="settings-inline-actions">
+                    <input
+                      ref={nanoCyberCredentialInput}
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="Paste token (never returned to the UI)"
+                    />
+                    <button className="primary" disabled={nanoCyberBusy} onClick={() => void saveNanoCyberCredential()}>
+                      {nanoCyberBusy ? 'Working...' : 'Store token'}
+                    </button>
+                    <button disabled={nanoCyberBusy || !nanoCyberCredentialStatus?.stored_configured} onClick={() => void clearNanoCyberCredential()}>
+                      Clear stored token
+                    </button>
+                  </div>
+                  <span className={nanoCyberCredentialStatus?.effective_configured ? 'provider-secret-ready' : 'provider-secret-missing'}>
+                    {nanoCyberCredentialStatus?.environment_configured
+                      ? `Configured through ${settings.nanocyber.credential_env}`
+                      : nanoCyberCredentialStatus?.stored_configured
+                        ? 'Stored locally in the protected secret file'
+                        : 'No token configured'}
+                  </span>
+                </Field>
+                <Field label="Service status">
+                  <div className="settings-inline-actions">
+                    <button disabled={nanoCyberBusy} onClick={() => void saveAndCheckNanoCyber()}>
+                      {nanoCyberBusy ? 'Checking...' : 'Save and check'}
+                    </button>
+                    <span className={nanoCyberHealth?.compatible ? 'provider-secret-ready' : 'provider-secret-missing'}>
+                      {nanoCyberHealth?.summary || 'Not checked'}
+                    </span>
+                  </div>
+                  {nanoCyberHealth?.detail && <span className="field-hint">{nanoCyberHealth.detail}</span>}
+                  {nanoCyberHealth?.capabilities?.length ? (
+                    <span className="field-hint">Capabilities: {nanoCyberHealth.capabilities.join(', ')}</span>
+                  ) : null}
+                </Field>
+              </div>
+            )}
+
+            {tab === 'mcp' && (
+              <div className="settings-section">
+                <h3>Model Context Protocol</h3>
+                <p className="field-hint">
+                  Connect Mauler to operator-configured MCP servers over local stdio, legacy HTTP+SSE, or current Streamable HTTP endpoints such as <code>http://192.168.1.53:9876/mcp</code>. Remote tool descriptions and results remain untrusted, and every MCP action requires confirmation unless you approve that exact call.
+                </p>
+                <Field label="Enable MCP">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={settings.mcp?.enabled ?? false}
+                      onChange={e => updateMCP({ enabled: e.target.checked })}
+                    />
+                    Advertise the bounded MCP tool when at least one server is enabled
+                  </label>
+                </Field>
+                <Field label="Configured servers">
+                  <div className="mcp-server-list">
+                    {(settings.mcp?.servers ?? []).map((server, index) => {
+                      const status = mcpStatuses.find(item => item.id === server.id)
+                      const isHTTP = server.transport === 'sse' || server.transport === 'streamable_http'
+                      return (
+                        <div className="mcp-server-card" key={`${server.id}-${index}`}>
+                          <div className="mcp-server-head">
+                            <div>
+                              <strong>{server.name || server.id || 'MCP server'}</strong>
+                              <span className={`mcp-state mcp-state-${status?.state || 'unconfigured'}`}>
+                                {status?.state || 'not tested'}{status?.tool_count ? ` · ${status.tool_count} tools` : ''}
+                              </span>
+                            </div>
+                            <div className="settings-inline-actions">
+                              <button type="button" disabled={mcpBusy === server.id || !server.id} onClick={() => void testMCPServer(server.id)}>
+                                {mcpBusy === server.id ? 'Working...' : 'Save and test'}
+                              </button>
+                              {status?.connected && (
+                                <button type="button" disabled={mcpBusy === server.id} onClick={() => void disconnectMCPServer(server.id)}>Disconnect</button>
+                              )}
+                              <button type="button" onClick={() => removeMCPServer(index)}>Remove</button>
+                            </div>
+                          </div>
+                          <div className="mcp-server-grid">
+                            <label>
+                              <span>Name</span>
+                              <input value={server.name} onChange={e => updateMCPServer(index, { name: e.target.value })} />
+                            </label>
+                            <label>
+                              <span>ID</span>
+                              <input value={server.id} onChange={e => updateMCPServer(index, { id: e.target.value.toLowerCase() })} placeholder="portswigger" />
+                            </label>
+                            <label>
+                              <span>Transport</span>
+                              <select value={server.transport} onChange={e => changeMCPTransport(index, e.target.value)}>
+                                <option value="streamable_http">Streamable HTTP (/mcp)</option>
+                                <option value="sse">Legacy SSE</option>
+                                <option value="stdio">stdio child process</option>
+                              </select>
+                            </label>
+                            <label className="mcp-checkbox">
+                              <span>Available</span>
+                              <input type="checkbox" checked={server.enabled} onChange={e => updateMCPServer(index, { enabled: e.target.checked })} />
+                            </label>
+                            {isHTTP ? (
+                              <>
+                                <label className="mcp-wide">
+                                  <span>Server URL</span>
+                                  <input
+                                    value={server.url}
+                                    onChange={e => updateMCPServer(index, { url: e.target.value })}
+                                    placeholder={server.transport === 'streamable_http' ? 'http://192.168.1.53:9876/mcp' : 'http://192.168.1.53:9876'}
+                                  />
+                                </label>
+                                <label className="mcp-wide">
+                                  <span>Bearer token environment variable (optional)</span>
+                                  <input value={server.bearer_token_env} onChange={e => updateMCPServer(index, { bearer_token_env: e.target.value })} placeholder="PORTSWIGGER_MCP_TOKEN" />
+                                </label>
+                                <label>
+                                  <span>HTTP Host override (compatibility)</span>
+                                  <input value={server.http_host_header} onChange={e => updateMCPServer(index, { http_host_header: e.target.value })} placeholder="localhost:9876" />
+                                </label>
+                                <label>
+                                  <span>HTTP Origin override (compatibility)</span>
+                                  <input value={server.http_origin} onChange={e => updateMCPServer(index, { http_origin: e.target.value })} placeholder="http://localhost:9876" />
+                                </label>
+                                <span className="field-hint mcp-wide">For PortSwigger on another LAN PC, use the two localhost values above. The TCP connection still goes directly to the configured private IP; this does not create a tunnel or proxy.</span>
+                              </>
+                            ) : (
+                              <>
+                                <label className="mcp-wide">
+                                  <span>Executable</span>
+                                  <input value={server.command} onChange={e => updateMCPServer(index, { command: e.target.value })} placeholder="java" />
+                                </label>
+                                <label className="mcp-wide">
+                                  <span>Arguments (one per line)</span>
+                                  <textarea rows={3} value={(server.args ?? []).join('\n')} onChange={e => updateMCPServer(index, { args: e.target.value.split('\n').map(value => value.trim()).filter(Boolean) })} placeholder={'-jar\nC:\\path\\to\\mcp-proxy-all.jar\n--sse-url\nhttp://192.168.1.53:9876'} />
+                                </label>
+                                <label>
+                                  <span>Working directory (optional)</span>
+                                  <input value={server.working_dir} onChange={e => updateMCPServer(index, { working_dir: e.target.value })} />
+                                </label>
+                                <label>
+                                  <span>Inherited environment names</span>
+                                  <input value={(server.env_allowlist ?? []).join(', ')} onChange={e => updateMCPServer(index, { env_allowlist: e.target.value.split(',').map(value => value.trim()).filter(Boolean) })} placeholder="JAVA_HOME" />
+                                </label>
+                              </>
+                            )}
+                            <label>
+                              <span>Timeout (seconds)</span>
+                              <input type="number" min={5} max={300} value={server.timeout_seconds || 30} onChange={e => updateMCPServer(index, { timeout_seconds: parseInt(e.target.value, 10) || 30 })} />
+                            </label>
+                          </div>
+                          {status?.protocol_version && <span className="field-hint">Protocol {status.protocol_version} · {status.server_name || 'server'} {status.server_version || ''}</span>}
+                          {status?.last_error && <span className="mcp-error">{status.last_error}</span>}
+                        </div>
+                      )
+                    })}
+                    {(settings.mcp?.servers ?? []).length === 0 && (
+                      <span className="safe-rule-empty">No MCP servers configured. Add the PortSwigger endpoint as Streamable HTTP with <code>/mcp</code>, or use legacy SSE/stdin when required.</span>
+                    )}
+                    <button type="button" className="mcp-add-server" onClick={addMCPServer}>Add MCP server</button>
+                  </div>
+                </Field>
+                <Field label="Network boundary">
+                  <span className="field-hint">
+                    Network MCP endpoints must use localhost, loopback, or a literal private-LAN IP such as 192.168.1.53. Mauler does not create SSH tunnels, port forwards, relays, or automatic remote routes. Authentication values are read from environment variables and are never returned to React.
+                  </span>
                 </Field>
               </div>
             )}

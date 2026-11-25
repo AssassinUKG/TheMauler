@@ -36,7 +36,8 @@ func TestEffortToThinkingMapping(t *testing.T) {
 		wantCap      int
 		wantCoding   bool
 	}{
-		{"minimal", false, 1024, true},
+		{"minimal", false, 0, true},
+		{"none", false, 0, true},
 		{"low", false, 0, true},
 		{"medium", true, 0, false},
 		{"high", true, 0, false},
@@ -117,8 +118,8 @@ func TestBuildChatRequestAppliesMinimalEffortAndForceNoThinkFloor(t *testing.T) 
 	if req.EnableThinking || req.PreserveThinking {
 		t.Fatalf("minimal effort should disable thinking: %#v", req)
 	}
-	if req.MaxTokens != 1024 || req.Temperature != 0.7 || req.ReasoningEffort != "none" {
-		t.Fatalf("minimal effort should use capped no-thinking params: %#v", req)
+	if req.MaxTokens != 2048 || req.Temperature != 0.7 || req.ReasoningEffort != "none" {
+		t.Fatalf("minimal effort should preserve no-thinking response budget: %#v", req)
 	}
 
 	req = buildChatRequest(profile, nil, nil, "", true, false, "high")

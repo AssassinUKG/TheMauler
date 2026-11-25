@@ -462,3 +462,24 @@ npm run build
    - Recommended: voice-in first, voice-out after the shared audio engine exists.
 4. Should group chats be enabled immediately?
    - Recommended: direct messages first, groups after mention/allowlist behavior is tested.
+## Implemented parity follow-up — 2026-11-23
+
+Preserve TheMauler's existing actionable-message routing, queue and terminal result pipeline.
+Jade-style read-only result presentation is now implemented: one editable progress message,
+verbatim long-reply preview, Full report, exact Markdown download and observed Sources. Topic,
+sender and acknowledged-message ownership bind each short-lived one-shot callback. No callback
+can start a model or command. Balanced UTF-16 HTML and explicit/uncertain API error handling are
+covered by real loopback transport tests; ambiguous sends/edits are not blindly duplicated.
+
+Default general-news retrieval has bounded, dated publisher feeds with ordinary-search fallback;
+explicit search-service settings remain authoritative. The exact operator headline prompt passes
+on the already-loaded local model in isolated app state. Full Go/vet, frontend/native production
+build, focused Telegram race and the complete app/tools/Telegram race gate pass. A source-changing
+context identity run is retained as invalid evidence; the quiescent rerun passes without a product
+change. The normal app was restarted and its saved chats/workspace observed; configuration,
+profiles and provider-secret bytes are unchanged. No reboot or production test message was sent.
+
+See `telegram-news-parity-2026-11-23.json`. Still open: real-phone interaction/layout, durable
+inbox/outbox, safe selective multipart retry and restart-persistent result snapshots. Expiry after
+15 minutes or process restart is explicit; full uncached delivery remains available.
+

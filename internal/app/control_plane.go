@@ -92,15 +92,16 @@ func (a *App) buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMo
 	// An explicit no-tool instruction is an answer-only contract. Even if the
 	// requested prose contains mutation-shaped words such as "add a closing
 	// line", it cannot authorize or require a workspace mutation.
-	concrete := promptImpliesConcreteDeliverable(run.Prompt) &&
-		!promptLooksReadOnly(run.Prompt) &&
-		!explicitlyForbidsToolUse(run.Prompt)
+	trustedPrompt := taskRoutingPrompt(run)
+	concrete := promptImpliesConcreteDeliverable(trustedPrompt) &&
+		!promptLooksReadOnly(trustedPrompt) &&
+		!explicitlyForbidsToolUse(trustedPrompt)
 	planRequired := cfg.Agents.RequirePlan && concrete
 	risk := controlplane.RiskLow
 	if concrete {
 		risk = controlplane.RiskMedium
 	}
-	lowerPrompt := strings.ToLower(run.Prompt)
+	lowerPrompt := strings.ToLower(trustedPrompt)
 	if concrete && hasAny(lowerPrompt, "delete ", "remove ", "credential", "exploit", "reverse shell", "privilege escalation") {
 		risk = controlplane.RiskHigh
 	}
@@ -111,7 +112,7 @@ func (a *App) buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMo
 	var mutationRules []controlplane.PathRule
 	constraints := []string{"Do not mutate outside the authoritative workspace or an explicitly approved scope."}
 	protectedArtifacts := a.finalizedArtifactBoundaries(absWorkspace)
-	repairScope := repairScopeForPrompt(run.Prompt, mode.Name, absWorkspace, protectedArtifacts)
+	repairScope := repairScopeForPrompt(trustedPrompt, mode.Name, absWorkspace, protectedArtifacts)
 	if len(protectedArtifacts) > 0 {
 		constraints = append(constraints, "Earlier finalized artifacts are immutable unless this is an explicit Fixer run whose repair scope names the exact file.")
 	}
@@ -120,7 +121,7 @@ func (a *App) buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMo
 	}
 	if concrete {
 		deliverables = append(deliverables, controlplane.Deliverable{
-			ID: "primary", Description: strings.TrimSpace(run.Prompt), Kind: "workspace_change",
+			ID: "primary", Description: trustedPrompt, Kind: "workspace_change",
 		})
 		mutationRules = append(mutationRules, controlplane.PathRule{Root: absWorkspace, Access: "write"})
 		checks = append(checks, controlplane.AcceptanceCheck{
@@ -139,13 +140,18 @@ func (a *App) buildTaskContract(run TaskRun, cfg settings.Settings, mode AgentMo
 	for _, protected := range cfg.Tools.ProtectedPaths {
 		constraints = append(constraints, "Protected resource must not be mutated: "+protected)
 	}
+	if exact, err := compileExactFileExpectationForAction(trustedPrompt, absWorkspace, concrete); err != nil {
+		return controlplane.TaskContract{}, err
+	} else if exact != nil {
+		checks = append(checks, controlplane.AcceptanceCheck{ID: "literal_file_bytes", Description: "The final artifact matches the exact operator-requested bytes.", Verifier: "file_exact_bytes", Blocking: true, EvidenceKinds: []string{"file_sha256"}, ExactFile: exact})
+	}
 	approvalPolicy := "exact_normalized_action"
 	if autonomous {
 		approvalPolicy = "tool_policy_and_scope_gates"
 	}
 	return controlplane.NewTaskContract(controlplane.ContractInput{
 		RunID:               run.ID,
-		Objective:           run.Prompt,
+		Objective:           trustedPrompt,
 		WorkspaceRoot:       absWorkspace,
 		Deliverables:        deliverables,
 		Constraints:         constraints,
@@ -235,6 +241,14 @@ func (a *App) prepareControlledTool(run *TaskRun, tc llm.ToolCallDef) (bool, str
 }
 
 func (a *App) recordControlledToolOutcome(run *TaskRun, controlled bool, tc llm.ToolCallDef, runErr error) {
+	status := "done"
+	if runErr != nil {
+		status = "error"
+	}
+	a.recordControlledToolOutcomeStatus(run, controlled, tc, status, runErr)
+}
+
+func (a *App) recordControlledToolOutcomeStatus(run *TaskRun, controlled bool, tc llm.ToolCallDef, status string, runErr error) {
 	if run == nil || run.Control == nil {
 		return
 	}
@@ -247,7 +261,10 @@ func (a *App) recordControlledToolOutcome(run *TaskRun, controlled bool, tc llm.
 	if run.Control.Phase != controlplane.PhaseActing {
 		return
 	}
-	if runErr != nil {
+	if runErr != nil || status == "blocked" || status == "denied" || status == "disabled" || status == "inconclusive" || status == "error" {
+		if runErr == nil {
+			runErr = fmt.Errorf("tool outcome was %s", firstNonEmpty(status, "not successful"))
+		}
 		_ = a.applyControlEvent(run, controlplane.Event{Kind: controlplane.EventActionFailed, Detail: fmt.Sprintf("%s: %v", tc.Function.Name, runErr)})
 		return
 	}
@@ -309,9 +326,9 @@ func controlPlanePrompt(run TaskRun) string {
 	if len(run.Contract.RepairScope) > 0 {
 		repairScope = strings.Join(run.Contract.RepairScope, ", ")
 	}
-	return fmt.Sprintf("[control_plane]\ncontract_revision: %d\ncontract_digest: %s\nphase: %s\nplan_required: %t\nplan_accepted: %t\nrisk: %s\nobjective: %s\nallowed_next: %s\nblocking_checks: %s\nprotected_artifacts: %d\nrepair_scope: %s\nThe Go control plane is authoritative. Assistant prose is not completion evidence.",
+	return fmt.Sprintf("[control_plane]\ncontract_revision: %d\ncontract_digest: %s\nphase: %s\nplan_required: %t\nplan_accepted: %t\nrisk: %s\nobjective: %s\nallowed_next: %s\nblocking_checks: %s\nprotected_artifacts: %d\nrepair_scope: %s\nThe Go control plane is authoritative. Assistant prose is not completion evidence.\n%s",
 		run.Contract.Revision, run.Contract.Digest, run.Control.Phase, run.Contract.PlanRequired, run.Control.PlanAccepted,
-		run.Contract.Risk, run.Contract.Objective, allowed, strings.Join(missing, ", "), len(run.Contract.ProtectedArtifacts), repairScope)
+		run.Contract.Risk, run.Contract.Objective, allowed, strings.Join(missing, ", "), len(run.Contract.ProtectedArtifacts), repairScope, toolInputConstraintPrompt(run))
 }
 
 func (a *App) finalizedArtifactBoundaries(workspace string) []controlplane.ArtifactBoundary {
@@ -536,6 +553,10 @@ func controlSatisfiedChecks(run TaskRun, verdicts []VerifyVerdict) map[string][]
 			continue
 		}
 		switch check.ID {
+		case "literal_file_bytes":
+			if evidence, ok := exactFileEvidence(run, check.ExactFile); ok {
+				satisfied[check.ID] = []string{evidence}
+			}
 		case "mutation_postcondition":
 			if evidence := mutationEvidenceIDs(run); len(evidence) > 0 {
 				satisfied[check.ID] = evidence
@@ -669,7 +690,26 @@ func controlCanVerifyAtToolBudget(run TaskRun) bool {
 	}
 }
 
+func validateCompletionContract(run *TaskRun) error {
+	if run == nil || run.Contract == nil || run.Control == nil {
+		return fmt.Errorf("completion contract/state is unavailable")
+	}
+	if err := run.Contract.Validate(); err != nil {
+		return fmt.Errorf("completion contract: %w", err)
+	}
+	if err := run.Control.Validate(); err != nil {
+		return fmt.Errorf("completion control state: %w", err)
+	}
+	if run.Contract.RunID != run.ID || run.Control.ContractDigest != run.Contract.Digest || run.Control.ContractRevision != run.Contract.Revision {
+		return fmt.Errorf("completion contract/state does not belong to this run revision")
+	}
+	return nil
+}
+
 func (a *App) passControlVerification(run *TaskRun, verdicts []VerifyVerdict) error {
+	if err := validateCompletionContract(run); err != nil {
+		return err
+	}
 	satisfied := controlSatisfiedChecks(*run, verdicts)
 	if err := a.applyControlEvent(run, controlplane.Event{
 		Kind: controlplane.EventVerificationPassed, Detail: "all blocking acceptance checks have immutable evidence ids",

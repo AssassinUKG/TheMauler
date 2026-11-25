@@ -104,9 +104,11 @@ func TestBackgroundJobLifecycle(t *testing.T) {
 	if !strings.Contains(text, "[shell_result state=done backend=background]") || !strings.Contains(text, "result_id: "+id) || !strings.Contains(text, "next_tool: proceed") {
 		t.Fatalf("done output missing structured contract:\n%s", text)
 	}
-	if _, _, err := runShellBackground(shellParams{Job: id}); err == nil {
-		t.Fatal("a finished job should be cleared and error on re-poll")
+	repeated, _, err := runShellBackground(shellParams{Job: id})
+	if err != nil || !strings.Contains(repeated, "state=done") || !strings.Contains(repeated, "backgroundmarker") {
+		t.Fatalf("finished job re-poll = %q, err %v; want stable done result", repeated, err)
 	}
+	ReapBackgroundShellJobs()
 }
 
 func TestBackgroundJobObserverFires(t *testing.T) {
@@ -166,8 +168,7 @@ func TestReapFinishedJobsClearsDoneAndLog(t *testing.T) {
 
 	// Wait for the process to actually exit (poll once past the backoff window).
 	pollUntilDone(t, id, 15*time.Second)
-	// pollUntilDone already cleared it on the done poll, so start a fresh one that
-	// finishes but is never polled, to exercise reap directly.
+	// Start a fresh one that finishes but is never polled, to exercise reap directly.
 	start2, _, err := runShellBackground(shellParams{Command: "echo reapme2", Background: true})
 	if err != nil {
 		t.Fatalf("start2: %v", err)

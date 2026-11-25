@@ -70,6 +70,10 @@ export function ClearMemoryEntries() {
   return window['go']['app']['App']['ClearMemoryEntries']();
 }
 
+export function ClearNanoCyberCredential() {
+  return window['go']['app']['App']['ClearNanoCyberCredential']();
+}
+
 export function ClearProviderAPIKey(arg1) {
   return window['go']['app']['App']['ClearProviderAPIKey'](arg1);
 }
@@ -146,6 +150,10 @@ export function DeleteTelegramMessage(arg1, arg2) {
   return window['go']['app']['App']['DeleteTelegramMessage'](arg1, arg2);
 }
 
+export function DisconnectMCPServer(arg1) {
+  return window['go']['app']['App']['DisconnectMCPServer'](arg1);
+}
+
 export function DispatchChannelMessage(arg1) {
   return window['go']['app']['App']['DispatchChannelMessage'](arg1);
 }
@@ -176,6 +184,10 @@ export function ExportPackJSON(arg1) {
 
 export function ExportTaskRunsJSON() {
   return window['go']['app']['App']['ExportTaskRunsJSON']();
+}
+
+export function GetActiveConversationName() {
+  return window['go']['app']['App']['GetActiveConversationName']();
 }
 
 export function GetAgentMode() {
@@ -236,6 +248,18 @@ export function GetHomeDir() {
 
 export function GetLabStatus() {
   return window['go']['app']['App']['GetLabStatus']();
+}
+
+export function GetMCPStatus() {
+  return window['go']['app']['App']['GetMCPStatus']();
+}
+
+export function GetNanoCyberCredentialStatus() {
+  return window['go']['app']['App']['GetNanoCyberCredentialStatus']();
+}
+
+export function GetNanoCyberHealth() {
+  return window['go']['app']['App']['GetNanoCyberHealth']();
 }
 
 export function GetNextContextPacketClass() {
@@ -364,6 +388,10 @@ export function ListBenchmarkRuns() {
 
 export function ListBrowserCheckpoints() {
   return window['go']['app']['App']['ListBrowserCheckpoints']();
+}
+
+export function ListBrowserEvidence() {
+  return window['go']['app']['App']['ListBrowserEvidence']();
 }
 
 export function ListChannelWorkQueue() {
@@ -718,6 +746,10 @@ export function SetEngagementNotes(arg1, arg2, arg3) {
   return window['go']['app']['App']['SetEngagementNotes'](arg1, arg2, arg3);
 }
 
+export function SetNanoCyberCredential(arg1) {
+  return window['go']['app']['App']['SetNanoCyberCredential'](arg1);
+}
+
 export function SetNextContextPacketClass(arg1) {
   return window['go']['app']['App']['SetNextContextPacketClass'](arg1);
 }
@@ -766,6 +798,10 @@ export function StartBrowserWorkflow(arg1) {
   return window['go']['app']['App']['StartBrowserWorkflow'](arg1);
 }
 
+export function StartConversation(arg1) {
+  return window['go']['app']['App']['StartConversation'](arg1);
+}
+
 export function StartRepositorySplitReview(arg1) {
   return window['go']['app']['App']['StartRepositorySplitReview'](arg1);
 }
@@ -792,6 +828,10 @@ export function SynthesizeSpeech(arg1) {
 
 export function TakeOverBrowserWorkflow() {
   return window['go']['app']['App']['TakeOverBrowserWorkflow']();
+}
+
+export function TestMCPServer(arg1) {
+  return window['go']['app']['App']['TestMCPServer'](arg1);
 }
 
 export function TranscribeVoiceClip(arg1) {

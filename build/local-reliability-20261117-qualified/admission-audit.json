@@ -1,0 +1,10 @@
+{
+  "admittedSnapshots": 80,
+  "cases": 65,
+  "effectsReplayed": 0,
+  "exactArtifactsCurrent": 10,
+  "modelCalls": 0,
+  "pass": true,
+  "schemaVersion": "mauler-local-admission-audit-v1",
+  "sourceReport": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-qualified\\report.json"
+}

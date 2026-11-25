@@ -72,11 +72,21 @@ type ArtifactBoundary struct {
 }
 
 type AcceptanceCheck struct {
-	ID            string   `json:"id"`
-	Description   string   `json:"description"`
-	Verifier      string   `json:"verifier"`
-	Blocking      bool     `json:"blocking"`
-	EvidenceKinds []string `json:"evidence_kinds,omitempty"`
+	ID            string                `json:"id"`
+	Description   string                `json:"description"`
+	Verifier      string                `json:"verifier"`
+	Blocking      bool                  `json:"blocking"`
+	EvidenceKinds []string              `json:"evidence_kinds,omitempty"`
+	ExactFile     *ExactFileExpectation `json:"exact_file,omitempty"`
+}
+
+// ExactFileExpectation is controller-owned acceptance data captured before
+// acting, including the original prefix for an append through its final hash.
+type ExactFileExpectation struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+	Exclusive bool   `json:"exclusive"`
 }
 
 type RunBudgets struct {
@@ -180,6 +190,41 @@ func ReviseTaskContract(current TaskContract, objective string, instructionRevis
 	return next, nil
 }
 
+// ResumeTaskContract binds a fresh execution ID to the original immutable
+// objective, exact-byte expectations and scope. It never re-derives append
+// expectations from a possibly changed file after a crash.
+func ResumeTaskContract(current TaskContract, runID string, at time.Time) (TaskContract, error) {
+	if err := current.Validate(); err != nil {
+		return TaskContract{}, err
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || runID == current.RunID {
+		return TaskContract{}, errors.New("recovery requires a new run identity")
+	}
+	data, err := json.Marshal(current)
+	if err != nil {
+		return TaskContract{}, err
+	}
+	var next TaskContract
+	if err := json.Unmarshal(data, &next); err != nil {
+		return TaskContract{}, err
+	}
+	next.Revision++
+	if next.Revision <= current.Revision {
+		return TaskContract{}, errors.New("contract revision exhausted")
+	}
+	next.RunID, next.ParentDigest = runID, current.Digest
+	if at.IsZero() {
+		at = time.Now()
+	}
+	next.CreatedAt = at.UTC().Format(time.RFC3339Nano)
+	next.Digest = next.calculatedDigest()
+	if err := next.Validate(); err != nil {
+		return TaskContract{}, err
+	}
+	return next, nil
+}
+
 func (c TaskContract) Validate() error {
 	if c.Version != CurrentContractVersion {
 		return fmt.Errorf("unsupported contract version %d", c.Version)
@@ -224,6 +269,20 @@ func (c TaskContract) Validate() error {
 	}
 	if err := validateAcceptanceChecks(c.AcceptanceChecks); err != nil {
 		return err
+	}
+	for _, check := range c.AcceptanceChecks {
+		if check.ExactFile == nil {
+			continue
+		}
+		exact := check.ExactFile
+		rel, err := filepath.Rel(c.WorkspaceRoot, exact.Path)
+		if check.Verifier != "file_exact_bytes" || !filepath.IsAbs(exact.Path) || err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return errors.New("exact file expectation must belong to the authoritative workspace and verifier")
+		}
+		digest, err := hex.DecodeString(exact.SHA256)
+		if err != nil || len(digest) != sha256.Size || exact.Size < 0 || exact.Size > 2*1024*1024 {
+			return errors.New("invalid bounded exact file expectation")
+		}
 	}
 	if strings.TrimSpace(c.Digest) == "" {
 		return errors.New("contract digest is required")
@@ -284,6 +343,12 @@ func normalizeAcceptanceChecks(in []AcceptanceCheck) []AcceptanceCheck {
 		check.Description = strings.TrimSpace(check.Description)
 		check.Verifier = strings.TrimSpace(check.Verifier)
 		check.EvidenceKinds = uniqueStrings(check.EvidenceKinds)
+		if check.ExactFile != nil {
+			exact := *check.ExactFile
+			exact.Path = cleanRoot(exact.Path)
+			exact.SHA256 = strings.ToLower(strings.TrimSpace(exact.SHA256))
+			check.ExactFile = &exact
+		}
 		out = append(out, check)
 	}
 	return out

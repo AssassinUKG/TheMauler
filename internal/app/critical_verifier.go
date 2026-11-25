@@ -2,7 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"mauler/internal/llm"
@@ -14,10 +16,13 @@ var (
 	verifierRootHintRe    = regexp.MustCompile(`(?i)(?:\buid=0\(root\)|\broot\.txt\b|\bwhoami\s*[:=]?\s*root\b)`)
 	verifierDNSMovedRe    = regexp.MustCompile(`(?i)\b(?:different IP|resolv(?:es|ing) to|/etc/hosts|connection refused|failed to connect|exit code 7|no route to host|host unreachable)\b`)
 	httpRedirectStatusRe  = regexp.MustCompile(`(?i)\bHTTP/[0-9.]+\s+30[1278]\b`)
-	httpRedirectBodyRe    = regexp.MustCompile(`(?i)\b(?:301|302|307|308)\b|\bMoved Permanently\b|\bFound\b|\bTemporary Redirect\b|\bPermanent Redirect\b`)
+	httpRedirectBodyRe    = regexp.MustCompile(`(?im)^\s*(?:status(?:_code)?\s*[:=]\s*)?30[1278](?:\s+(?:Moved Permanently|Found|Temporary Redirect|Permanent Redirect))?\s*$|\b(?:Moved Permanently|Temporary Redirect|Permanent Redirect)\b`)
 	httpLocationRe        = regexp.MustCompile(`(?i)\bLocation:\s*(https?://[^\s"'<>]+)`)
 	httpHrefRe            = regexp.MustCompile(`(?i)href=["'](https?://[^"']+)["']`)
 	ipv4TokenRe           = regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
+	httpStatusSizeLineRe  = regexp.MustCompile(`(?m)^\s*([1-5][0-9]{2})\s+([0-9]+)\s*$`)
+	nmapOpenPortLineRe    = regexp.MustCompile(`(?m)^\s*([0-9]+)/(tcp|udp)\s+open\b`)
+	nmapClosedCountRe     = regexp.MustCompile(`(?i)Not shown:\s+([0-9]+)\s+closed`)
 )
 
 func appendCriticalVerifierHint(tc llm.ToolCallDef, result string) string {
@@ -43,10 +48,24 @@ func criticalVerifierHintWithTarget(tc llm.ToolCallDef, result, confirmedTarget 
 	}
 	lowerResult := strings.ToLower(result)
 	command := strings.ToLower(probeTargetTextFromToolArgs(tc.Function.Arguments))
+	if lowerTool == "shell" {
+		if _, safe := failurePropagatingCommands(command); !safe && hasAny(command, "go build", "go test", "go vet", "npm test", "npm run build", "pytest", "cargo test", "cargo build", "dotnet build", "tsc ") {
+			return "[verification_inconclusive] This command can hide a failed check behind a fallback, pipe, or later command. Its overall exit status is not completion evidence. Run the check directly (for example, go build ./main.go or go vet ./main.go), or join checks with &&, and use its actual exit status."
+		}
+	}
 	if hint := offTargetIPHint(command, confirmedTarget, result); hint != "" && (lowerTool == "shell" || lowerTool == "http_probe" || lowerTool == "terminal_send") {
 		return hint
 	}
 	if hint := httpRedirectHint(result); hint != "" && (lowerTool == "shell" || lowerTool == "http_probe" || lowerTool == "terminal_send") {
+		return hint
+	}
+	if hint := httpEndpointVerificationHint(command, result); hint != "" && (lowerTool == "shell" || lowerTool == "http_probe") {
+		return hint
+	}
+	if hint := indistinguishableHTTPResponseHint(command, result); hint != "" && (lowerTool == "shell" || lowerTool == "http_probe") {
+		return hint
+	}
+	if hint := nmapScopeHint(command, result); hint != "" && lowerTool == "shell" {
 		return hint
 	}
 	if strings.Contains(lowerResult, "command_failed: exit=") {
@@ -76,6 +95,67 @@ func criticalVerifierHintWithTarget(tc llm.ToolCallDef, result, confirmedTarget 
 		}
 	}
 	return ""
+}
+
+func httpEndpointVerificationHint(command, result string) string {
+	if !hasAny(command, "curl ", "wget ", "http://", "https://") {
+		return ""
+	}
+	lower := strings.ToLower(result)
+	if !hasAny(lower, "no such file or directory", "unknown endpoint", "route not found", "method not allowed") {
+		return ""
+	}
+	return "[verifier_required:http_endpoint] The server response did not verify the requested endpoint or action. Treat authentication, configuration change, upload, or exploitation as inconclusive until a follow-up request shows an expected status/body/session change."
+}
+
+func indistinguishableHTTPResponseHint(command, result string) string {
+	if !hasAny(command, "curl ", "wget ", "http://", "https://") || strings.Contains(result, "[http_fallback_warning]") {
+		return ""
+	}
+	matches := httpStatusSizeLineRe.FindAllStringSubmatch(result, -1)
+	if len(matches) < 2 {
+		return ""
+	}
+	counts := map[string]int{}
+	for _, match := range matches {
+		if len(match) == 3 {
+			counts[match[1]+"/"+match[2]]++
+		}
+	}
+	for signature, count := range counts {
+		if count >= 2 {
+			return fmt.Sprintf("[http_fallback_warning] %d distinct requests returned the same HTTP status/body size (%s). This may be a generic SPA/router fallback; path existence is unverified. Compare with a random nonexistent control path or inspect browser/API traffic before treating any path as real.", count, strings.ReplaceAll(signature, "/", ", "))
+		}
+	}
+	return ""
+}
+
+func nmapScopeHint(command, result string) string {
+	if !strings.Contains(command, "nmap") || strings.Contains(result, "[scan_scope:") {
+		return ""
+	}
+	if strings.Contains(command, "--top-ports") {
+		return "[scan_scope:top_ports] This was a bounded top-ports scan, not a full 1-65535 TCP scan. Report only the observed ports and do not claim all other ports are closed."
+	}
+	if !nmapCommandRequestsFullTCP(command) {
+		return ""
+	}
+	openCount := len(nmapOpenPortLineRe.FindAllStringSubmatch(result, -1))
+	closed := 0
+	if match := nmapClosedCountRe.FindStringSubmatch(result); len(match) == 2 {
+		closed, _ = strconv.Atoi(match[1])
+	}
+	if total := openCount + closed; total > 0 && total < 65535 {
+		return fmt.Sprintf("[verifier_required:scan_scope] The command requested a full TCP scan, but the captured footer accounts for only %d ports. Treat scan scope as incomplete and inspect the saved Nmap artifact/footer before reporting coverage.", total)
+	}
+	return ""
+}
+
+func nmapCommandRequestsFullTCP(command string) bool {
+	lower := strings.ToLower(command)
+	return regexp.MustCompile(`(?:^|\s)-p-(?:\s|$)`).MatchString(lower) ||
+		regexp.MustCompile(`(?:^|\s)-p\s+1-65535(?:\s|$)`).MatchString(lower) ||
+		regexp.MustCompile(`(?:^|\s)-p1-65535(?:\s|$)`).MatchString(lower)
 }
 
 func probeTargetTextFromToolArgs(raw json.RawMessage) string {
@@ -188,5 +268,5 @@ func buildPendingVerifierPrompt(msgs []llm.Message) string {
 	if len(kinds) == 0 {
 		return ""
 	}
-	return "Proper verifier required before any final answer or success/failure claim. Do not summarize as complete yet. Your next action must be an evidence-backed verifier step for: " + strings.Join(kinds, ", ") + ". Use existing access/session where possible and capture command plus result evidence. Required standards: webshell -> prove the exact URL with id, pwd, and hostname; listener -> terminal_read the listener state before triggering and then verify the callback session; session/shell_user/root -> verify id, hostname, pwd, and the expected evidence/flag path where relevant; target_route -> verify hosts/DNS, TCP reachability, and one service probe before claiming reboot/VPN/DNS failure; file -> read or grep the changed file and confirm intended content. If verification fails, update the facts/blocker instead of claiming success."
+	return "Proper verifier required before any final answer or success/failure claim. Do not summarize as complete yet. Your next action must be an evidence-backed verifier step for: " + strings.Join(kinds, ", ") + ". Use existing access/session where possible and capture command plus result evidence. Required standards: webshell -> prove the exact URL with id, pwd, and hostname; listener -> terminal_read the listener state before triggering and then verify the callback session; session/shell_user/root -> verify id, hostname, pwd, and the expected evidence/flag path where relevant; target_route -> verify hosts/DNS, TCP reachability, and one service probe before claiming reboot/VPN/DNS failure; http_endpoint -> require an expected status/body/session change rather than a generic error page; scan_scope -> inspect the Nmap footer/artifact and verify the requested port count; file -> read or grep the changed file and confirm intended content. If verification fails, update the facts/blocker instead of claiming success."
 }

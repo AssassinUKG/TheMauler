@@ -1,17 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
-import Editor, { DiffEditor } from '@monaco-editor/react'
+import Editor, { DiffEditor, loader } from '@monaco-editor/react'
 import type { OnMount } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
+import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
+import CSSWorker from 'monaco-editor/language/css/css.worker.js?worker'
+import HTMLWorker from 'monaco-editor/language/html/html.worker.js?worker'
+import JSONWorker from 'monaco-editor/language/json/json.worker.js?worker'
+import TypeScriptWorker from 'monaco-editor/language/typescript/ts.worker.js?worker'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { SaveFileContent, RunArtifact, StopArtifact } from '../wailsjs/go'
+import type { OpenFile, OpenFilePatch } from '../editorTabs'
 import './FileViewer.css'
 
-export interface OpenFile {
-  path: string
-  name: string
-  content: string
-  lang: string
+type MonacoWorkerHost = typeof self & {
+  MonacoEnvironment?: {
+    getWorker(moduleID: string, label: string): Worker
+  }
 }
+
+;(self as MonacoWorkerHost).MonacoEnvironment = {
+  getWorker(_moduleID: string, label: string) {
+    if (label === 'json') return new JSONWorker()
+    if (label === 'css' || label === 'scss' || label === 'less') return new CSSWorker()
+    if (label === 'html' || label === 'handlebars' || label === 'razor') return new HTMLWorker()
+    if (label === 'typescript' || label === 'javascript') return new TypeScriptWorker()
+    return new EditorWorker()
+  },
+}
+
+loader.config({ monaco })
+
+export type { OpenFile } from '../editorTabs'
 
 interface Props {
   file: OpenFile | null
@@ -23,6 +43,8 @@ interface Props {
   onClose?: () => void
   onSwitchFile?: (index: number) => void
   onCloseFile?: (index: number) => void
+  onUpdateFile?: (index: number, patch: OpenFilePatch) => void
+  onFileSaved?: (index: number, content: string) => void
 }
 
 const RUNNABLE = new Set(['bash', 'sh', 'shell', 'python', 'python3', 'py', 'javascript', 'js', 'node', 'typescript', 'ts', 'powershell', 'pwsh', 'ps1'])
@@ -37,10 +59,9 @@ export function FileViewer({
   onClose,
   onSwitchFile,
   onCloseFile,
+  onUpdateFile,
+  onFileSaved,
 }: Props) {
-  const [content, setContent] = useState('')
-  const [language, setLanguage] = useState('plaintext')
-  const [dirty, setDirty] = useState(false)
   const [status, setStatus] = useState('')
   const [position, setPosition] = useState('Ln 1, Col 1')
   const [showOutput, setShowOutput] = useState(false)
@@ -48,16 +69,18 @@ export function FileViewer({
   const [showPreview, setShowPreview] = useState(false)
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
   const outputRef = useRef<HTMLPreElement>(null)
+  const saveRef = useRef<() => Promise<void>>(async () => {})
+  const content = file?.content ?? ''
+  const language = file?.lang ?? 'plaintext'
+  const dirty = Boolean(file?.dirty)
+  const savedContent = file?.savedContent ?? content
 
   useEffect(() => {
-    setContent(file?.content ?? '')
-    setLanguage(file?.lang ?? 'plaintext')
-    setDirty(false)
     setStatus('')
     setPosition('Ln 1, Col 1')
     setShowDiff(false)
     setShowPreview(false)
-  }, [file?.path, file?.content, file?.lang])
+  }, [activeIndex, file?.path, file?.name])
 
   // Leaving markdown drops out of preview mode
   useEffect(() => {
@@ -82,11 +105,16 @@ export function FileViewer({
 
   const save = async () => {
     if (!file || !file.path) return
-    await SaveFileContent(file.path, content)
-    setDirty(false)
-    setStatus('Saved')
-    window.setTimeout(() => setStatus(''), 1600)
+    try {
+      await SaveFileContent(file.path, content)
+      onFileSaved?.(activeIndex, content)
+      setStatus('Saved')
+      window.setTimeout(() => setStatus(current => current === 'Saved' ? '' : current), 1600)
+    } catch (error) {
+      setStatus(`Save failed: ${String(error)}`)
+    }
   }
+  saveRef.current = save
 
   const format = async () => {
     await editorRef.current?.getAction('editor.action.formatDocument')?.run()
@@ -106,7 +134,7 @@ export function FileViewer({
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      void save()
+      void saveRef.current()
     })
     editor.onDidChangeCursorPosition(e => {
       setPosition(`Ln ${e.position.lineNumber}, Col ${e.position.column}`)
@@ -138,7 +166,7 @@ export function FileViewer({
                 onClick={() => onSwitchFile?.(index)}
                 title={openFile.path || openFile.name}
               >
-                <span>{openFile.name}</span>
+                <span>{openFile.name}{openFile.dirty ? ' •' : ''}</span>
                 {onCloseFile && (
                   <i
                     role="button"
@@ -172,7 +200,7 @@ export function FileViewer({
               Close
             </button>
           )}
-          <select value={language} onChange={e => setLanguage(e.target.value)} title="Syntax language">
+          <select value={language} onChange={e => onUpdateFile?.(activeIndex, { lang: e.target.value })} title="Syntax language">
             {languages.map(lang => <option key={lang} value={lang}>{lang}</option>)}
           </select>
           {language === 'markdown' && (
@@ -223,7 +251,7 @@ export function FileViewer({
               <DiffEditor
                 height="100%"
                 language={language}
-                original={file?.content ?? ''}
+                original={savedContent}
                 modified={content}
                 theme="vs-dark"
                 options={{
@@ -239,14 +267,14 @@ export function FileViewer({
               />
             ) : (
               <Editor
+                key={`${file.path || file.name}-${activeIndex}`}
                 height="100%"
                 language={language}
                 value={content}
                 theme="vs-dark"
                 onMount={handleMount}
                 onChange={value => {
-                  setContent(value ?? '')
-                  setDirty(true)
+                  onUpdateFile?.(activeIndex, { content: value ?? '' })
                   setStatus('')
                 }}
                 options={{

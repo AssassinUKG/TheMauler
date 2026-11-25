@@ -148,6 +148,22 @@ func normaliseSettings(s *Settings) {
 		normaliseAgentPresetPermissions(s.Agents.Presets)
 	}
 	normaliseEnvironment(&s.Environment, defaults.Environment)
+	s.NanoCyber.Endpoint = strings.TrimSpace(s.NanoCyber.Endpoint)
+	s.NanoCyber.APIVersion = strings.TrimSpace(s.NanoCyber.APIVersion)
+	if s.NanoCyber.APIVersion == "" {
+		s.NanoCyber.APIVersion = defaults.NanoCyber.APIVersion
+	}
+	s.NanoCyber.CredentialEnv = strings.TrimSpace(s.NanoCyber.CredentialEnv)
+	if s.NanoCyber.CredentialEnv == "" {
+		s.NanoCyber.CredentialEnv = defaults.NanoCyber.CredentialEnv
+	}
+	s.NanoCyber.CredentialRef = strings.TrimSpace(s.NanoCyber.CredentialRef)
+	if s.NanoCyber.CredentialRef == "" {
+		s.NanoCyber.CredentialRef = defaults.NanoCyber.CredentialRef
+	}
+	if validatedMCP, err := ValidateMCPConfig(s.MCP); err == nil {
+		s.MCP = validatedMCP
+	}
 	if s.Context.CompactionAt <= 0 {
 		s.Context.CompactionAt = defaults.Context.CompactionAt
 	}

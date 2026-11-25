@@ -57,6 +57,7 @@ func DefaultSettings() Settings {
 				"set_reasoning_effort": true,
 				"read_tool_result":     true,
 				"generate_image":       true,
+				"mcp":                  true,
 			},
 		},
 		Agents: AgentsConfig{
@@ -95,6 +96,17 @@ func DefaultSettings() Settings {
 			PreferTerminalTools:  true,
 			UserCorrectionPolicy: "latest_user_wins",
 			ReverseShellGuidance: "Use WSL/Kali for outbound target recon/exploit work. Use Windows PowerShell ncat.exe for reverse-shell listeners because VPN callbacks may not reliably reach WSL. Once a shell connects, commands in that terminal are target-shell commands.",
+		},
+		NanoCyber: NanoCyberConfig{
+			Enabled:       false,
+			Endpoint:      "",
+			APIVersion:    "v1",
+			CredentialEnv: "NANOCYBER_API_TOKEN",
+			CredentialRef: "nanocyber",
+		},
+		MCP: MCPConfig{
+			Enabled: false,
+			Servers: nil,
 		},
 		Context: ContextConfig{
 			AutoInjectFile:              false,
@@ -200,13 +212,13 @@ func DefaultSettings() Settings {
 func DefaultToolsets() map[string][]string {
 	coreRead := []string{"read", "glob", "grep", "sqlite", "session_search", "skill", "memory", "progress", "read_tool_result", "todo_write", "generate_image"}
 	localCode := append(append([]string{}, coreRead...), "write", "edit", "shell", "run_script", "terminal_send", "terminal_read", "start_listener", "http_probe", "evidence_bundle", "file_changes", "set_reasoning_effort", "task", "engagement")
-	runLean := []string{"read", "write", "edit", "glob", "grep", "shell", "terminal_send", "terminal_read", "run_script", "http_probe", "start_listener", "evidence_bundle", "memory", "progress", "read_tool_result", "todo_write", "skill", "set_reasoning_effort", "task", "engagement"}
+	runLean := []string{"read", "write", "edit", "glob", "grep", "shell", "terminal_send", "terminal_read", "run_script", "http_probe", "start_listener", "evidence_bundle", "memory", "progress", "read_tool_result", "todo_write", "skill", "set_reasoning_effort", "task", "engagement", "mcp"}
 	opsLean := append(append([]string{}, runLean...), "session_search")
 	explore := []string{"read", "glob", "grep"}
-	webResearch := []string{"read", "glob", "grep", "web_search", "fetch_url", "browser", "memory", "progress", "read_tool_result", "todo_write", "generate_image", "task"}
-	bugBountyReview := []string{"read", "glob", "grep", "session_search", "memory", "progress", "read_tool_result", "todo_write", "engagement", "evidence_bundle", "http_probe", "web_search", "fetch_url", "browser", "task"}
+	webResearch := []string{"read", "glob", "grep", "web_search", "fetch_url", "browser", "memory", "progress", "read_tool_result", "todo_write", "generate_image", "task", "mcp"}
+	bugBountyReview := []string{"read", "glob", "grep", "session_search", "memory", "progress", "read_tool_result", "todo_write", "engagement", "evidence_bundle", "http_probe", "web_search", "fetch_url", "browser", "task", "mcp"}
 	browser := append(append([]string{}, coreRead...), "browser", "web_search", "fetch_url")
-	unrestricted := append(append([]string{}, localCode...), "web_search", "fetch_url", "browser")
+	unrestricted := append(append([]string{}, localCode...), "web_search", "fetch_url", "browser", "mcp")
 	return map[string][]string{
 		"safe":              append([]string{}, coreRead...),
 		"run-lean":          runLean,

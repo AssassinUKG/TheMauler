@@ -70,6 +70,20 @@ func reapFinishedShellJobs() int {
 	return len(removed)
 }
 
+// HasBackgroundShellJob reports whether id belongs to the standalone/isolated
+// shell manager. The app uses this before shared-terminal routing so a poll is
+// always sent back to the manager that created the job.
+func HasBackgroundShellJob(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	bgJobs.mu.Lock()
+	_, ok := bgJobs.jobs[id]
+	bgJobs.mu.Unlock()
+	return ok
+}
+
 // ReapBackgroundShellJobs is the exported entry point the app calls at run-end to
 // clean up finished-but-unpolled standalone jobs.
 func ReapBackgroundShellJobs() int { return reapFinishedShellJobs() }
@@ -152,11 +166,18 @@ func startBackgroundShellJob(command string, verbose bool, forcedBackend string)
 		return "", fmt.Errorf("shell: %w", err)
 	}
 
-	// Free any finished-but-unpolled jobs, then refuse to start more than the cap
-	// so an un-polled job pileup can't exhaust processes/fds/temp files.
-	reapFinishedShellJobs()
+	// Count only live processes toward the cap. Completed jobs remain available
+	// for stable re-polls until the owning run performs its final reap.
 	bgJobs.mu.Lock()
-	running := len(bgJobs.jobs)
+	running := 0
+	for _, tracked := range bgJobs.jobs {
+		tracked.mu.Lock()
+		done := tracked.done
+		tracked.mu.Unlock()
+		if !done {
+			running++
+		}
+	}
 	bgJobs.mu.Unlock()
 	if running >= MaxConcurrentBackgroundJobs {
 		return "", fmt.Errorf("shell: too many background jobs running (%d/%d); poll existing jobs to completion before starting more", running, MaxConcurrentBackgroundJobs)
@@ -180,7 +201,7 @@ func startBackgroundShellJob(command string, verbose bool, forcedBackend string)
 
 	bgJobs.mu.Lock()
 	bgJobs.counter++
-	id := fmt.Sprintf("j%d", bgJobs.counter)
+	id := fmt.Sprintf("isolated-%d", bgJobs.counter)
 	bgJobs.mu.Unlock()
 
 	logPath := filepath.Join(os.TempDir(), "mauler_job_"+id+".log")
@@ -244,7 +265,7 @@ func startBackgroundShellJob(command string, verbose bool, forcedBackend string)
 }
 
 // pollBackgroundShellJob reports a job's running/done state plus the tail of its
-// output. A finished job is forgotten after it is reported once.
+// output. Finished results remain stable and re-readable until run-end cleanup.
 func pollBackgroundShellJob(id string, verbose bool) (string, error) {
 	id = strings.TrimSpace(id)
 	bgJobs.mu.Lock()
@@ -256,7 +277,7 @@ func pollBackgroundShellJob(id string, verbose bool) (string, error) {
 
 	now := time.Now()
 	job.mu.Lock()
-	if !job.lastPoll.IsZero() {
+	if !job.done && !job.lastPoll.IsZero() {
 		interval := backgroundJobPollInterval(job.pollCount)
 		if elapsed := now.Sub(job.lastPoll); elapsed < interval {
 			wait := (interval - elapsed).Round(time.Second)
@@ -294,11 +315,7 @@ func pollBackgroundShellJob(id string, verbose bool) (string, error) {
 	var footer string
 	nextPollSec := 0
 	if done {
-		bgJobs.mu.Lock()
-		delete(bgJobs.jobs, id)
-		bgJobs.mu.Unlock()
-		_ = os.Remove(job.logPath)
-		footer = fmt.Sprintf("[background job %s: done, exit %d, %s elapsed] (job cleared)", id, exitCode, elapsed)
+		footer = fmt.Sprintf("[background job %s: done, exit %d, %s elapsed] (result retained until run end; safe to re-poll)", id, exitCode, elapsed)
 	} else {
 		nextPoll := backgroundJobPollInterval(pollCount)
 		nextPollSec = int(nextPoll.Seconds())

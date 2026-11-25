@@ -1425,6 +1425,81 @@ func TestUpdateSettingsAppliesWorkspaceDir(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsAllowsUnrelatedSaveWithMissingConfiguredWorkspace(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	workingDir := t.TempDir()
+	restoreWorkingDir(t)
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatal(err)
+	}
+
+	missingWorkspace := filepath.Join(t.TempDir(), "moved-workspace")
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(missingWorkspace)
+	profiles := settings.DefaultProfiles()
+	app := &App{
+		cfg:      &cfg,
+		profiles: &profiles,
+		history:  agent.NewHistory(4096),
+		rollback: &agent.Rollback{},
+		registry: tools.New(),
+	}
+	app.history.Append(llm.NewTextMessage(llm.RoleUser, "keep this chat"))
+
+	next := cfg
+	next.UI.Theme = "light"
+	if err := app.UpdateSettings(next); err != nil {
+		t.Fatalf("unrelated settings save failed: %v", err)
+	}
+
+	if got := app.GetWorkingDir(); got != filepath.ToSlash(workingDir) {
+		t.Fatalf("working dir = %q, want unchanged %q", got, filepath.ToSlash(workingDir))
+	}
+	if got := app.cfg.Context.WorkspaceDir; got != filepath.ToSlash(missingWorkspace) {
+		t.Fatalf("configured workspace = %q, want preserved %q", got, filepath.ToSlash(missingWorkspace))
+	}
+	if app.history.TokenCount() == 0 {
+		t.Fatal("unrelated settings save cleared chat context")
+	}
+	saved, err := settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.UI.Theme != "light" {
+		t.Fatalf("saved theme = %q, want light", saved.UI.Theme)
+	}
+}
+
+func TestUpdateSettingsRejectsNewMissingWorkspace(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	workingDir := t.TempDir()
+	restoreWorkingDir(t)
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := settings.DefaultSettings()
+	cfg.Context.WorkspaceDir = filepath.ToSlash(workingDir)
+	profiles := settings.DefaultProfiles()
+	app := &App{
+		cfg:      &cfg,
+		profiles: &profiles,
+		history:  agent.NewHistory(4096),
+		rollback: &agent.Rollback{},
+		registry: tools.New(),
+	}
+
+	next := cfg
+	next.Context.WorkspaceDir = filepath.Join(t.TempDir(), "missing-workspace")
+	err := app.UpdateSettings(next)
+	if err == nil || !strings.Contains(err.Error(), "workspace_dir") {
+		t.Fatalf("missing workspace error = %v, want workspace_dir validation failure", err)
+	}
+	if got := app.cfg.Context.WorkspaceDir; got != filepath.ToSlash(workingDir) {
+		t.Fatalf("configured workspace changed to %q after rejection", got)
+	}
+}
+
 func TestRuntimeSettingsChangedIgnoresUnrelatedProjectChanges(t *testing.T) {
 	previous := settings.DefaultSettings()
 	next := previous
@@ -1629,7 +1704,7 @@ func TestTaskRunStateTransitionsAreLogged(t *testing.T) {
 }
 
 func TestToolChoiceDisablesToolsForSmallTalkButNotShortTasks(t *testing.T) {
-	for _, text := range []string{"hello", "hi there", "thanks", "good morning"} {
+	for _, text := range []string{"hello", "hiya", "hi there", "thanks", "good morning", "can you help me?"} {
 		if !looksConversational(text) {
 			t.Fatalf("%q should be conversational", text)
 		}
@@ -1765,7 +1840,7 @@ func TestOpsPromptRequiresObservedOutOfBandCallbackEvidence(t *testing.T) {
 }
 
 func TestAdaptiveDirectAnswerBudgetAndCompletion(t *testing.T) {
-	req := llm.Request{MaxTokens: 8192}
+	req := llm.Request{MaxTokens: 16384}
 	if !applyDirectAnswerResponseBudget(&req, true) || req.MaxTokens != directAnswerMaxTokens {
 		t.Fatalf("direct answer budget = %d, want %d", req.MaxTokens, directAnswerMaxTokens)
 	}
@@ -1838,7 +1913,7 @@ func TestExplicitNoToolInstructionPersistsAcrossContinuationTurns(t *testing.T) 
 }
 
 func TestExplicitNoToolResponseBudgetCapsRunawayExplanation(t *testing.T) {
-	req := llm.Request{MaxTokens: 8192}
+	req := llm.Request{MaxTokens: 16384}
 	if !applyExplicitNoToolResponseBudget(&req, "Explanation only; do not use tools.") {
 		t.Fatal("expected explanation-only response cap")
 	}
@@ -2216,6 +2291,12 @@ func TestStripTrailingBackgroundOperator(t *testing.T) {
 func TestShellAssignmentJobID(t *testing.T) {
 	if got := shellAssignmentJobID(`job="j12"`); got != "j12" {
 		t.Fatalf("job assignment id = %q, want j12", got)
+	}
+	if got := shellAssignmentJobID(`job="isolated-12"`); got != "isolated-12" {
+		t.Fatalf("isolated job assignment id = %q, want isolated-12", got)
+	}
+	if got := shellAssignmentJobID(`job='terminal-3'`); got != "terminal-3" {
+		t.Fatalf("terminal job assignment id = %q, want terminal-3", got)
 	}
 	if got := shellAssignmentJobID(`echo job="j12"`); got != "" {
 		t.Fatalf("non-assignment should not poll job: %q", got)
@@ -3128,6 +3209,24 @@ func TestInvalidDoneReasonRejectsActionIntentFinalSummary(t *testing.T) {
 	}
 }
 
+func TestInvalidDoneReasonAllowsGreetingToInviteARealTask(t *testing.T) {
+	for _, prompt := range []string{"hello", "hiya", "Can you help me?"} {
+		run := startTaskRun(prompt, "Auto", "qwen3.6-nothink", "qwen")
+		summary := "Hey! Back at the lab. Tell me which target or goal you have in mind and I'll dig in."
+		if reason := invalidDoneReason(run, summary); reason != "" {
+			t.Fatalf("%q should allow an open-ended conversational reply, got %q", prompt, reason)
+		}
+	}
+}
+
+func TestInvalidDoneReasonDoesNotExemptFactualQuestionFromCompletion(t *testing.T) {
+	run := startTaskRun("What does speculative decoding mean?", "Auto", "qwen3.6-nothink", "qwen")
+	reason := invalidDoneReason(run, "I'll explain speculative decoding next.")
+	if !strings.Contains(reason, "describes a next action") {
+		t.Fatalf("unanswered factual question should remain incomplete, got %q", reason)
+	}
+}
+
 func TestInvalidDoneReasonAllowsExplicitPlanningOnlyAnswer(t *testing.T) {
 	run := startTaskRun(
 		"Using only existing notes, summarize the next safe check. This is a planning-only question: do not run network tools.",
@@ -3924,8 +4023,37 @@ func TestSelectAgentModeOverrideAndPresetInstructions(t *testing.T) {
 
 	mode := selectAgentMode("please implement this", cfg)
 
-	if mode.Name != "Reviewer" || mode.Instructions != "custom review instructions" {
+	if mode.Name != "Reviewer" || mode.Instructions != "custom review instructions" || mode.DefinitionID != "reviewer" || mode.DefinitionVersion != "1" {
 		t.Fatalf("override/preset not applied: %#v", mode)
+	}
+}
+
+func TestSelectAgentModePreservesConfiguredCustomDefinition(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Agents.ModeOverride = "Threat Mapper"
+	cfg.Agents.Presets["Threat Mapper"] = settings.AgentModePreset{
+		Enabled:      true,
+		Instructions: "map trust boundaries",
+	}
+
+	mode := selectAgentMode("review this architecture", cfg)
+
+	if mode.Name != "Threat Mapper" || mode.Instructions != "map trust boundaries" {
+		t.Fatalf("custom agent selection collapsed to another mode: %#v", mode)
+	}
+	if mode.DefinitionID != "threat-mapper" || mode.DefinitionVersion != "custom" {
+		t.Fatalf("custom agent identity not preserved: %#v", mode)
+	}
+}
+
+func TestSelectAgentModeUnknownOverrideFallsBackToVersionedAuto(t *testing.T) {
+	cfg := settings.DefaultSettings()
+	cfg.Agents.ModeOverride = "Removed Agent"
+
+	mode := selectAgentMode("review this architecture", cfg)
+
+	if mode.Name != "Auto" || mode.DefinitionID != "auto" || mode.DefinitionVersion != "1" {
+		t.Fatalf("unknown agent fallback = %#v", mode)
 	}
 }
 

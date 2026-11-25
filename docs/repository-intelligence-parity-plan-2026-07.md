@@ -1,6 +1,6 @@
 # Mauler Native Files & Knowledge Intelligence Plan
 
-Status: M0 and the first M1/M2/M3/M4 production slices implemented; OCR/7z, optional embeddings, and live hardening remain
+Status: M0-M4 production slices implemented; optional embeddings and live hardening remain
 Date: 2026-07-15  
 Scope: TheMauler only; native Go backend and existing React/TypeScript desktop UI  
 Related: `docs/brain-memory-ledger-tracker.md`,
@@ -29,6 +29,10 @@ Related: `docs/brain-memory-ledger-tracker.md`,
 - The 2026-09-24 M4 follow-up adds bounded TAR/TGZ inventory, SQLite schema-only metadata, and PE/ELF
   structural metadata. Archive bodies and SQLite row values remain unread by these extractors;
   corrupt and over-limit fixtures prove they cannot create false coverage.
+- The 2026-10-25 M4 completion adds metadata-only 7z inventory and scanned-PDF OCR fallback. 7z
+  entries are bounded by count and logical uncompressed size without indexing member bodies. OCR
+  invokes local Poppler and Tesseract one page at a time under page, image, expanded-output, and
+  extractor-time limits; unavailable dependencies produce explicit non-coverage.
 - Selected extra file/folder sources landed 2026-09-20: native pickers add explicit read-only roots,
   persist them per workspace, display/remove them in Chat, and bind them into the policy digest.
   A source change cannot reuse stale active-generation evidence.
@@ -37,12 +41,12 @@ Related: `docs/brain-memory-ledger-tracker.md`,
   are extracted normally, deletions are tracked, and only the complete transaction moves the active
   pointer. Chat exposes manual refresh, persisted per-workspace Watch, health/last-check state, and
   exact reused/changed/deleted counts. Still open: general-purpose `read_index_chunk`, index-chunk
-  drill-down/search in Memory/Brain, OCR/7z extractors, optional embeddings, and live pass^k.
+  drill-down/search in Memory/Brain, optional embeddings, and live pass^k.
 - Brain index health/actions landed 2026-09-23. `RepositoryIndexStatus` owns one code-defined health
   verdict and explanation; Brain renders the active generation's coverage, policy/manifest
   provenance, Watch state, progress, incremental reuse and explicit omissions, and invokes the same
   refresh/watch/rebuild/cancel bindings as Chat. Still open: general-purpose `read_index_chunk`,
-  remaining extractors, optional embeddings, and live pass^k.
+  optional embeddings and live pass^k.
 - The deterministic M3 foundation landed 2026-09-23. `internal/repoindex` now derives stable,
   size-balanced read-only shards from one complete immutable generation; seals each shard to the
   manifest, exact file/chunk hashes and line ranges; and provides a controller-owned merge gate that
@@ -271,7 +275,8 @@ they are never quietly treated as covered.
 - Second production slice landed 2026-09-24: TAR/TGZ inventory, SQLite schema-only metadata, and
   PE/ELF structural metadata use the same bounded untrusted chunks. Archive bodies and database row
   values are excluded; row sampling remains deferred until an explicit privacy/redaction policy.
-- Continue with scanned-PDF OCR and bounded 7z support.
+- Final planned extractor slice landed 2026-10-25: bounded local scanned-PDF OCR and metadata-only
+  7z inventories, including explicit missing-tool and over-limit outcomes.
 - Add InferenceBridge embeddings, hybrid ranking, MMR, and embedding cache invalidation.
 - Keyword-only mode remains fully supported and tested.
 
@@ -326,4 +331,6 @@ read.
   the same day. The 2026-09-20 M4 first slice adds bounded
   readable-PDF/OpenXML/ODS text and ZIP inventory extraction without making embeddings or archive
   expansion a requirement. The 2026-09-24 follow-up adds TAR/TGZ inventory, SQLite schema-only
-  metadata, and PE/ELF structural metadata without indexing archive bodies or database rows.
+  metadata, and PE/ELF structural metadata without indexing archive bodies or database rows. The
+  2026-10-25 completion adds bounded scanned-PDF OCR and 7z inventory without indexing archive
+  member bodies.

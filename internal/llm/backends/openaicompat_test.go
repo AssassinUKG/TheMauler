@@ -80,7 +80,15 @@ func TestOpenAICompatModelMetadataUsesSafeProviderLimits(t *testing.T) {
 			"supported_parameters":["max_tokens","tools"],
 			"top_provider":{"context_length":262144,"max_completion_tokens":16384}
 		},{
-			"id":"local/model"
+			"id":"RVN-Q4_K_M-multilingual-mtp.gguf",
+			"max_context_length":262144,
+			"active":true,
+			"state":"loaded",
+			"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]},
+			"reasoning":{"supported":true,"separates_content":true,"effort_values":["none","low","medium","high","xhigh"],"supports_reasoning_tokens":true,"default_effort":"medium"},
+			"supports_vision":true,
+			"vision_runtime_ready":true,
+			"mmproj_status":"ready"
 		}]}`))
 	}))
 	defer server.Close()
@@ -99,15 +107,25 @@ func TestOpenAICompatModelMetadataUsesSafeProviderLimits(t *testing.T) {
 	if len(models[0].SupportedParameters) != 2 {
 		t.Fatalf("supported parameters = %#v", models[0].SupportedParameters)
 	}
-	if models[1].ContextLength != 0 || models[1].MaxCompletionTokens != 0 {
-		t.Fatalf("missing limits should remain unknown: %#v", models[1])
+	local := models[1]
+	if local.ContextLength != 262_144 || local.MaxCompletionTokens != 0 || !local.Active || local.State != "loaded" {
+		t.Fatalf("local metadata = %#v", local)
+	}
+	if local.Architecture == nil || len(local.Architecture.InputModalities) != 2 || local.Architecture.InputModalities[1] != "image" {
+		t.Fatalf("local architecture = %#v", local.Architecture)
+	}
+	if local.Reasoning == nil || !local.Reasoning.Supported || local.Reasoning.DefaultEffort != "medium" || len(local.Reasoning.EffortValues) != 5 {
+		t.Fatalf("local reasoning = %#v", local.Reasoning)
+	}
+	if local.SupportsVision == nil || !*local.SupportsVision || local.VisionRuntimeReady == nil || !*local.VisionRuntimeReady || local.MMProjStatus != "ready" {
+		t.Fatalf("local vision metadata = %#v", local)
 	}
 
 	ids, err := client.Models(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 2 || ids[0] != "moonshotai/kimi-k3" || ids[1] != "local/model" {
+	if len(ids) != 2 || ids[0] != "moonshotai/kimi-k3" || ids[1] != "RVN-Q4_K_M-multilingual-mtp.gguf" {
 		t.Fatalf("ids = %#v", ids)
 	}
 }
@@ -307,6 +325,36 @@ func TestOpenAICompatBuildBodyIncludesJSONSchemaResponseFormat(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatBuildBodyStripsToolsForNoneChoice(t *testing.T) {
+	client := newOpenAICompat("llamacpp", "http://example.test/v1", "qwen-local", 32768, "", true)
+	bodyBytes, err := client.buildBody(llm.Request{
+		Messages:   []llm.Message{llm.NewTextMessage(llm.RoleUser, "summarize")},
+		ToolChoice: "none",
+		Tools: []llm.ToolDef{{Type: "function", Function: llm.ToolFunctionDef{
+			Name: "shell", Parameters: json.RawMessage(`{"type":"object"}`),
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bodyBytes, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["tools"]; ok {
+		t.Fatalf("tools must be omitted for tool_choice=none: %s", bodyBytes)
+	}
+	if _, ok := got["parallel_tool_calls"]; ok {
+		t.Fatalf("parallel_tool_calls must be omitted for tool_choice=none: %s", bodyBytes)
+	}
+	if _, ok := got["parse_tool_calls"]; ok {
+		t.Fatalf("parse_tool_calls must be omitted for tool_choice=none: %s", bodyBytes)
+	}
+	if got["tool_choice"] != "none" {
+		t.Fatalf("tool_choice = %#v, want none", got["tool_choice"])
+	}
+}
+
 func TestLMStudioLoadModelSendsContextLengthToNativeLoadEndpoint(t *testing.T) {
 	var path string
 	var auth string
@@ -424,6 +472,36 @@ func TestNewLlamacppResolvesKVCacheProfileSettings(t *testing.T) {
 	if client.kvCachePrecision != "q8_0" || client.kvCacheTypeK != "q8_0" || client.kvCacheTypeV != "q8_0" {
 		t.Fatalf("resolved KV cache config = (%q, %q, %q), want Q8_0 K/V",
 			client.kvCachePrecision, client.kvCacheTypeK, client.kvCacheTypeV)
+	}
+}
+
+func TestNewLlamacppResolvesStoredProviderSecretAndEnvironmentPrecedence(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	const provider = "inference-bridge-test"
+	const envName = "MAULER_TEST_INFERENCE_BRIDGE_KEY"
+	t.Setenv(envName, "")
+
+	if err := settings.SaveProviderAPIKey(provider, "stored-key"); err != nil {
+		t.Fatal(err)
+	}
+	client, ok := NewLlamacpp(settings.Profile{
+		Provider:  provider,
+		APIKeyEnv: envName,
+	}).(*OpenAICompat)
+	if !ok {
+		t.Fatal("NewLlamacpp did not return the shared OpenAI-compatible client")
+	}
+	if client.apiKey != "stored-key" {
+		t.Fatalf("stored provider key was not resolved: %q", client.apiKey)
+	}
+
+	t.Setenv(envName, "environment-key")
+	client = NewLlamacpp(settings.Profile{
+		Provider:  provider,
+		APIKeyEnv: envName,
+	}).(*OpenAICompat)
+	if client.apiKey != "environment-key" {
+		t.Fatalf("environment provider key did not take precedence: %q", client.apiKey)
 	}
 }
 
@@ -711,9 +789,10 @@ func TestModelsRespectsShorterCallerTimeout(t *testing.T) {
 	}
 }
 
-func TestChatCancellationPostsInferenceCancelForLlamaCpp(t *testing.T) {
+func TestChatCancellationClosesOwnedRequestWithoutGlobalBackendStop(t *testing.T) {
 	var cancelCalls atomic.Int32
 	streamStarted := make(chan struct{})
+	streamClosed := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/chat/completions":
@@ -724,6 +803,7 @@ func TestChatCancellationPostsInferenceCancelForLlamaCpp(t *testing.T) {
 			}
 			close(streamStarted)
 			<-r.Context().Done()
+			close(streamClosed)
 		case "/v1/inference/cancel":
 			cancelCalls.Add(1)
 			w.WriteHeader(http.StatusOK)
@@ -746,12 +826,13 @@ func TestChatCancellationPostsInferenceCancelForLlamaCpp(t *testing.T) {
 	cancel()
 	for range ch {
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for cancelCalls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-streamClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owned HTTP request was not cancelled")
 	}
-	if cancelCalls.Load() == 0 {
-		t.Fatal("expected /v1/inference/cancel to be called after chat cancellation")
+	if cancelCalls.Load() != 0 {
+		t.Fatal("request cancellation must not issue a server-wide stop")
 	}
 }
 

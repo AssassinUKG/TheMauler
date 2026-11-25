@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "id": "todo-1",
+      "text": "Read current artifact.txt bytes",
+      "status": "done",
+      "created_at": "2026-11-17T20:31:28Z",
+      "updated_at": "2026-11-17T20:31:43Z"
+    },
+    {
+      "id": "todo-2",
+      "text": "Append exact literal suffix",
+      "status": "done",
+      "created_at": "2026-11-17T20:31:28Z",
+      "updated_at": "2026-11-17T20:31:44Z"
+    },
+    {
+      "id": "todo-3",
+      "text": "Read back and verify complete file",
+      "status": "done",
+      "created_at": "2026-11-17T20:31:28Z",
+      "updated_at": "2026-11-17T20:31:49Z"
+    },
+    {
+      "id": "todo-4",
+      "text": "Report handoff",
+      "status": "done",
+      "created_at": "2026-11-17T20:31:28Z",
+      "updated_at": "2026-11-17T20:31:50Z"
+    }
+  ]
+}

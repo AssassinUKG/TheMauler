@@ -12,6 +12,13 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'monaco',
+              test: /node_modules[\\/](?:@monaco-editor|monaco-editor|dompurify|marked|state-local)[\\/]/,
+              minSize: 0,
+              maxSize: 2_000_000,
+              priority: 20,
+            },
+            {
               name: 'vendor',
               test: /node_modules[\\/]/,
               minSize: 100_000,

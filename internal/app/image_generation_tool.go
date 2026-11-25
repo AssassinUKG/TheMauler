@@ -66,6 +66,7 @@ type imageJob struct {
 	CancelURL         string          `json:"cancel_url"`
 	ChatRestoreStatus string          `json:"chat_restore_status"`
 	Result            *imageJobResult `json:"result"`
+	ConnectionState   string          `json:"-"`
 }
 
 type imageGenerationArgs struct {
@@ -110,9 +111,9 @@ func (t *generateImageTool) Schema() json.RawMessage {
   "properties": {
     "prompt": {"type": "string"},
     "negative_prompt": {"type": "string"},
-    "size": {"type": "string", "enum": ["1024x1024", "1328x1328", "1664x928", "928x1664", "1472x1104", "1104x1472", "1584x1056", "1056x1584"]},
+    "size": {"type": "string", "enum": ["1024x1024", "2048x2048", "2048x1152", "1152x2048", "1536x1152", "1152x1536", "1536x1024", "1024x1536"]},
     "quality": {"type": "string", "enum": ["preview", "quality", "max_quality"]},
-    "steps": {"type": "integer", "enum": [30, 40, 50, 60]},
+    "steps": {"type": "integer", "enum": [8, 20, 30, 40, 50, 60]},
     "seed": {"type": "integer", "minimum": 0, "maximum": 4294967295},
     "reference_image_url": {"type": "string"},
     "reference_strength": {"type": "number", "minimum": 0.05, "maximum": 1.0},
@@ -166,16 +167,17 @@ func (t *generateImageTool) Run(ctx context.Context, raw json.RawMessage) (strin
 	}
 	emit := func(update imageJob) {
 		payload := map[string]any{
-			"tool_call_id": callID,
-			"job_id":       update.ID,
-			"status":       update.Status,
-			"stage":        update.Stage,
-			"message":      update.Message,
-			"progress":     update.Progress,
-			"current_step": update.CurrentStep,
-			"total_steps":  update.TotalSteps,
-			"jobs_ahead":   update.JobsAhead,
-			"eta_seconds":  update.ETASeconds,
+			"tool_call_id":     callID,
+			"job_id":           update.ID,
+			"status":           update.Status,
+			"stage":            update.Stage,
+			"message":          update.Message,
+			"progress":         update.Progress,
+			"current_step":     update.CurrentStep,
+			"total_steps":      update.TotalSteps,
+			"jobs_ahead":       update.JobsAhead,
+			"eta_seconds":      update.ETASeconds,
+			"connection_state": firstNonEmpty(update.ConnectionState, "connected"),
 		}
 		t.app.emitRunContext(ctx, "mauler:image_progress", payload)
 	}
@@ -279,7 +281,7 @@ func (c *inferenceBridgeImageClient) capabilities(ctx context.Context) (imageCap
 
 func (c *inferenceBridgeImageClient) submit(ctx context.Context, args imageGenerationArgs, capability imageCapabilities, correlationID, idempotencyKey string) (imageJob, error) {
 	payload := map[string]any{
-		"model":           firstNonEmpty(capability.DefaultModel, "qwen-image-2512-q6"),
+		"model":           firstNonEmpty(capability.DefaultModel, "qwen-image-2.1-q4-k-m"),
 		"prompt":          args.Prompt,
 		"size":            firstNonEmpty(args.Size, capability.DefaultSize, "1024x1024"),
 		"quality":         firstNonEmpty(args.Quality, capability.DefaultQuality, "quality"),
@@ -324,6 +326,9 @@ func (c *inferenceBridgeImageClient) wait(ctx context.Context, initial imageJob,
 	if streamErr == nil || ctx.Err() != nil {
 		return job, streamErr
 	}
+	job.ConnectionState = "reconnecting"
+	job.Message = "Image event stream disconnected; reconnecting through job status"
+	onUpdate(job)
 	return c.waitPolling(ctx, initial.ID, onUpdate)
 }
 
@@ -383,13 +388,19 @@ func (c *inferenceBridgeImageClient) waitSSE(ctx context.Context, initial imageJ
 func (c *inferenceBridgeImageClient) waitPolling(ctx context.Context, jobID string, onUpdate func(imageJob)) (imageJob, error) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	disconnected := false
 	for {
 		job, err := c.getJob(ctx, jobID)
 		if err == nil {
+			job.ConnectionState = "connected"
 			onUpdate(job)
+			disconnected = false
 			if imageJobTerminal(job.Status) {
 				return terminalImageJob(job)
 			}
+		} else if !disconnected && ctx.Err() == nil {
+			disconnected = true
+			onUpdate(imageJob{ID: jobID, Status: "running", ConnectionState: "disconnected", Message: "InferenceBridge is unreachable; waiting to reconnect"})
 		}
 		select {
 		case <-ctx.Done():

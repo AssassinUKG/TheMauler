@@ -307,3 +307,34 @@ showed that message.
   priority and render autonomy/toolset as secondary policy chips.
 - All task menus are wider on desktop, remain viewport-clamped by the existing portal, scroll within
   short windows, and collapse their multi-column choices for narrow layouts.
+
+## Slice 17 — automatic conversation history
+
+- App startup presents a real blank **New chat**. Listing saved conversations no longer marks the
+  newest row active before its transcript has actually been loaded.
+- The first submitted message assigns a bounded collision-safe conversation identity. Completed runs
+  save to that identity before emitting completion, so the existing sidebar refresh immediately sees
+  the exact transcript and subsequent turns update the same row.
+- **New chat** saves the current named conversation and opens a clean transcript without a destructive
+  confirmation. **Clear conversation** remains a distinct confirmed reset, and deleting the active
+  saved row clears its in-memory transcript so deleted content cannot seed a replacement chat.
+- The legacy `autosave` recovery file remains available for non-desktop/unnamed recovery but is
+  reserved and hidden from normal conversation history. The chat sidebar is surfaced once on upgrade,
+  then returns to the operator's persisted open/closed preference.
+
+## Slice 18 — dirty editor ownership and workspace transitions
+
+- Every open editor tab owns its current draft, saved baseline, language, and dirty state in App-level
+  state. Switching tabs no longer reconstructs the editor from the last disk read and therefore cannot
+  silently drop another tab's draft.
+- Dirty path-backed tabs visibly carry a marker in both tab strips. Closing a dirty tab requires an
+  explicit Save, Discard, or Keep editing choice; scratch snippets without a file path can be kept or
+  discarded but are never falsely presented as saveable.
+- Every UI path that can replace the workspace—Chat's workspace menu, Explorer root changes, project
+  activation/removal, scratch attachment, project creation, and Settings—uses one shared guard before
+  invoking the backend transition. Save failures cancel the transition and focus the affected tab.
+- Choosing Discard authorises only the pending transition: drafts stay in memory if the directory
+  picker is cancelled or the backend rejects the change. Scratch tabs remain open across successful
+  workspace changes, while path-backed tabs close under the existing workspace ownership contract.
+- Save completion advances the baseline without overwriting newer keystrokes made while an individual
+  disk write was pending.

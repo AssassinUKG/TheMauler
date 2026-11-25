@@ -22,6 +22,7 @@ import (
 	"mauler/internal/ledger"
 	"mauler/internal/llm"
 	"mauler/internal/llm/backends"
+	"mauler/internal/mcpclient"
 	"mauler/internal/packlibrary"
 	"mauler/internal/repoindex"
 	"mauler/internal/runtimeprofile"
@@ -61,6 +62,7 @@ type App struct {
 	history     *agent.History
 	rollback    *agent.Rollback
 	registry    *tools.Registry
+	mcpManager  *mcpclient.Manager
 	ledger      *ledger.Ledger
 	db          *sql.DB
 	engagements *engagement.Service
@@ -77,12 +79,16 @@ type App struct {
 	// independently from model/run state and transcript IO.
 	sessionLibraryMu sync.Mutex
 
-	agentRunning bool
-	evalRunning  bool
-	cancelAgent  context.CancelFunc
-	confirmCh    chan bool // non-nil when awaiting confirmation
-	stopReason   string
-	stopDetail   string
+	agentRunning    bool
+	agentDone       chan struct{}
+	runtimeOwner    *os.File
+	runtimeOwnerErr error
+	shuttingDown    bool
+	evalRunning     bool
+	cancelAgent     context.CancelFunc
+	confirmCh       chan bool // non-nil when awaiting confirmation
+	stopReason      string
+	stopDetail      string
 
 	artifactRunning bool
 	cancelArtifact  context.CancelFunc
@@ -231,8 +237,13 @@ func New() *App {
 		profiles = &fallback
 	}
 	ensureActiveProfile(cfg, profiles)
-	runLedger, _ := ledger.NewDefault()
-	db, _ := store.OpenDefault()
+	owner, ownerErr := acquireNativeRuntimeOwner()
+	var runLedger *ledger.Ledger
+	var db *sql.DB
+	if ownerErr == nil {
+		runLedger, _ = ledger.NewDefault()
+		db, ownerErr = store.OpenDefault()
+	}
 	if runLedger != nil && db != nil {
 		runLedger.AttachDB(db)
 		_, _ = runLedger.BackfillDBFromJSONL()
@@ -253,6 +264,7 @@ func New() *App {
 		history:              history,
 		rollback:             &agent.Rollback{},
 		registry:             tools.New(),
+		mcpManager:           mcpclient.New(cfg.MCP),
 		ledger:               runLedger,
 		db:                   db,
 		autoAgents:           true,
@@ -261,6 +273,8 @@ func New() *App {
 		agentSessions:        make(map[string]AgentSession),
 		bgJobs:               make(map[string]*bgJob),
 		channelQueue:         channelbus.NewPersistentQueue(db),
+		runtimeOwner:         owner,
+		runtimeOwnerErr:      ownerErr,
 	}
 	app.conversationEpoch.Store(1)
 	if db != nil {
@@ -336,6 +350,16 @@ func cloneToolsConfigRefs(t *settings.ToolsConfig) {
 // OnStartup is called by Wails when the window is ready.
 func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
+	if err := a.ownNativeRuntime(); err != nil {
+		a.emit("mauler:stream_error", err.Error())
+		wailsruntime.Quit(ctx)
+		return
+	}
+	if err := a.reconcileInterruptedNativeRuns(); err != nil {
+		a.emit("mauler:stream_error", err.Error())
+		wailsruntime.Quit(ctx)
+		return
+	}
 	a.wireBackgroundJobObserver()
 	tools.SweepStaleJobLogs() // clear orphan job logfiles left by a prior crash
 	// Apply saved working directory here (not in New) so that
@@ -362,7 +386,13 @@ func (a *App) OnDomReady(_ context.Context) {}
 
 // OnShutdown is called before the app exits.
 func (a *App) OnShutdown(_ context.Context) {
+	if !a.joinNativeRunForShutdown() {
+		return
+	} // Keep DB/ownership until process exit if join is unconfirmed.
 	_, _ = tools.CloseBrowserWorkflow(a.browserWorkflowOwnerID())
+	if a.mcpManager != nil {
+		_ = a.mcpManager.Close()
+	}
 	audio.ShutdownWorkers()
 	a.repositoryIndexMu.Lock()
 	watchCancel := a.repositoryWatchCancel
@@ -414,6 +444,10 @@ func (a *App) OnShutdown(_ context.Context) {
 	if db != nil {
 		_ = db.Close()
 	}
+	if a.runtimeOwner != nil {
+		_ = a.runtimeOwner.Close()
+		a.runtimeOwner = nil
+	}
 }
 
 func (a *App) sessionStore() *sessionstore.Store {
@@ -445,13 +479,31 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	}
 	profiles := *a.profiles
 	previousModeOverride := a.cfg.Agents.ModeOverride
+	previousWorkspace := a.cfg.Context.WorkspaceDir
 	previousTelegram := a.cfg.Telegram
 	previousAudio := a.cfg.Audio
+	previousMCP := a.cfg.MCP
+	mcpChanged := !reflect.DeepEqual(previousMCP, cfg.MCP)
+	if mcpChanged && a.agentRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("cannot change MCP settings while an agent run is active")
+	}
 	a.mu.Unlock()
+	validatedNanoCyber, err := settings.ValidateNanoCyberConfig(cfg.NanoCyber)
+	if err != nil {
+		return err
+	}
+	cfg.NanoCyber = validatedNanoCyber
+	validatedMCP, err := settings.ValidateMCPConfig(cfg.MCP)
+	if err != nil {
+		return err
+	}
+	cfg.MCP = validatedMCP
 	var workspaceChanged bool
 	oldWD, _ := os.Getwd()
 	requestedWorkspace := strings.TrimSpace(cfg.Context.WorkspaceDir)
-	if requestedWorkspace != "" {
+	workspaceSelectionChanged := !sameConfiguredWorkspace(previousWorkspace, requestedWorkspace)
+	if requestedWorkspace != "" && workspaceSelectionChanged {
 		abs, err := filepath.Abs(tools.NormalizeHostPath(requestedWorkspace))
 		if err != nil {
 			return err
@@ -476,6 +528,11 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 			workspaceChanged = true
 		}
 		cfg.Context.WorkspaceDir = filepath.ToSlash(abs)
+	} else if requestedWorkspace != "" {
+		// A moved or deleted saved workspace must not block unrelated settings
+		// and profile edits. Only a new workspace selection needs validation;
+		// preserve the already configured value until the operator replaces it.
+		cfg.Context.WorkspaceDir = filepath.ToSlash(strings.TrimSpace(previousWorkspace))
 	}
 	if workspaceChanged {
 		cfg.Context.WorkspacePreferences = upsertWorkspaceAgentPreference(
@@ -513,6 +570,7 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 	a.history.SetBudget(active.CtxTokens)
 	if workspaceChanged {
 		a.history.Clear()
+		a.activeConversationName = ""
 		a.rollback.Clear()
 		a.currentMode = cfg.Agents.ModeOverride
 		a.conversationMode = a.defaultConversationModeLocked()
@@ -523,6 +581,12 @@ func (a *App) UpdateSettings(cfg settings.Settings) error {
 		a.loadedModelKey = ""
 	}
 	a.mu.Unlock()
+	if mcpChanged && a.mcpManager != nil {
+		if err := a.mcpManager.Configure(cfg.MCP); err != nil {
+			return err
+		}
+		a.syncMCPToolRegistration()
+	}
 	if workspaceChanged {
 		_, _ = tools.CloseBrowserWorkflow(previousBrowserOwner)
 		_ = a.ClearTodos()
@@ -630,6 +694,8 @@ func (a *App) GetProfileNames() []string {
 
 // UseProfile saves the current settings/profiles and switches to the selected profile.
 func (a *App) UseProfile(name string, cfg settings.Settings, pf settings.ProfilesFile) error {
+	processStateMu.Lock()
+	defer processStateMu.Unlock()
 	profile, ok := pf.Profiles[name]
 	if !ok {
 		return fmt.Errorf("profile %q not found", name)
@@ -640,6 +706,18 @@ func (a *App) UseProfile(name string, cfg settings.Settings, pf settings.Profile
 	if isOneTaskCloudProfile(profile, &pf) {
 		return fmt.Errorf("cloud profile %q is saved for one-task boosts; choose it beside the Chat composer", name)
 	}
+	validatedMCP, err := settings.ValidateMCPConfig(cfg.MCP)
+	if err != nil {
+		return err
+	}
+	cfg.MCP = validatedMCP
+	a.mu.Lock()
+	mcpChanged := !reflect.DeepEqual(a.cfg.MCP, cfg.MCP)
+	if mcpChanged && a.agentRunning {
+		a.mu.Unlock()
+		return fmt.Errorf("cannot change MCP settings while an agent run is active")
+	}
+	a.mu.Unlock()
 	removeRemoteProfiles(&pf)
 	cfg.ActiveProfile = name
 	if err := settings.Save(&cfg); err != nil {
@@ -658,6 +736,12 @@ func (a *App) UseProfile(name string, cfg settings.Settings, pf settings.Profile
 		a.loadedModelKey = ""
 	}
 	a.mu.Unlock()
+	if mcpChanged && a.mcpManager != nil {
+		if err := a.mcpManager.Configure(cfg.MCP); err != nil {
+			return err
+		}
+		a.syncMCPToolRegistration()
+	}
 	a.autoApplySpec(name, active)
 	return nil
 }
@@ -818,13 +902,15 @@ func (a *App) StartConversation(title string) (string, error) {
 
 // SessionChatMessage is the UI-safe representation returned when loading sessions.
 type SessionChatMessage struct {
-	Role        string           `json:"role"`
-	Content     string           `json:"content"`
-	Thinking    string           `json:"thinking,omitempty"`
-	ToolName    string           `json:"tool_name,omitempty"`
-	ToolCallID  string           `json:"tool_call_id,omitempty"`
-	Images      []string         `json:"images,omitempty"`
-	Attachments []ChatAttachment `json:"attachments,omitempty"`
+	Role           string           `json:"role"`
+	Content        string           `json:"content"`
+	Thinking       string           `json:"thinking,omitempty"`
+	DeliveryStatus string           `json:"delivery_status,omitempty"`
+	StopReason     string           `json:"stop_reason,omitempty"`
+	ToolName       string           `json:"tool_name,omitempty"`
+	ToolCallID     string           `json:"tool_call_id,omitempty"`
+	Images         []string         `json:"images,omitempty"`
+	Attachments    []ChatAttachment `json:"attachments,omitempty"`
 }
 
 // SessionSummary is lightweight saved-conversation metadata for navigation.
@@ -882,7 +968,7 @@ func (a *App) saveSession(name string, activate bool) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0o640); err != nil {
+	if err := writeSessionSnapshot(filepath.Join(dir, name+".json"), data); err != nil {
 		return err
 	}
 	// Conversation preferences are optional library metadata. A damaged
@@ -908,14 +994,14 @@ func (a *App) saveSession(name string, activate bool) error {
 // autoSave updates the active named conversation after every agent run. The
 // legacy _autosave file remains a hidden recovery fallback for callers that do
 // not participate in the desktop conversation lifecycle.
-func (a *App) autoSave() {
+func (a *App) autoSave() error {
 	a.mu.Lock()
 	name := strings.TrimSpace(a.activeConversationName)
 	a.mu.Unlock()
 	if name == "" {
 		name = legacyAutosaveSessionName
 	}
-	_ = a.saveSession(name, false)
+	return a.saveSession(name, false)
 }
 
 // LoadSession restores a saved conversation and returns chat messages for the UI.
@@ -937,6 +1023,7 @@ func (a *App) LoadSession(name string) ([]SessionChatMessage, error) {
 	if !repairReport.Valid {
 		return nil, fmt.Errorf("saved conversation cannot be loaded safely: %s", repairReport.Diagnostic)
 	}
+	msgs, promptEchoRepairs := scrubAssistantPromptEchoes(msgs)
 	modes, _ := a.sessionModesSnapshot()
 	conversationMode := normalizeConversationMode(modes[name])
 	a.mu.Lock()
@@ -954,6 +1041,18 @@ func (a *App) LoadSession(name string) ([]SessionChatMessage, error) {
 	_, _ = tools.CloseBrowserWorkflow(previousBrowserOwner)
 	if len(repairReport.Actions) > 0 {
 		a.recordSessionRepairLedger(name, "loaded_repaired", repairReport)
+	}
+	if promptEchoRepairs > 0 {
+		a.recordLedger(ledger.Event{
+			Kind:    "prompt_echo_repair",
+			Source:  "conversation_load",
+			Status:  "done",
+			Message: fmt.Sprintf("Removed prompt echo from %d saved assistant turn(s)", promptEchoRepairs),
+			Metadata: map[string]string{
+				"conversation": name,
+				"repairs":      strconv.Itoa(promptEchoRepairs),
+			},
+		})
 	}
 	return toSessionChatMessages(msgs), nil
 }
@@ -1298,6 +1397,15 @@ func (a *App) sendMessageWithClaimant(text string, images []string, attachments 
 
 func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, attachments []ChatAttachment, claimantID, claimantAlias, origin, profileOverride string) error {
 	a.mu.Lock()
+	if a.runtimeOwnerErr != nil {
+		err := a.runtimeOwnerErr
+		a.mu.Unlock()
+		return err
+	}
+	if a.shuttingDown {
+		a.mu.Unlock()
+		return fmt.Errorf("Mauler is shutting down")
+	}
 	if a.evalRunning {
 		a.mu.Unlock()
 		return fmt.Errorf("agent eval is running; wait for it to finish before starting a task")
@@ -1319,7 +1427,8 @@ func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, at
 	profile := activeProfile(&cfg, &profiles)
 	runProfileName := cfg.ActiveProfile
 	messageText := composeUserTextWithAttachments(text, attachments)
-	mode := selectAgentMode(messageText, cfg)
+	routingText := composeTrustedRoutingText(text, attachments)
+	mode := selectAgentMode(routingText, cfg)
 	if !autoAgents {
 		mode = manualAgentMode()
 	}
@@ -1372,20 +1481,24 @@ func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, at
 	agentCtx, cancel := context.WithCancel(context.Background())
 	a.mu.Lock()
 	a.cancelAgent = cancel
+	done := make(chan struct{})
+	a.agentDone = done
 	a.stopReason = ""
 	a.stopDetail = ""
 	a.mu.Unlock()
 
-	memorySelection := selectRelevantMemory(cfg, messageText)
-	if results, err := a.SearchSessionRecall(messageText, 2); err == nil {
+	memorySelection := selectRelevantMemory(cfg, routingText)
+	if results, err := a.SearchSessionRecall(routingText, 2); err == nil {
 		memorySelection.AddSessionRecall(results)
 	}
 	if events, err := a.ListLedgerEvents(300); err == nil {
-		memorySelection.AddEvidencePointers(events, messageText)
+		memorySelection.AddEvidencePointers(events, routingText)
 	}
 	memories := memorySelection.Entries
-	skills := relevantSkillsForSettings(cfg.Skills, cfg, messageText)
+	skills := relevantSkillsForSettings(cfg.Skills, cfg, routingText)
 	run := startTaskRun(messageText, mode.Name, runProfileName, profile.ModelID)
+	run.RoutingPrompt = routingText
+	run.setAgentDefinition(mode)
 	run.conversationMode = conversationMode
 	run.addEvent("conversation_mode", "Applied conversation run mode", conversationMode)
 	run.ConversationEpoch = conversationEpoch
@@ -1401,7 +1514,10 @@ func (a *App) sendMessageWithClaimantAndProfile(text string, images []string, at
 		run.addEvent("memory_retrieval_plan", fmt.Sprintf("Selected %d context item%s for %s prompt packet", len(memorySelection.Plan.Selected), plural(len(memorySelection.Plan.Selected), "", "s"), memorySelection.Plan.Intent), memoryRetrievalPlanDetail(memorySelection.Plan))
 	}
 
-	go a.runAgentLoop(agentCtx, userMsg, profile, &cfg, autonomous, mode, memories, skills, run)
+	go func() {
+		defer close(done)
+		a.runAgentLoop(agentCtx, userMsg, profile, &cfg, autonomous, mode, memories, skills, run)
+	}()
 	return nil
 }
 
@@ -1659,6 +1775,22 @@ func composeUserTextWithAttachments(text string, attachments []ChatAttachment) s
 		}
 	}
 	return sb.String()
+}
+
+// composeTrustedRoutingText keeps untrusted attachment bodies out of all
+// code-owned routing, tool, scope and completion decisions. Selecting an
+// attachment is trusted operator intent to make bounded context available;
+// its name and contents remain model-visible data, not control text.
+func composeTrustedRoutingText(text string, attachments []ChatAttachment) string {
+	text = strings.TrimSpace(text)
+	if len(attachments) == 0 {
+		return text
+	}
+	contextNote := fmt.Sprintf("The user selected %d attachment(s) as bounded read-only context.", len(attachments))
+	if text == "" {
+		return "Read and analyse the user-selected attachment(s). " + contextNote
+	}
+	return text + "\n\n" + contextNote
 }
 
 // GetAgentMode returns the current auto-selected agent mode.
@@ -2097,6 +2229,7 @@ func (a *App) SetWorkingDir(dir string) error {
 		a.currentMode = nextMode
 		cfg = *a.cfg
 		a.history.Clear()
+		a.activeConversationName = ""
 		a.rollback.Clear()
 		a.conversationMode = a.defaultConversationModeLocked()
 		a.advanceConversationEpochLocked()
@@ -2962,6 +3095,37 @@ func (a *App) ClearProviderAPIKey(providerName string) error {
 	return settings.ClearProviderAPIKey(providerName)
 }
 
+// GetNanoCyberCredentialStatus exposes only presence flags for the configured
+// local sandbox credential. The credential value never crosses Wails.
+func (a *App) GetNanoCyberCredentialStatus() settings.ServiceCredentialStatus {
+	a.mu.Lock()
+	config := a.cfg.NanoCyber
+	a.mu.Unlock()
+	return settings.GetServiceCredentialStatus(config.CredentialRef, config.CredentialEnv)
+}
+
+// SetNanoCyberCredential stores the bearer token in the protected local
+// service-secret store, separately from settings.toml and React state.
+func (a *App) SetNanoCyberCredential(credential string) error {
+	a.mu.Lock()
+	config := a.cfg.NanoCyber
+	a.mu.Unlock()
+	validated, err := settings.ValidateNanoCyberCredential(credential)
+	if err != nil {
+		return err
+	}
+	return settings.SaveServiceCredential(config.CredentialRef, validated)
+}
+
+// ClearNanoCyberCredential removes only the UI-managed token. A configured
+// environment variable remains authoritative and is never modified.
+func (a *App) ClearNanoCyberCredential() error {
+	a.mu.Lock()
+	config := a.cfg.NanoCyber
+	a.mu.Unlock()
+	return settings.ClearServiceCredential(config.CredentialRef)
+}
+
 // ListWSLDistros returns installed WSL distribution names.
 func (a *App) ListWSLDistros() ([]string, error) {
 	if runtime.GOOS != "windows" {
@@ -3079,10 +3243,12 @@ func parseWSLDistros(text string) []string {
 func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile settings.Profile, cfg *settings.Settings, autonomous bool, mode AgentMode, memories []MemoryEntry, skills []Skill, run TaskRun) (finalRun TaskRun) {
 	var finalSummary string
 	var bestAnswerCheckpoint string
+	var partialAnswer string
+	var textReply textReplyContinuation
 	var finalStatus = "done"
 	requestedThinkingMode := normaliseThinkingMode(cfg.Agents.ThinkingMode)
 	profile, effectiveThinkingMode, thinkingModeSupported := applyThinkingMode(profile, requestedThinkingMode)
-	run.addEvent("start", "Run started", fmt.Sprintf("mode=%s profile=%s model=%s autonomous=%t thinking_mode=%s claimant=%s origin=%s", mode.Name, cfg.ActiveProfile, profile.ModelID, autonomous, effectiveThinkingMode, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.Origin, "desktop")))
+	run.addEvent("start", "Run started", fmt.Sprintf("mode=%s agent_definition_id=%s agent_definition_version=%s profile=%s model=%s autonomous=%t thinking_mode=%s claimant=%s origin=%s", mode.Name, run.AgentDefinitionID, run.AgentDefinitionVersion, cfg.ActiveProfile, profile.ModelID, autonomous, effectiveThinkingMode, firstNonEmpty(run.ClaimantID, run.ID), firstNonEmpty(run.Origin, "desktop")))
 	thinkingDetail := fmt.Sprintf("requested=%s effective=%s supported=%t profile_thinking=%t preserve_thinking=%t", requestedThinkingMode, effectiveThinkingMode, thinkingModeSupported, profile.Thinking, profile.PreserveThink)
 	if requestedThinkingMode == "on" && !thinkingModeSupported {
 		thinkingDetail += " note=active model template does not advertise thinking support; profile behaviour retained"
@@ -3093,8 +3259,16 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 	a.emitRun(&run, "mauler:stream_start", cfg.ActiveProfile)
 	a.setRunState(&run, "planning", "Initial prompt accepted and run context created.")
 	defer func() {
+		evidenceCorrected := false
 		if ctx.Err() != nil {
 			finalStatus = "stopped"
+			if strings.TrimSpace(partialAnswer) != "" {
+				finalSummary = partialAnswer
+				run.Response = trimRunText(partialAnswer)
+				a.mu.Lock()
+				appendTextReplyHistory(a.history, llm.NewTextMessage(llm.RoleAssistant, partialAnswer), textReply.prefix)
+				a.mu.Unlock()
+			}
 			a.mu.Lock()
 			reason := a.stopReason
 			detail := a.stopDetail
@@ -3110,11 +3284,22 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			finalStatus = "stopped"
 			run.addEvent("stop", "Run ended with unresolved blocking stop reason", run.StopDetail)
 		}
-		if finalStatus == "done" && requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) {
+		if finalStatus == "done" && requiresLivingDocUpdate(taskRoutingPrompt(run)) && !runHasFileMutation(run) {
 			finalStatus = "stopped"
 			detail := "The user asked for a README/writeup/docs update, but the run completed without write or edit. Update the requested document before marking the task done."
 			run.stopTerminal("documentation_missing", detail)
 			run.addEvent("blocked", "Documentation update missing", detail)
+		}
+		if conflict := networkEvidenceSummaryConflict(run, finalSummary); conflict != "" {
+			evidenceCorrected = true
+			finalStatus = "stopped"
+			run.stopTerminal("evidence_conflict", conflict)
+			run.addEvent("evidence_conflict", "Replaced a final report that contradicted saved network evidence", conflict)
+			finalSummary = buildNetworkAssessmentEvidenceHandoff(run, conflict)
+			run.Response = trimRunText(finalSummary)
+			if a.ctx != nil {
+				a.emitRun(&run, "mauler:stream_replace", finalSummary)
+			}
 		}
 		if finalStatus == "done" {
 			if reason := invalidDoneReason(run, finalSummary); reason != "" {
@@ -3140,7 +3325,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 				_ = a.applyControlEvent(&run, controlplane.Event{Kind: controlplane.EventBlocked, Detail: firstNonEmpty(run.StopDetail, "run stopped before completion")})
 			}
 		}
-		if finalStatus != "done" && strings.TrimSpace(bestAnswerCheckpoint) != "" {
+		if finalStatus != "done" && !evidenceCorrected && strings.TrimSpace(bestAnswerCheckpoint) != "" {
 			// Controller and transport failures must not replace a complete,
 			// useful answer with a later repair narration. The immutable event
 			// and tool trail retain the failure details; Response remains the
@@ -3148,7 +3333,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			finalSummary = bestAnswerCheckpoint
 			run.Response = trimRunText(bestAnswerCheckpoint)
 		}
-		if finalStatus != "done" && strings.TrimSpace(bestAnswerCheckpoint) == "" {
+		if finalStatus != "done" && !evidenceCorrected && strings.TrimSpace(bestAnswerCheckpoint) == "" {
 			if recovered := successfulReadOnlyToolAnswer(run); recovered != "" {
 				// Read-only shell evidence is already present in the immutable tool
 				// trail. If a later model/controller step fails, promote the useful
@@ -3160,6 +3345,7 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 			}
 		}
 		recoveredAnswerHandoff := finalStatus == "stopped" && canHandOffRecoveredAnswer(run, finalSummary)
+		a.rememberTelegramRunSources(run)
 		if finalStatus == "done" {
 			a.setRunState(&run, "done", telegramRunCompletionDetail(run, finalSummary))
 			run.addEvent("finish", "Run completed", "")
@@ -3192,18 +3378,11 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		run.finish(finalStatus, finalSummary)
 		a.persistControlRun(run)
 		a.appendProgressUpdate(context.Background(), &run, "Run Finish", progressContentForRunFinish(run))
-		if ctx.Err() == nil {
-			a.deleteRunCheckpoint(run.ID)
-			if strings.TrimSpace(run.ParentRunID) != "" && !run.persistentCheckpoint {
-				a.deleteRunCheckpoint(run.ParentRunID)
-			}
-		}
-		_ = a.saveTaskRun(run, loggingConfigValue(&cfg.Logging))
 		if cfg.Memory.Enabled {
 			_ = a.saveRunMilestoneMemory(&run)
 		}
 		a.autoDistillLearnings(&run, cfg.Memory)
-		tools.ReapBackgroundShellJobs() // free finished-but-unpolled standalone jobs
+		tools.ReapBackgroundShellJobs() // free completed standalone jobs after their results remained available for this run
 		if a.ctx != nil {
 			a.emitRun(&run, "mauler:task_run", run)
 			if suggestion := buildLearningSuggestion(&run); suggestion != nil {
@@ -3219,6 +3398,18 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 				a.emitRun(&run, "mauler:suggest_learning", suggestion)
 			}
 		}
+		a.recordReplyDeliveryOutcome(finalStatus, run.StopReason)
+		persistenceErr := a.autoSave()
+		if persistenceErr == nil {
+			persistenceErr = a.commitRecoveryTerminal(run, ctx.Err() == nil)
+		}
+		if persistenceErr != nil {
+			finalStatus = "error"
+			run.stopTerminal("recovery_persistence_failed", persistenceErr.Error())
+			run.Status = "error"
+			run.addEvent("recovery_persistence_failed", "Recovery snapshot retained; terminal handoff not acknowledged", persistenceErr.Error())
+			a.recordReplyDeliveryOutcome(finalStatus, run.StopReason)
+		}
 		a.mu.Lock()
 		a.agentRunning = false
 		a.cancelAgent = nil
@@ -3231,7 +3422,6 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		}
 		// Persist the complete transcript before announcing stream completion so
 		// the sidebar refresh triggered by that event always sees this turn.
-		a.autoSave()
 		a.emitRun(&run, "mauler:stream_done", finalSummary, deliveryStatus, run.StopReason)
 		finalRun = run
 		a.drainChannelQueueAsync()
@@ -3265,6 +3455,12 @@ func (a *App) runAgentLoop(ctx context.Context, firstMsg llm.Message, profile se
 		a.history.Append(firstMsg)
 	}
 	a.mu.Unlock()
+	if err := a.checkpointBeforeExternalWork(&run, *cfg); err != nil {
+		finalStatus = "error"
+		run.stopTerminal("recovery_checkpoint_failed", err.Error())
+		finalSummary = "The request was not executed because its recovery snapshot could not be committed: " + err.Error()
+		return
+	}
 
 	client, err := buildClientForAgent(profile)
 	if err != nil {
@@ -3461,12 +3657,12 @@ agentLoop:
 				a.mu.Unlock()
 			}
 		}
-		if docRecoveryRequested && requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) && !toolBudgetExhausted && !timeBudgetExhausted {
+		if docRecoveryRequested && requiresLivingDocUpdate(taskRoutingPrompt(run)) && !runHasFileMutation(run) && !toolBudgetExhausted && !timeBudgetExhausted {
 			toolDefs = filterToolDefsByName(toolDefs, "read", "write", "edit", "glob", "grep")
 			toolChoice = "auto"
 			if !docRecoveryPromptSent {
 				docRecoveryPromptSent = true
-				prompt := documentationRecoveryPrompt(run.Prompt, run.StopReason, run.StopDetail)
+				prompt := documentationRecoveryPrompt(taskRoutingPrompt(run), run.StopReason, run.StopDetail)
 				run.addEvent("continue", "Forcing documentation recovery turn", prompt)
 				a.setRunState(&run, "editing", "Documentation update required before continuing.")
 				a.mu.Lock()
@@ -3492,6 +3688,10 @@ agentLoop:
 		// after every recovery/budget branch so no later agent-loop repair can
 		// silently re-enable tools.
 		toolDefs, toolChoice, _ = applyConversationModeRouting(run.conversationMode, toolDefs, toolChoice)
+		if textReply.attempts > 0 {
+			// A text continuation can never reopen the tool/action lane.
+			toolDefs, toolChoice = nil, "none"
+		}
 		if totalToolCallsMade > 0 {
 			a.maybeReinjectMemory(&run, *cfg, injectedMemoryIDs, &memoryReinjections)
 		}
@@ -3628,6 +3828,16 @@ agentLoop:
 			})
 			return
 		}
+		a.mu.Lock()
+		cleanMessages, promptEchoRepairs := scrubAssistantPromptEchoes(a.history.Messages())
+		if promptEchoRepairs > 0 {
+			a.history.Replace(cleanMessages)
+			msgs = cleanMessages
+		}
+		a.mu.Unlock()
+		if promptEchoRepairs > 0 {
+			run.addEvent("prompt_echo_repair", fmt.Sprintf("Removed prompt echo from %d earlier assistant turn(s)", promptEchoRepairs), "Contaminated model output was removed before constructing the next model request.")
+		}
 		if statePrompt := a.buildExecutionStatePrompt(firstUserText, toolChoice, toolDefs, terminalState); strings.TrimSpace(statePrompt) != "" {
 			msgs = append(msgs, llm.NewTextMessage(llm.RoleSystem, statePrompt))
 		}
@@ -3651,6 +3861,17 @@ agentLoop:
 		}
 		if applyExplicitNoToolResponseBudget(&req, firstUserText) {
 			run.addEvent("response_budget", "Applied explanation-only output cap", fmt.Sprintf("max_tokens=%d", req.MaxTokens))
+		}
+		responseContext := a.contextWindow
+		if responseContext <= 0 {
+			responseContext = profile.CtxTokens
+		}
+		if changed, err := applyTextReplyResponseBudget(&req, firstUserText, directAnswerTurn, responseContext); err != nil {
+			finalStatus = "stopped"
+			run.stopTerminal("output_limit", err.Error())
+			return
+		} else if changed {
+			run.addEvent("response_budget", "Applied context-aware text response budget", fmt.Sprintf("max_tokens=%d context=%d", req.MaxTokens, responseContext))
 		}
 		// Experimental: for non-native local models, constrain output to a valid
 		// tool-call envelope via GBNF. Off unless explicitly enabled, never when an
@@ -3700,8 +3921,10 @@ agentLoop:
 		}
 
 		var rawTextBuf strings.Builder
+		partialAnswer = ""
 		emittedVisibleText := ""
 		emittedContentThinkingText := ""
+		promptEchoSuppressed := false
 		var thinkBuf strings.Builder
 		var toolCalls []llm.ToolCallDef
 		var usage *llm.Usage
@@ -3750,7 +3973,11 @@ agentLoop:
 						a.emitRun(&run, "mauler:thinking", thinkChunk)
 					}
 				}
-				visible := sanitizeVisibleModelText(visibleRaw)
+				visible, suppressed := sanitizeVisibleModelOutput(visibleRaw, msgs)
+				partialAnswer = joinTextReply(textReply.prefix, visible)
+				if suppressed {
+					promptEchoSuppressed = true
+				}
 				switch {
 				case visible == emittedVisibleText:
 				case strings.HasPrefix(visible, emittedVisibleText):
@@ -3761,7 +3988,7 @@ agentLoop:
 					}
 				default:
 					emittedVisibleText = visible
-					a.emitRun(&run, "mauler:stream_replace", visible)
+					a.emitRun(&run, "mauler:stream_replace", joinTextReply(textReply.prefix, visible))
 				}
 			}
 			if len(delta.ToolCalls) > 0 {
@@ -3786,9 +4013,21 @@ agentLoop:
 		}
 
 		rawText := rawTextBuf.String()
+		cutoffInToolProposal := wasTruncated && (len(toolCalls) > 0 || containsInlineToolMarkup(rawText) || req.JSONSchema != nil || toolChoice == "required")
+		if cutoffInToolProposal {
+			toolCalls = nil
+			run.addEvent("tool_proposal_cutoff", "Discarded the incomplete model tool proposal", "No tool was dispatched for this response.")
+		}
 		textBuf := strings.Builder{}
 		visibleRawText, _ := splitModelTextForDisplay(rawText)
-		textBuf.WriteString(sanitizeVisibleModelText(visibleRawText))
+		visibleModelText, suppressed := sanitizeVisibleModelOutput(visibleRawText, msgs)
+		if suppressed {
+			promptEchoSuppressed = true
+		}
+		textBuf.WriteString(visibleModelText)
+		if promptEchoSuppressed {
+			run.addEvent("prompt_echo_suppressed", "Suppressed a local-model prompt echo before delivery", fmt.Sprintf("model_turn=%d", modelCallTurn))
+		}
 		nativeToolCallCount := len(toolCalls)
 		if nativeToolCallCount > 0 {
 			run.addEvent("tool_protocol_native", "Backend returned structured tool_calls", toolProtocolDebugDetail(rawText, textBuf.String(), toolCalls, toolDefs))
@@ -3798,7 +4037,7 @@ agentLoop:
 		if strings.TrimSpace(repairText) == "" {
 			repairText = textBuf.String()
 		}
-		if len(toolCalls) == 0 && strings.TrimSpace(repairText) != "" {
+		if !wasTruncated && len(toolCalls) == 0 && strings.TrimSpace(repairText) != "" {
 			repairDefs := toolDefs
 			if len(repairDefs) == 0 && containsInlineToolMarkup(repairText) && toolChoice != "none" && !toolBudgetExhausted && !timeBudgetExhausted {
 				repairDefs = a.registry.ToEnabledToolDefs(settings.EffectiveEnabledTools(cfg.Tools))
@@ -3815,7 +4054,7 @@ agentLoop:
 				a.emitRun(&run, "mauler:stream_replace", textBuf.String())
 			}
 		}
-		if len(toolCalls) == 0 && req.JSONSchema != nil && len(toolDefs) == 1 && strings.TrimSpace(repairText) != "" {
+		if !wasTruncated && len(toolCalls) == 0 && req.JSONSchema != nil && len(toolDefs) == 1 && strings.TrimSpace(repairText) != "" {
 			if repaired := parseConstrainedToolArgsContent(repairText, toolDefs[0]); len(repaired) > 0 {
 				toolCalls = repaired
 				textBuf.Reset()
@@ -3853,6 +4092,7 @@ agentLoop:
 			a.emitRun(&run, "mauler:stream_replace", "")
 		}
 		protocolFailure := unrepairedToolMarkup || hallucinatedToolResult
+		boundaryViolation := ""
 
 		// Normalize shell commands (HTML-unescape operators) BEFORE storing in history,
 		// so the model never re-reads its own escaped commands and re-learns the
@@ -3873,30 +4113,83 @@ agentLoop:
 				run.addEvent("tool_rewrite", "Routed independent HTTP command away from the live terminal", note)
 			}
 		}
+		if len(toolCalls) > 0 {
+			boundaryViolation = validateToolCallBoundary(toolCalls, toolDefs, toolChoice)
+			if boundaryViolation != "" {
+				protocolFailure = true
+				run.addEvent("tool_protocol_boundary", "Rejected tool calls outside the advertised boundary", boundaryViolation)
+				a.setRunState(&run, "recovering", boundaryViolation)
+				toolCalls = nil
+				textBuf.Reset()
+				a.emitRun(&run, "mauler:stream_replace", "")
+			}
+		}
 
+		postToolReplyCutoff := wasTruncated && totalToolCallsMade > 0 && !cutoffInToolProposal && !protocolFailure
+		if postToolReplyCutoff && !timeBudgetExhausted {
+			if retry, ok := postToolReplyRetryRequest(req, usage, responseContext); ok {
+				a.setRunState(&run, "recovering", "Finishing the reply from the recorded tool results.")
+				run.addEvent("post_tool_reply_retry", "Retrying final model reply with tools disabled", fmt.Sprintf("max_tokens=%d", retry.MaxTokens))
+				modelCallTurn++
+				retryBudget := buildPromptBudgetSnapshot(retry.Messages, nil, responseContext)
+				recordPromptBudget(&run, retryBudget, modelCallTurn)
+				observer := newModelCallObserver(modelCallTurn, client.Name(), profile, retry, retryBudget, "reused")
+				recovered, retryUsage, err := collectPostToolReply(ctx, client, retry, observer.observe)
+				if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+					return
+				}
+				visible, _ := splitModelTextForDisplay(recovered)
+				visible, _ = sanitizeVisibleModelOutput(visible, retry.Messages)
+				if err == nil && (strings.TrimSpace(visible) == "" || containsInlineToolMarkup(recovered) || containsHallucinatedToolResult(recovered)) {
+					err = errors.New("the retry returned no usable final text")
+				}
+				if err == nil {
+					observer.record(&run, retryUsage, "ok", nil)
+					textBuf.Reset()
+					textBuf.WriteString(visible)
+					rawText = recovered
+					thinkBuf.Reset()
+					usage = retryUsage
+					wasTruncated = false
+					a.emitRun(&run, "mauler:stream_replace", visible)
+					run.addEvent("post_tool_reply_recovered", "Completed the final reply from recorded tool results", "")
+				} else {
+					observer.record(&run, retryUsage, "error", err)
+					run.addEvent("post_tool_reply_retry_incomplete", "Retained the incomplete reply", err.Error())
+				}
+			}
+		}
 		visibleText := strings.TrimSpace(textBuf.String())
-		if answerCheckpointCandidate(visibleText, toolCalls, protocolFailure) &&
-			len(visibleText) > len(bestAnswerCheckpoint) {
-			bestAnswerCheckpoint = visibleText
+		deliveryText := joinTextReply(textReply.prefix, visibleText)
+		if !wasTruncated && answerCheckpointCandidate(deliveryText, toolCalls, protocolFailure) &&
+			len(deliveryText) > len(bestAnswerCheckpoint) {
+			bestAnswerCheckpoint = deliveryText
 			a.emitRun(&run, "mauler:answer_checkpoint", bestAnswerCheckpoint)
 		}
 		a.mu.Lock()
 		if !protocolFailure && (visibleText != "" || len(toolCalls) > 0) {
-			msg := llm.NewTextMessage(llm.RoleAssistant, textBuf.String())
+			msg := llm.NewTextMessage(llm.RoleAssistant, deliveryText)
 			if req.PreserveThinking {
 				msg.ReasoningContent = strings.TrimSpace(thinkBuf.String())
 			}
 			if len(toolCalls) > 0 {
 				msg.ToolCalls = toolCalls
 			}
-			a.history.Append(msg)
+			appendTextReplyHistory(a.history, msg, textReply.prefix)
 		}
 		if usage != nil {
 			a.history.SetExactCount(usage.PromptTokens + usage.CompletionTokens)
 		}
 		a.mu.Unlock()
+		partialAnswer = ""
+		if err := a.checkpointBeforeExternalWork(&run, *cfg); err != nil {
+			finalStatus = "error"
+			run.stopTerminal("recovery_checkpoint_failed", err.Error())
+			finalSummary = "Work stopped because the completed model turn could not be checkpointed. No further action was executed."
+			return
+		}
 		if !protocolFailure {
-			finalSummary = visibleText
+			finalSummary = deliveryText
 		}
 		if !protocolFailure && logCfg.LogResponses && visibleText != "" {
 			if respBuf.Len() > 0 {
@@ -3909,9 +4202,9 @@ agentLoop:
 		if thinkBuf.Len() > 0 {
 			a.emitRun(&run, "mauler:thinking_done", thinkBuf.String())
 		}
-		if visibleText != "" && !protocolFailure {
+		if visibleText != "" && !protocolFailure && !(wasTruncated && (directAnswerTurn || postToolReplyCutoff)) {
 			a.emitRun(&run, "mauler:assistant_turn", assistantTurnEvent{
-				Content: visibleText, Thinking: strings.TrimSpace(thinkBuf.String()),
+				Content: deliveryText, Thinking: strings.TrimSpace(thinkBuf.String()),
 				Turn: modelCallTurn, ToolCalls: len(toolCalls),
 			})
 		}
@@ -3941,11 +4234,34 @@ agentLoop:
 		}
 
 		if len(toolCalls) == 0 {
-			text := strings.TrimSpace(textBuf.String())
-			explicitNoToolTurn := explicitlyForbidsToolUse(firstUserText)
-			if wasTruncated && explicitNoToolTurn && text != "" {
-				wasTruncated = false
-				run.addEvent("response_budget", "Accepted bounded explanation response at output cap", "No action or tool continuation was permitted by the user instruction.")
+			text := deliveryText
+			explicitNoToolTurn := explicitlyForbidsToolUse(firstUserText) || postToolReplyCutoff
+			if wasTruncated && postToolReplyCutoff {
+				finalStatus = "stopped"
+				run.stopTerminal("output_limit", "The final reply reached its output limit. The partial answer and completed tool results are retained.")
+				run.addEvent("output_limit", "Kept the post-tool reply incomplete", "finish_reason=length")
+				return
+			}
+			if wasTruncated && directAnswerTurn {
+				if !timeBudgetExhausted && !toolBudgetExhausted && !recoveryReportRequested &&
+					canContinueTextReply(run, directAnswerTurn) && textReply.advance(visibleText) {
+					a.mu.Lock()
+					a.history.Append(llm.NewTextMessage(llm.RoleSystem, textReplyContinuationInstruction))
+					a.mu.Unlock()
+					run.addEvent("text_reply_continue", "Continuing the requested answer without tools", fmt.Sprintf("continuation=%d/%d", textReply.attempts, maxTextReplyContinuations))
+					a.setRunState(&run, "thinking", "Continuing the answer from its response limit.")
+					a.emitRun(&run, "mauler:stream_replace", textReply.prefix+"\n\n")
+					if err := a.checkpointBeforeExternalWork(&run, *cfg); err != nil {
+						finalStatus = "error"
+						run.stopTerminal("recovery_checkpoint_failed", err.Error())
+						return
+					}
+					continue agentLoop
+				}
+				finalStatus = "stopped"
+				run.stopTerminal("output_limit", "The model reached its response token limit. The partial answer is retained; ask to continue from its last sentence.")
+				run.addEvent("output_limit", "Partial response was not accepted as complete", "finish_reason=length")
+				return
 			}
 
 			if recoveryReportRequested {
@@ -3999,6 +4315,9 @@ agentLoop:
 					pendingRepairToolDefs = narrowed
 				}
 				prompt := buildToolProtocolRecoveryPrompt(repairText, toolDefs, hallucinatedToolResult)
+				if boundaryViolation != "" {
+					prompt = buildToolBoundaryRecoveryPrompt(boundaryViolation, toolDefs)
+				}
 				run.addEvent("continue", fmt.Sprintf("Auto-continue %d/%d: tool protocol recovery (%d/%d)", autoContinues, maxAutoContinues, malformedToolContinues, maxMalformedToolContinues), prompt)
 				continueMsg := llm.NewTextMessage(llm.RoleUser, prompt)
 				a.mu.Lock()
@@ -4009,6 +4328,10 @@ agentLoop:
 			if protocolFailure {
 				stopReason := "tool_protocol_unrepaired"
 				detail := fmt.Sprintf("The model emitted inline tool markup that TheMauler could not convert after %d repair retries. Try again with a stricter tool-compatible profile/template, or inspect the Logs tab for the raw markup.", malformedToolContinues)
+				if boundaryViolation != "" {
+					stopReason = "tool_protocol_boundary"
+					detail = "The model/backend repeatedly returned tool calls outside the exact schemas advertised for the turn. No unadvertised tool was executed. " + boundaryViolation
+				}
 				if hallucinatedToolResult {
 					stopReason = "tool_protocol_hallucinated_result"
 					detail = fmt.Sprintf("The model wrote text that looked like a tool/system result, but no real tool call was parsed after %d repair retries. Try again with a stricter tool-compatible profile/template, or inspect the Logs tab for the raw text.", malformedToolContinues)
@@ -4133,7 +4456,7 @@ agentLoop:
 			// narration-repair or reviewer loop. Operational, workspace, live-data,
 			// and mutation requests never enter this lane because their opening
 			// tool choice is auto/required rather than none.
-			if directAnswerTurn && directAnswerAcceptedForMode(run.conversationMode, text) {
+			if directAnswerTurn && directAnswerAcceptedForPrompt(run.conversationMode, firstUserText, text) {
 				if normalizeConversationMode(run.conversationMode) == conversationModeDirect && directModeCannotCompleteTask(firstUserText) {
 					bestAnswerCheckpoint = text
 					finalSummary = text
@@ -4248,8 +4571,11 @@ agentLoop:
 					run.addEvent("blocked", "Control plane rejected verification transition", detail)
 					return
 				}
-				decision := a.runReviewPhase(ctx, &run, profile, cfg, mode, autonomous, &reviewCyclesUsed, toolBudgetExhausted || timeBudgetExhausted)
-				decision.Verdicts = a.ensureControlVerification(ctx, &run, cfg, decision.Verdicts)
+				run.Summary = finalSummary
+				decision := a.runReviewPhase(ctx, &run, profile, cfg, mode, autonomous, &reviewCyclesUsed, reviewPhaseLimits{
+					budgetsExhausted: toolBudgetExhausted || timeBudgetExhausted,
+					replyRecovered:   postToolReplyCutoff,
+				})
 				if decision.StopReason != "" {
 					finalStatus = "stopped"
 					run.stop(decision.StopReason, decision.StopDetail)
@@ -4275,7 +4601,7 @@ agentLoop:
 				}
 				if blockers := blockingReviewVerdicts(decision.Verdicts); len(blockers) > 0 {
 					maxCycles := max(1, cfg.Agents.ReviewLoop.MaxReviewCycles)
-					if reviewCyclesUsed < maxCycles {
+					if !postToolReplyCutoff && reviewCyclesUsed < maxCycles {
 						reviewCyclesUsed++
 						_ = a.failControlVerification(&run, decision.Verdicts, "controller-owned deterministic verification failed")
 						prompt := buildReviewGateFailurePrompt(blockers, reviewCyclesUsed, maxCycles)
@@ -4297,7 +4623,7 @@ agentLoop:
 					verdict := VerifyVerdict{Gate: "control", Status: "fail", Blocking: true, Summary: reason, Improvements: []string{"Perform and verify the missing action before proposing completion again."}}
 					_ = a.failControlVerification(&run, []VerifyVerdict{verdict}, reason)
 					maxCycles := max(1, cfg.Agents.ReviewLoop.MaxReviewCycles)
-					if reviewCyclesUsed < maxCycles {
+					if !postToolReplyCutoff && reviewCyclesUsed < maxCycles {
 						reviewCyclesUsed++
 						prompt := buildReviewGateFailurePrompt([]VerifyVerdict{verdict}, reviewCyclesUsed, maxCycles)
 						run.addEvent("continue", fmt.Sprintf("Control completion repair %d/%d", reviewCyclesUsed, maxCycles), prompt)
@@ -4314,7 +4640,7 @@ agentLoop:
 				if err := a.passControlVerification(&run, decision.Verdicts); err != nil {
 					verdict := VerifyVerdict{Gate: "control", Status: "fail", Blocking: true, Summary: err.Error(), Improvements: []string{"Produce immutable evidence for every blocking contract check."}}
 					maxCycles := max(1, cfg.Agents.ReviewLoop.MaxReviewCycles)
-					if reviewCyclesUsed < maxCycles {
+					if !postToolReplyCutoff && reviewCyclesUsed < maxCycles {
 						reviewCyclesUsed++
 						_ = a.failControlVerification(&run, []VerifyVerdict{verdict}, err.Error())
 						prompt := buildReviewGateFailurePrompt([]VerifyVerdict{verdict}, reviewCyclesUsed, maxCycles)
@@ -4357,6 +4683,16 @@ agentLoop:
 		var toolResultMsgs []llm.Message
 		for _, tc := range toolCalls {
 			tc = normalizeToolCallArguments(tc)
+			if blocked := guardExplicitToolInputExclusions(run, tc); blocked != "" {
+				finalStatus = "stopped"
+				finalSummary = blocked
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(blocked), "blocked", 0)
+				run.addEvent("policy_block", "Explicit tool-input exclusion blocked dispatch", blocked)
+				run.stopTerminal("tool_input_constraint", blocked)
+				a.setRunState(&run, "blocked", blocked)
+				a.emitRun(&run, "mauler:tool_result", map[string]string{"id": tc.ID, "name": tc.Function.Name, "result": blocked})
+				return
+			}
 			a.setRunState(&run, stateForTool(tc.Function.Name), tc.Function.Name)
 			if isReasoningEffortTool(tc.Function.Name) {
 				run.addEvent("tool_call", tc.Function.Name, logInput(string(tc.Function.Arguments)))
@@ -4498,7 +4834,7 @@ agentLoop:
 				run.stop(stopReason, blocked)
 				a.setRunState(&run, "blocked", blocked)
 				run.addEvent("blocked", "Tool budget blocked call", blocked)
-				if requiresLivingDocUpdate(run.Prompt) && !runHasFileMutation(run) && isBlockingStopReason(stopReason) {
+				if requiresLivingDocUpdate(taskRoutingPrompt(run)) && !runHasFileMutation(run) && isBlockingStopReason(stopReason) {
 					docRecoveryRequested = true
 				}
 				a.emitRun(&run, "mauler:tool_result", map[string]string{
@@ -4593,6 +4929,12 @@ agentLoop:
 				}
 			}
 
+			if err := a.checkpointToolIntent(&run, *cfg, tc); err != nil {
+				finalStatus = "error"
+				run.stopTerminal("recovery_checkpoint_failed", err.Error())
+				finalSummary = "The next action was not executed because its recovery intent could not be committed: " + err.Error()
+				return
+			}
 			toolStart := time.Now()
 			var result string
 			var runErr error
@@ -4603,7 +4945,7 @@ agentLoop:
 			)
 			toolCtx = withRunControlContext(toolCtx, &run)
 			toolCtx = a.browserToolContextForRun(toolCtx, &run, tc)
-			if shouldUseSharedTerminal(cfg.Tools, tc.Function.Name) && !scanCallPrefersIsolated(tc) && !shellCallPrefersIsolatedBackend(tc) {
+			if shouldUseSharedTerminal(cfg.Tools, tc.Function.Name) && !scanCallPrefersIsolated(tc) && !shellCallPrefersIsolatedBackend(tc) && !shellCallPollsStandaloneBackground(tc) {
 				result, runErr = a.runSharedTerminalShell(ctx, tc.Function.Name, tc.Function.Arguments, cfg.Tools.BashTimeout)
 				if errors.Is(runErr, errSharedTerminalUnsupported) || errors.Is(runErr, errSharedTerminalBusy) {
 					sharedFallback = sharedTerminalFallbackNote(runErr, a.GetSharedTerminalState())
@@ -4611,6 +4953,14 @@ agentLoop:
 				}
 			} else {
 				result, runErr = a.registry.Run(toolCtx, tc)
+			}
+			if errors.Is(runErr, errToolInputConstraint) {
+				finalStatus = "stopped"
+				finalSummary = "A delegated tool call violated the operator's explicit input exclusion and was stopped before execution."
+				run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(finalSummary), "blocked", 0)
+				run.addEvent("policy_block", "Delegated tool-input exclusion blocked dispatch", finalSummary)
+				run.stopTerminal("tool_input_constraint", finalSummary)
+				return
 			}
 			a.completeBrowserHandoff(&run, tc, runErr)
 			if sharedFallback != "" {
@@ -4654,18 +5004,21 @@ agentLoop:
 			budget.after(tc.Function.Name, result, runErr)
 			historyResult := a.toolResultForContext(run.ID, tc.Function.Name, result, cfg.Tools)
 			toolResultMsgs = append(toolResultMsgs, newToolResultMsg(tc.ID, tc.Function.Name, historyResult))
-			status := "done"
+			outcome := classifyToolExecutionOutcome(result, runErr)
+			status := outcome.Status
 			if runErr != nil {
-				status = "error"
 				a.setRunState(&run, "recovering", fmt.Sprintf("%s failed: %v", tc.Function.Name, runErr))
 				if isMalformedToolArgsError(runErr) {
 					run.addEvent("tool_error", "Malformed tool arguments", fmt.Sprintf("%s: %v", tc.Function.Name, runErr))
 				} else {
 					run.addEvent("tool_error", "Recoverable tool failure", fmt.Sprintf("%s: %v", tc.Function.Name, runErr))
 				}
+			} else if outcome.EventKind != "" {
+				a.setRunState(&run, firstNonEmpty(outcome.RunState, "recovering"), outcome.EventMessage)
+				run.addEvent(outcome.EventKind, outcome.EventMessage, truncateLine(result, 900))
 			}
 			run.addTool(tc.Function.Name, logInput(string(tc.Function.Arguments)), logResult(result), status, toolDurMs)
-			a.recordControlledToolOutcome(&run, controlled, tc, runErr)
+			a.recordControlledToolOutcomeStatus(&run, controlled, tc, status, outcome.ControlErr)
 			a.recordCategorizedToolLedger(run.ID, tc, status, result, toolDurMs)
 			if status == "done" {
 				a.recordPinnedEvidenceLedger(run.ID, tc, result)
@@ -4691,7 +5044,12 @@ agentLoop:
 		}
 		a.mu.Unlock()
 		finalSummary = textBuf.String()
-		a.maybeCheckpoint(run, *cfg, 4)
+		if err := a.checkpointBeforeExternalWork(&run, *cfg); err != nil {
+			finalStatus = "error"
+			run.stopTerminal("recovery_checkpoint_failed", err.Error())
+			finalSummary = "Work stopped after the last tool result because recovery persistence failed. Review the retained files before retrying."
+			return
+		}
 	}
 }
 
@@ -4765,7 +5123,7 @@ func fallbackStoppedRunSummary(run TaskRun) string {
 	if reason == "loop_circuit_breaker" {
 		var sb strings.Builder
 		sb.WriteString("I'm sorry - this run got stuck repeating the same action, so I stopped it rather than inventing an answer.")
-		if explicitWebResearchIntent(run.Prompt) && !runHasSuccessfulWebResearch(run) {
+		if explicitWebResearchIntent(taskRoutingPrompt(run)) && !runHasSuccessfulWebResearch(run) {
 			sb.WriteString("\n\nNo verified web-research answer was produced. The run should have used web search and source fetching instead of rereading local guidance.")
 		} else {
 			sb.WriteString("\n\nThe requested result was not completed.")
@@ -4831,10 +5189,15 @@ func shouldRequestRecoveryReport(run TaskRun, alreadyRequested bool) bool {
 }
 
 func recoveryReportPrompt(run TaskRun) string {
+	evidenceDigest := buildRecoveryEvidenceDigest(run, 7000)
 	if readOnlyRecoveryEvidenceReady(run) {
-		return strings.TrimSpace(`Answer handoff mode. Do not call tools. The loop guard stopped redundant work after useful read-only evidence had already been gathered.
+		prompt := strings.TrimSpace(`Answer handoff mode. Do not call tools. The loop guard stopped redundant work after useful read-only evidence had already been gathered.
 
 Answer the user's original request directly from the evidence already present. Do not lead with "What failed" and do not frame the whole result as a failure. Clearly distinguish observed findings from uncertain scanner claims or hypotheses. Prefer a concise Findings section, then Caveats and Recommended next steps only when they add value. Do not expose internal loop scores, counters, raw tool arguments, or long tool output.`)
+		if evidenceDigest != "" {
+			prompt += "\n\nEvidence digest:\n" + evidenceDigest + "\n\nDo not contradict the controller-derived facts above. A successful tool process is not by itself proof that authentication, exploitation, or a requested scan scope succeeded."
+		}
+		return strings.TrimSpace(prompt)
 	}
 	var sb strings.Builder
 	sb.WriteString("Recovery mode. Do not call tools. The run hit a blocking tool/problem state, and you have one final text-only turn.\n\n")
@@ -4842,22 +5205,10 @@ Answer the user's original request directly from the evidence already present. D
 	if detail := strings.TrimSpace(run.StopDetail); detail != "" {
 		fmt.Fprintf(&sb, "Stop detail: %s\n", truncateLine(detail, 1200))
 	}
-	if len(run.Tools) > 0 {
-		sb.WriteString("\nRecent tools:\n")
-		start := len(run.Tools) - 5
-		if start < 0 {
-			start = 0
-		}
-		for _, tool := range run.Tools[start:] {
-			fmt.Fprintf(&sb, "- %s [%s]", firstNonEmpty(tool.Name, "tool"), firstNonEmpty(tool.Status, "unknown"))
-			if in := strings.TrimSpace(tool.Input); in != "" {
-				fmt.Fprintf(&sb, "\n  input: %s", truncateLine(in, 450))
-			}
-			if out := strings.TrimSpace(tool.Result); out != "" {
-				fmt.Fprintf(&sb, "\n  result: %s", truncateLine(out, 650))
-			}
-			sb.WriteString("\n")
-		}
+	if evidenceDigest != "" {
+		sb.WriteString("\nEvidence digest:\n")
+		sb.WriteString(evidenceDigest)
+		sb.WriteString("\n")
 	}
 	sb.WriteString("\nWrite a concise recovery report with these headings only:\n")
 	sb.WriteString("What failed\nEvidence gathered\nLikely cause\nSafest next action\n")
@@ -5554,6 +5905,28 @@ func scanCallPrefersIsolated(tc llm.ToolCallDef) bool {
 		return false
 	}
 	return tools.IsScanCommand(p.Command)
+}
+
+// shellCallPollsStandaloneBackground keeps a poll on the same manager that
+// created its job. Background launches with an explicit backend bypass the
+// shared terminal; their later poll usually contains only {"job":"..."}, so
+// backend-based routing alone cannot recover the owner.
+func shellCallPollsStandaloneBackground(tc llm.ToolCallDef) bool {
+	if !isShellTool(tc.Function.Name) {
+		return false
+	}
+	var args struct {
+		Job     string `json:"job"`
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(tc.Function.Arguments, &args) != nil {
+		return false
+	}
+	id := strings.TrimSpace(args.Job)
+	if id == "" {
+		id = shellAssignmentJobID(args.Command)
+	}
+	return strings.HasPrefix(strings.ToLower(id), "isolated-") || tools.HasBackgroundShellJob(id)
 }
 
 func resolvedToolTimeout(cfg settings.ToolsConfig, tc llm.ToolCallDef) int {
@@ -6635,6 +7008,10 @@ func shouldConfirmTool(tool tools.Tool, cfg *settings.Settings, tc llm.ToolCallD
 	switch tool.Name() {
 	case "shell", "bash":
 		return cfg.Tools.ConfirmExec
+	case "mcp":
+		// Remote MCP tools are an opaque side-effect boundary. Only an exact
+		// operator-approved safe rule may bypass confirmation.
+		return true
 	default:
 		return cfg.Tools.ConfirmWrites
 	}
@@ -6694,6 +7071,7 @@ func isBlockingStopReason(reason string) bool {
 		"web_research_failed",
 		"tool_budget_exhausted",
 		"tool_denied",
+		"tool_input_constraint",
 		"tool_disabled",
 		"repeated_tool_failure",
 		"repeated_empty_tool_output",
@@ -6755,20 +7133,24 @@ func runHasFileMutation(run TaskRun) bool {
 }
 
 func invalidDoneReason(run TaskRun, summary string) string {
-	if isJunkFinalSummary(summary) {
+	if isJunkFinalSummary(summary) && !acceptsShortObservedAnswer(run, summary) {
 		return fmt.Sprintf("Final assistant message was not meaningful: %q", strings.TrimSpace(summary))
 	}
 	if containsInlineToolMarkup(summary) || sideChatLooksLikeToolCall(summary) {
 		return "Final assistant message contained an unexecuted tool request; convert and execute the tool call, then return a plain-language result."
 	}
-	if !promptRequestsPlanningOnly(run.Prompt) && !explicitlyForbidsToolUse(run.Prompt) && finalSummaryStillNeedsAction(summary) {
+	trustedPrompt := taskRoutingPrompt(run)
+	if !promptRequestsPlanningOnly(trustedPrompt) &&
+		!explicitlyForbidsToolUse(trustedPrompt) &&
+		!promptAllowsOpenEndedConversationalReply(trustedPrompt) &&
+		finalSummaryStillNeedsAction(summary) {
 		return "Final assistant message describes a next action instead of completing it; continue autonomously with the required tool call."
 	}
 	metrics := buildLoopMetrics(run)
 	if metrics.ToolErrors > 0 && !runHasSuccessfulExecutionTool(run) {
 		return "Run only planned or failed tools; no successful execution tool ran after tool errors."
 	}
-	if runHasOnlyPlannerTools(run) && executionLikelyRequired(run.Prompt) {
+	if runHasOnlyPlannerTools(run) && executionLikelyRequired(trustedPrompt) {
 		return "Run only updated the plan/todos for an execution task; it did not run an execution tool."
 	}
 	return ""
@@ -7154,16 +7536,20 @@ func toolsetContains(cfg settings.ToolsConfig, active, name string) bool {
 
 // AgentMode is the first-pass auto-agent routing result.
 type AgentMode struct {
-	Name          string
-	Description   string
-	Instructions  string
-	ContextBudget int
-	DefaultEffort string
+	Name              string
+	Description       string
+	Instructions      string
+	ContextBudget     int
+	DefaultEffort     string
+	DefinitionID      string
+	DefinitionVersion string
 }
 
 func classifyAgentMode(text string) AgentMode {
 	lower := strings.ToLower(text)
 	switch {
+	case promptIsSimpleGreetingRequest(text) || promptRequestsTextComposition(text):
+		return baseMode("Auto")
 	case looksBugBountyAssessmentTask(lower):
 		return baseMode("Bug Bounty Hunter")
 	case promptClearlyRequestsPlanOutput(lower) && !promptExplicitlyRequestsMutation(lower):
@@ -7178,7 +7564,7 @@ func classifyAgentMode(text string) AgentMode {
 			Description:  "General agent with terminal-first execution.",
 			Instructions: "Use the terminal and tools directly when the task needs them. Prefer live evidence over stale notes, keep artifacts/current facts updated, and continue autonomously unless blocked by missing external state.",
 		}
-	case hasAny(lower, "fix", "repair", "restore", "broken", "doesn't work", "does not work", "failing", "error", "crash"):
+	case promptHasRepairIntent(lower):
 		return AgentMode{
 			Name:         "Fixer",
 			Description:  "Diagnose failures and patch them.",
@@ -8036,10 +8422,15 @@ func (a *App) OpenShell() (string, error) {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// ConPTY does not resolve PATH before combining a relative executable with
+	// Cmd.Dir. Resolve first so selecting a workspace cannot turn powershell.exe
+	// into <workspace>/powershell.exe (or run a workspace-shadowed executable).
+	resolvedShell, err := resolvePTYExecutable(shellCmd)
+	if err != nil {
+		return "", fmt.Errorf("shell executable: %w", err)
+	}
 	terminal, err := pty.New()
 	if err != nil {
-		cancel()
 		return "", fmt.Errorf("shell pty: %w", err)
 	}
 	// Start wide. The agent often runs commands before (or while) the terminal
@@ -8050,7 +8441,9 @@ func (a *App) OpenShell() (string, error) {
 	// gives plenty of room; ShellResize narrows it later to match the real pane.
 	_ = terminal.Resize(200, 50)
 
-	cmd := terminal.CommandContext(ctx, shellCmd, shellArgs...)
+	// Session cancellation below already owns Kill/Close/Wait. Avoid the
+	// dependency's second context waiter (its Windows cmdErr races with Wait).
+	cmd := terminal.Command(resolvedShell, shellArgs...)
 	if backend != "wsl" {
 		cmd.Dir = cwd
 	}
@@ -8059,7 +8452,6 @@ func (a *App) OpenShell() (string, error) {
 	hidePtyShellWindow(cmd)
 
 	if err := cmd.Start(); err != nil {
-		cancel()
 		_ = terminal.Close()
 		startErr := decorateShellStartError(backend, distro, user, err)
 		a.recordLedger(ledger.Event{
@@ -8094,7 +8486,6 @@ func (a *App) OpenShell() (string, error) {
 		done:  make(chan struct{}),
 		cancel: func() {
 			closeOnce.Do(func() {
-				cancel()
 				if cmd.Process != nil {
 					_ = cmd.Process.Kill()
 				}
@@ -8831,7 +9222,7 @@ func (a *App) runSharedTerminalShell(ctx context.Context, toolName string, raw j
 		return "", errSharedTerminalUnsupported
 	}
 	if isShellJobsCommand(command) {
-		return "Mauler background jobs are not listed with the shell command `job` or `jobs`. Poll a known background job by calling the shell tool with {\"job\":\"j1\"}; if no job id was returned, start the long command with {\"command\":\"...\",\"background\":true}.", fmt.Errorf("%s: use shell job parameter for Mauler background jobs", toolName)
+		return "Mauler background jobs are not listed with the shell command `job` or `jobs`. Poll a known background job by calling the shell tool with the exact id it returned, for example {\"job\":\"isolated-1\"}; if no job id was returned, start the long command with {\"command\":\"...\",\"background\":true}.", fmt.Errorf("%s: use shell job parameter for Mauler background jobs", toolName)
 	}
 	if stripped, ok := stripTrailingBackgroundOperator(command); ok {
 		command = stripped
@@ -9379,7 +9770,7 @@ func (a *App) startBackgroundJob(sess *shellSession, command string, verbose boo
 	}
 	a.bgMu.Lock()
 	a.bgCounter++
-	id := fmt.Sprintf("j%d", a.bgCounter)
+	id := fmt.Sprintf("terminal-%d", a.bgCounter)
 	a.bgMu.Unlock()
 
 	logPath := "/tmp/mauler_job_" + id + ".log"
@@ -9682,7 +10073,7 @@ func isShellJobsCommand(command string) bool {
 
 func shellAssignmentJobID(command string) string {
 	trimmed := strings.TrimSpace(command)
-	re := regexp.MustCompile(`(?is)^job\s*=\s*['"]?(j[0-9]+)['"]?\s*$`)
+	re := regexp.MustCompile(`(?is)^job\s*=\s*['"]?((?:j|terminal-|isolated-)[0-9]+)['"]?\s*$`)
 	match := re.FindStringSubmatch(trimmed)
 	if len(match) < 2 {
 		return ""
@@ -10049,10 +10440,14 @@ func cleanSessionName(name string) (string, error) {
 }
 
 func toSessionChatMessages(msgs []llm.Message) []SessionChatMessage {
+	msgs, _ = scrubAssistantPromptEchoes(msgs)
 	out := []SessionChatMessage{}
 	for _, msg := range msgs {
 		role := msg.Role
-		if role == llm.RoleSystem && len(out) == 0 {
+		// System messages are private model/controller inputs. User-visible run
+		// state has dedicated typed events and must not be reconstructed from the
+		// model prompt when a saved conversation is loaded.
+		if role == llm.RoleSystem {
 			continue
 		}
 		content, attachments := sessionMessageDisplay(msg)
@@ -10066,6 +10461,7 @@ func toSessionChatMessages(msgs []llm.Message) []SessionChatMessage {
 		if strings.TrimSpace(content) != "" || role == llm.RoleUser || len(attachments) > 0 {
 			out = append(out, SessionChatMessage{
 				Role: role, Content: content, Thinking: msg.ReasoningContent,
+				DeliveryStatus: msg.DeliveryStatus, StopReason: msg.StopReason,
 				Images: messageImages(msg), Attachments: attachments,
 			})
 		}
@@ -10993,6 +11389,15 @@ func sameFilesystemPath(a, b string) bool {
 		return strings.EqualFold(cleanA, cleanB)
 	}
 	return cleanA == cleanB
+}
+
+func sameConfiguredWorkspace(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return a == b
+	}
+	return sameFilesystemPath(tools.NormalizeHostPath(a), tools.NormalizeHostPath(b))
 }
 
 func parseDataURI(uri string) (b64 string, mediaType string, ok bool) {
@@ -12733,10 +13138,38 @@ func looksFinished(text string) bool {
 	return false
 }
 
+// promptAllowsOpenEndedConversationalReply identifies prompts whose complete
+// answer can naturally invite the user to provide an actual task. Keep this
+// deliberately narrower than looksConversational: factual and explanatory
+// questions still have to be answered before the run can complete.
+func promptAllowsOpenEndedConversationalReply(text string) bool {
+	if promptIsSimpleGreetingRequest(text) {
+		return true
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+	normalised := strings.Trim(strings.ToLower(trimmed), " \t\r\n.!?,;:")
+	switch normalised {
+	case "hello", "hello there", "hi", "hiya", "hi there", "hey", "hey there", "howdy", "yo",
+		"thanks", "thank you", "cheers", "ok", "okay", "cool", "nice", "yep", "yeah", "nope", "lol",
+		"good morning", "good afternoon", "good evening",
+		"help", "help me", "can you help", "can you help me", "what can you do", "how can you help",
+		"who are you", "what are you":
+		return true
+	default:
+		return false
+	}
+}
+
 // looksConversational returns true when the user's message is a factual or
 // explanatory question that the model should be able to answer directly
 // without any tool calls.
 func looksConversational(text string) bool {
+	if promptIsSimpleGreetingRequest(text) || promptRequestsTextComposition(text) {
+		return true
+	}
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return true
@@ -12784,13 +13217,7 @@ func looksConversational(text string) bool {
 		}
 	}
 
-	smallTalk := map[string]bool{
-		"hello": true, "hi": true, "hey": true, "hey there": true, "hi there": true, "yo": true,
-		"thanks": true, "thank you": true, "cheers": true, "ok": true, "okay": true, "cool": true,
-		"nice": true, "yep": true, "yeah": true, "nope": true, "lol": true, "good morning": true,
-		"good afternoon": true, "good evening": true,
-	}
-	if smallTalk[normalised] {
+	if promptAllowsOpenEndedConversationalReply(normalised) {
 		return true
 	}
 
@@ -12858,7 +13285,7 @@ func toolChoiceFor(firstUserText string, autoContinues int, totalToolCallsMade i
 	return "auto"
 }
 
-const directAnswerMaxTokens = 2048
+const directAnswerMaxTokens = 8192
 
 // isDirectAnswerTurn identifies the lightweight lane inside normal Chat. It is
 // deliberately derived from the authoritative tool route: anything needing
@@ -12920,6 +13347,9 @@ func directAnswerLooksComplete(text string) bool {
 	if text == "" {
 		return false
 	}
+	if numericDirectAnswerRE.MatchString(text) {
+		return true
+	}
 	if strings.HasSuffix(text, "...") || strings.HasSuffix(text, ":") {
 		return false
 	}
@@ -12960,30 +13390,35 @@ func needsLiveSystemInfoTool(text string) bool {
 // must be collected through a real tool call. Stable explanations about these
 // topics remain normal conversation.
 func needsLiveExternalInfoTool(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
+	// A filename such as append-fixture.txt or weather.json is data, not a
+	// request for live sports/weather facts. Keep real surrounding intent.
+	lower := namedArtifactPathRE.ReplaceAllString(strings.ToLower(strings.TrimSpace(text)), " ")
 	if lower == "" {
 		return false
 	}
-	weather := hasAny(lower, "weather", "forecast", "temperature", "humidity", "rain", "rainfall", "wind speed")
-	if weather && hasAny(lower,
+	weather := hasAnyWholePhrase(lower, "weather", "forecast", "forecasts", "temperature", "temperatures", "humidity", "rain", "rainfall", "wind speed", "wind speeds")
+	if weather && hasAnyWholePhrase(lower,
 		"current", "currently", "today", "today's", "todays", "tomorrow", "tonight", "this week", "next week",
 		"next few days", "next seven days", "next 7 days", "coming days", "coming week", "over the next",
 		"day forecast", "-day forecast", "what's the", "whats the", "what is the", "get the", "show me the",
 	) {
 		return true
 	}
-	liveTopic := hasAny(lower,
-		"news", "headlines", "stock price", "share price", "exchange rate", "crypto price",
-		"score", "scores", "fixture", "fixtures", "traffic", "train time", "flight status",
+	liveTopic := hasAnyWholePhrase(lower,
+		"news", "headlines", "stock price", "stock prices", "share price", "share prices", "exchange rate", "exchange rates", "crypto price", "crypto prices",
+		"score", "scores", "fixture", "fixtures", "traffic", "train time", "train times", "flight status", "flight statuses",
 	)
-	return liveTopic && hasAny(lower,
+	return liveTopic && hasAnyWholePhrase(lower,
 		"latest", "live", "current", "currently", "today", "today's", "todays", "now", "this week", "get", "find", "show",
 	)
 }
 
-const explicitNoToolMaxTokens = 1024
+const explicitNoToolMaxTokens = 8192
 
 func explicitlyForbidsToolUse(text string) bool {
+	if promptHasStandaloneNoToolInstruction(text) {
+		return true
+	}
 	lower := strings.ToLower(strings.TrimSpace(text))
 	return hasAny(lower,
 		"explanation-only", "explanation only",
@@ -12996,7 +13431,7 @@ func explicitlyForbidsToolUse(text string) bool {
 }
 
 func applyExplicitNoToolResponseBudget(req *llm.Request, firstUserText string) bool {
-	if req == nil || !explicitlyForbidsToolUse(firstUserText) {
+	if req == nil || !explicitlyForbidsToolUse(firstUserText) || requestsLongFormReply(firstUserText) {
 		return false
 	}
 	if req.MaxTokens <= 0 || req.MaxTokens > explicitNoToolMaxTokens {

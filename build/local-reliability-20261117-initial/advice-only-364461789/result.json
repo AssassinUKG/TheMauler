@@ -1,0 +1,311 @@
+{
+  "case": "advice-only",
+  "evidence": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\advice-only-364461789",
+  "joined": true,
+  "modelCalls": 3,
+  "pass": false,
+  "repetition": 1,
+  "run": {
+    "id": "task-2026-11-17T19-44-18.2023088Z-4",
+    "generation": 1794944658202,
+    "conversation_epoch": 1,
+    "prompt": "Explain how I could list files in a folder on Windows. Advice only; do not inspect or access any files.",
+    "routing_prompt": "Explain how I could list files in a folder on Windows. Advice only; do not inspect or access any files.",
+    "mode": "Auto",
+    "agent_definition_id": "auto",
+    "agent_definition_version": "1",
+    "profile": "local-qualification",
+    "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+    "origin": "desktop",
+    "contract": {
+      "version": 1,
+      "revision": 1,
+      "run_id": "task-2026-11-17T19-44-18.2023088Z-4",
+      "objective": "Explain how I could list files in a folder on Windows. Advice only; do not inspect or access any files.",
+      "workspace_root": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\advice-only-364461789\\workspace",
+      "constraints": [
+        "Do not mutate outside the authoritative workspace or an explicitly approved scope."
+      ],
+      "risk": "low",
+      "instruction_revision": 1,
+      "plan_required": false,
+      "budgets": {
+        "max_tool_calls": 16,
+        "max_run_seconds": 90
+      },
+      "approval_policy": "tool_policy_and_scope_gates",
+      "completion_policy": "evidence_owned",
+      "created_at": "2026-11-17T19:44:18.2023088Z",
+      "digest": "sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e"
+    },
+    "control": {
+      "version": 1,
+      "contract_digest": "sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e",
+      "contract_revision": 1,
+      "phase": "complete",
+      "revision": 5,
+      "plan_required": false,
+      "plan_accepted": true,
+      "last_event": "verification_passed",
+      "last_detail": "all blocking acceptance checks have immutable evidence ids",
+      "updated_at": "2026-11-17T19:44:41.5666076Z"
+    },
+    "status": "done",
+    "state": "done",
+    "started_at": "2026-11-17T19:44:18Z",
+    "ended_at": "2026-11-17T19:44:41Z",
+    "duration_ms": 23365,
+    "prompt_tokens": 6146,
+    "completion_tokens": 45,
+    "total_tokens": 6191,
+    "summary": "The answer above covers it: use `Get-ChildItem` (or `ls`) in PowerShell, or `dir` in Command Prompt, with the folder path as the argument. No files were inspected or accessed.",
+    "response": "On Windows, you can list files in a folder using either of these shells:\n\n**PowerShell**\n```powershell\nGet-ChildItem C:\\Path\\To\\Folder\n# or the shorter alias:\nls C:\\Path\\To\\Folder\n```\n\n**Command Prompt (cmd.exe)**\n```cmd\ndir C:\\Path\\To\\Folder\n```\n\nUseful variations:\n- `Get-ChildItem -Recurse` / `dir /s` — include subfolders\n- `Get-ChildItem -File` — files only\n- `Get-ChildItem -Directory` — folders only\n- `Get-ChildItem -Filter *.txt` — match a pattern\n- `Get-ChildItem | Sort-Object LastWriteTime` — sort by modification time\n\nThe current folder is listed with no path argument.\n\n---\n\nThe answer above covers it: use `Get-ChildItem` (or `ls`) in PowerShell, or `dir` in Command Prompt, with the folder path as the argument. No files were inspected or accessed.",
+    "tools": [
+      {
+        "name": "todo_write",
+        "input": "{\"action\":\"replace\",\"items\":[\"Answer how to list files in a Windows folder (advice only)\"]}",
+        "result": "Active task plan:\n- [in_progress] todo-1: Answer how to list files in a Windows folder (advice only)",
+        "status": "done",
+        "timestamp": "2026-11-17T19:44:28Z",
+        "duration_ms": 32
+      },
+      {
+        "name": "todo_write",
+        "input": "{\"action\":\"done\",\"id\":\"todo-1\"}",
+        "result": "Active task plan:\n- [done] todo-1: Answer how to list files in a Windows folder (advice only)",
+        "status": "done",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "duration_ms": 13
+      }
+    ],
+    "events": [
+      {
+        "kind": "start",
+        "message": "Run started",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "mode=Auto agent_definition_id=auto agent_definition_version=1 profile=local-qualification model=RVN-Q4_K_M-multilingual-mtp.gguf autonomous=true thinking_mode=off claimant=task-2026-11-17T19-44-18.2023088Z-4 origin=desktop"
+      },
+      {
+        "kind": "thinking_mode",
+        "message": "Resolved Chat thinking override",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "requested=off effective=off supported=true profile_thinking=false preserve_thinking=false"
+      },
+      {
+        "kind": "task_contract",
+        "message": "Validated and sealed task contract",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "revision=1 digest=sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e risk=low plan_required=false blocking_checks="
+      },
+      {
+        "kind": "control_transition",
+        "message": "contract_validated",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "from=intake to=planning machine_revision=2 contract_revision=1 contract_digest=sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e"
+      },
+      {
+        "kind": "control_transition",
+        "message": "plan_accepted",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "from=planning to=acting machine_revision=3 contract_revision=1 contract_digest=sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e"
+      },
+      {
+        "kind": "context_packet",
+        "message": "Selected task-aware project context",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "{\n  \"policy\": \"relevant_workspace\",\n  \"requested_class\": \"auto\",\n  \"effective_class\": \"relevant\",\n  \"sources\": [\n    \"C:/Users/richa/Desktop/TheMauler/AGENTS.md\",\n    \"C:/Users/richa/Desktop/TheMauler/docs/context/non-negotiables.md\",\n    \"C:/Users/richa/Desktop/TheMauler/docs/context/current-state.md\"\n  ],\n  \"source_bytes\": 58182,\n  \"prompt_bytes\": 13211,\n  \"estimated_tokens\": 3303,\n  \"packet_limit_bytes\": 16000,\n  \"packet_limit_tokens\": 4000,\n  \"manifest_status\": \"active\",\n  \"manifest_path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/manifest.json\",\n  \"manifest_sha256\": \"8ba16dfc71742cbfd60b6e299bcd764ee35765f5813aee5d1df116f5c7b97ed5\",\n  \"provenance\": [\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/AGENTS.md\",\n      \"sha256\": \"6f72bf49705fc9acba67b68610685ea16d015434905b6524244ad85013d17ecf\",\n      \"reason\": \"default packet relevant_workspace\",\n      \"source_bytes\": 13645,\n      \"prompt_bytes\": 4176,\n      \"estimated_tokens\": 1044,\n      \"partial\": true,\n      \"excerpt_ranges\": [\n        {\n          \"start_line\": 1,\n          \"end_line\": 7\n        },\n        {\n          \"start_line\": 80,\n          \"end_line\": 95\n        },\n        {\n          \"start_line\": 146,\n          \"end_line\": 187\n        }\n      ]\n    },\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/non-negotiables.md\",\n      \"sha256\": \"79021624dc3e68cff2d750d47b88f469c9a0e0fa4b96d3e1c66b8688a2b27713\",\n      \"reason\": \"default packet relevant_workspace\",\n      \"source_bytes\": 5991,\n      \"prompt_bytes\": 3135,\n      \"estimated_tokens\": 784,\n      \"partial\": true,\n      \"excerpt_ranges\": [\n        {\n          \"start_line\": 1,\n          \"end_line\": 5\n        },\n        {\n          \"start_line\": 27,\n          \"end_line\": 41\n        },\n        {\n          \"start_line\": 54,\n          \"end_line\": 62\n        },\n        {\n          \"start_line\": 64,\n          \"end_line\": 77\n        }\n      ]\n    },\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/current-state.md\",\n..."
+      },
+      {
+        "kind": "state",
+        "message": "model_loading",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "model",
+        "message": "Model ready",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "runtime_lock",
+        "message": "Could not save runtime lock",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "open C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\advice-only-364461789\\config\\runtime-lock.json: The system cannot find the path specified."
+      },
+      {
+        "kind": "context_budget",
+        "message": "Applied agent working context budget",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "budget=26880 preset=32768 profile_ctx=35072"
+      },
+      {
+        "kind": "reasoning_effort",
+        "message": "Initial reasoning effort",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "none"
+      },
+      {
+        "kind": "tool_routing",
+        "message": "Tool routing state",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "phase=default\nrouting_mode=auto\ntool_choice=required\ntool_count=4\nterminal_state=missing\ntools=glob, grep, read, todo_write"
+      },
+      {
+        "kind": "session_repair",
+        "message": "Repaired 1 malformed history message(s)",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "phase=3 action=merge_consecutive_system index=1"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 7399\u003e3000, system+tools over 20 percent",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "turn=1\nestimated_total_tokens=8687\nsystem_tokens=7399\nsystem_target_tokens=3000\ntool_schema_tokens=732\ntool_schema_target_tokens=1500\nconversation_tokens=44\ncontext_window=35072\nsystem_plus_tools_pct=0.232\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=true\nsystem_prompt_hash=8ef99c7b2f91259f\nprompt_hash=6925c23afa362419\ntool_schema_hash=b2551cacf7ac5bd7\nselected_tools=glob,grep,read,todo_write"
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "tool_choice=required messages=3 tools=4 no_think=false effort=none"
+      },
+      {
+        "kind": "tool_protocol_request",
+        "message": "Chat request tool protocol",
+        "timestamp": "2026-11-17T19:44:18Z",
+        "detail": "client=llamacpp model=RVN-Q4_K_M-multilingual-mtp.gguf runtime_tool_protocol=native-openai tool_choice=required tools=4 grammar=off thinking=false preserve_thinking=false force_no_think=false reasoning_effort= max_tokens=1024"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T19:44:27Z",
+        "detail": "turn=1\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=skipped\ntool_choice=required\ntools=4\nselected_tools=glob,grep,read,todo_write\nttft_ms=5567\nduration_ms=9614\navg_inter_delta_ms=25\ndeltas=162\ncontent_deltas=160\nprompt_tokens=5789\ncached_prompt_tokens=0\ncompletion_tokens=232\ntotal_tokens=6021\nprompt_tokens_per_second=1098.91\ntokens_per_second=57.11\nsystem_prompt_hash=8ef99c7b2f91259f\nprompt_hash=6925c23afa362419\ntool_schema_hash=b2551cacf7ac5bd7"
+      },
+      {
+        "kind": "tool_protocol_native",
+        "message": "Backend returned structured tool_calls",
+        "timestamp": "2026-11-17T19:44:27Z",
+        "detail": "converted_calls=1 names=todo_write\nenabled_tools=4\nmarkers=\nraw_tail=On Windows, you can list files in a folder using either of these shells:\n\n**PowerShell**\n```powershell\nGet-ChildItem C:\\Path\\To\\Folder\n# or the shorter alias:\nls C:\\Path\\To\\Folder\n```\n\n**Command Prompt (cmd.exe)**\n```cmd\ndir C:\\Path\\To\\Folder\n```\n\nUseful variations:\n- `Get-ChildItem -Recurse` / `dir /s` — include subfolders\n- `Get-ChildItem -File` — files only\n- `Get-ChildItem -Directory` — folders only\n- `Get-ChildItem -Filter *.txt` — match a pattern\n- `Get-ChildItem | Sort-Object LastWriteTime` — sort by modification time\n\nThe current folder is listed with no path argument.\nvisible_tail=owershell\nGet-ChildItem C:\\Path\\To\\Folder\n# or the shorter alias:\nls C:\\Path\\To\\Folder\n```\n\n**Command Prompt (cmd.exe)**\n```cmd\ndir C:\\Path\\To\\Folder\n```\n\nUseful variations:\n- `Get-ChildItem -Recurse` / `dir /s` — include subfolders\n- `Get-ChildItem -File` — files only\n- `Get-ChildItem -Directory` — folders only\n- `Get-ChildItem -Filter *.txt` — match a pattern\n- `Get-ChildItem | Sort-Object LastWriteTime` — sort by modification time\n\nThe current folder is listed with no path argument."
+      },
+      {
+        "kind": "state",
+        "message": "planning",
+        "timestamp": "2026-11-17T19:44:27Z",
+        "detail": "todo_write"
+      },
+      {
+        "kind": "tool_call",
+        "message": "todo_write",
+        "timestamp": "2026-11-17T19:44:27Z",
+        "detail": "{\"action\":\"replace\",\"items\":[\"Answer how to list files in a Windows folder (advice only)\"]}"
+      },
+      {
+        "kind": "tool_routing",
+        "message": "Tool routing state",
+        "timestamp": "2026-11-17T19:44:28Z",
+        "detail": "phase=default\nrouting_mode=auto\ntool_choice=auto\ntool_count=4\nterminal_state=missing\ntools=glob, grep, read, todo_write"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 7398\u003e3000, system+tools over 20 percent",
+        "timestamp": "2026-11-17T19:44:28Z",
+        "detail": "turn=2\nestimated_total_tokens=9018\nsystem_tokens=7398\nsystem_target_tokens=3000\ntool_schema_tokens=732\ntool_schema_target_tokens=1500\nconversation_tokens=376\ncontext_window=35072\nsystem_plus_tools_pct=0.232\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=true\nsystem_prompt_hash=1046044ba0ebc332\nprompt_hash=99e5c91ac732cce9\ntool_schema_hash=b2551cacf7ac5bd7\nselected_tools=glob,grep,read,todo_write"
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T19:44:28Z",
+        "detail": "tool_choice=auto messages=5 tools=4 no_think=false effort=none"
+      },
+      {
+        "kind": "tool_protocol_request",
+        "message": "Chat request tool protocol",
+        "timestamp": "2026-11-17T19:44:28Z",
+        "detail": "client=llamacpp model=RVN-Q4_K_M-multilingual-mtp.gguf runtime_tool_protocol=native-openai tool_choice=auto tools=4 grammar=off thinking=false preserve_thinking=false force_no_think=false reasoning_effort= max_tokens=1024"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "turn=2\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=reused\ntool_choice=auto\ntools=4\nselected_tools=glob,grep,read,todo_write\nttft_ms=6329\nduration_ms=6330\navg_inter_delta_ms=1\ndeltas=2\ncontent_deltas=0\nprompt_tokens=6066\ncached_prompt_tokens=0\ncompletion_tokens=40\ntotal_tokens=6106\nprompt_tokens_per_second=1092.48\ntokens_per_second=69.67\nsystem_prompt_hash=1046044ba0ebc332\nprompt_hash=99e5c91ac732cce9\ntool_schema_hash=b2551cacf7ac5bd7"
+      },
+      {
+        "kind": "tool_protocol_native",
+        "message": "Backend returned structured tool_calls",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "converted_calls=1 names=todo_write\nenabled_tools=4\nmarkers=\nraw_tail="
+      },
+      {
+        "kind": "state",
+        "message": "planning",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "todo_write"
+      },
+      {
+        "kind": "tool_call",
+        "message": "todo_write",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "{\"action\":\"done\",\"id\":\"todo-1\"}"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 7398\u003e3000, system+tools over 20 percent",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "turn=3\nestimated_total_tokens=9129\nsystem_tokens=7398\nsystem_target_tokens=3000\ntool_schema_tokens=732\ntool_schema_target_tokens=1500\nconversation_tokens=487\ncontext_window=35072\nsystem_plus_tools_pct=0.232\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=true\nsystem_prompt_hash=1046044ba0ebc332\nprompt_hash=e826c3cefaea5188\ntool_schema_hash=b2551cacf7ac5bd7\nselected_tools=glob,grep,read,todo_write"
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "tool_choice=auto messages=7 tools=4 no_think=false effort=none"
+      },
+      {
+        "kind": "tool_protocol_request",
+        "message": "Chat request tool protocol",
+        "timestamp": "2026-11-17T19:44:34Z",
+        "detail": "client=llamacpp model=RVN-Q4_K_M-multilingual-mtp.gguf runtime_tool_protocol=native-openai tool_choice=auto tools=4 grammar=off thinking=false preserve_thinking=false force_no_think=false reasoning_effort= max_tokens=1024"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T19:44:41Z",
+        "detail": "turn=3\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=reused\ntool_choice=auto\ntools=4\nselected_tools=glob,grep,read,todo_write\nttft_ms=6075\nduration_ms=6870\navg_inter_delta_ms=17\ndeltas=46\ncontent_deltas=44\nprompt_tokens=6146\ncached_prompt_tokens=0\ncompletion_tokens=45\ntotal_tokens=6191\nprompt_tokens_per_second=1060.91\ntokens_per_second=55.49\nsystem_prompt_hash=1046044ba0ebc332\nprompt_hash=e826c3cefaea5188\ntool_schema_hash=b2551cacf7ac5bd7"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_requested",
+        "timestamp": "2026-11-17T19:44:41Z",
+        "detail": "from=acting to=verifying machine_revision=4 contract_revision=1 contract_digest=sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_passed",
+        "timestamp": "2026-11-17T19:44:41Z",
+        "detail": "from=verifying to=complete machine_revision=5 contract_revision=1 contract_digest=sha256:182fffbb1ab8ccdcbd38842c49af7febe7ec495c8d13f46409f664e8d382d20e"
+      },
+      {
+        "kind": "state",
+        "message": "done",
+        "timestamp": "2026-11-17T19:44:41Z",
+        "detail": "The answer above covers it: use `Get-ChildItem` (or `ls`) in PowerShell, or `dir` in Command Prompt, with the folder path as the argument. No files were inspected or accessed."
+      },
+      {
+        "kind": "finish",
+        "message": "Run completed",
+        "timestamp": "2026-11-17T19:44:41Z"
+      },
+      {
+        "kind": "loop_metrics",
+        "message": "Loop-health metrics",
+        "timestamp": "2026-11-17T19:44:41Z",
+        "detail": "{\"tool_calls\":2,\"auto_continues\":0,\"truncations\":0,\"tool_errors\":0,\"compactions\":0,\"context_clears\":0,\"verifier_prompts\":0,\"review_cycles\":0,\"verify_gate_fails\":0,\"completion_rail_fails\":0,\"reviewer_change_requests\":0,\"repeated_tool_inputs\":0,\"repeated_identical_outcomes\":0,\"repeated_skips\":0,\"tool_cycle_detected\":false,\"tool_routing_events\":2,\"max_routed_tools\":4,\"prompt_warnings\":3,\"stability_score\":85,\"prompt_tokens\":6146,\"completion_tokens\":45}"
+      },
+      {
+        "kind": "progress",
+        "message": "Progress artifact update",
+        "timestamp": "2026-11-17T19:44:41Z",
+        "detail": "section=Run Finish\nstatus=done\nprogress appended: .mauler/progress.md"
+      }
+    ]
+  }
+}

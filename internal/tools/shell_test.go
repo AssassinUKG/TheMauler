@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"mauler/internal/settings"
 	"runtime"
 	"strings"
@@ -123,10 +124,17 @@ func TestWSLShellCommandUsesConfiguredDistroAndCd(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"wsl.exe", "-d", "kali-linux", "--user", "root", "--cd", "/mnt/c/Users/richa/Desktop/TheMauler", "--", "bash", "-lc", "pwd"} {
+	for _, want := range []string{"wsl.exe", "-d", "kali-linux", "--user", "root", "--cd", "/mnt/c/Users/richa/Desktop/TheMauler", "--", "bash", "-l", "-s"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("wsl command args missing %q: %#v", want, cmd.Args)
 		}
+	}
+	script, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(script) != "pwd" {
+		t.Fatalf("wsl stdin script = %q, want pwd", script)
 	}
 }
 
@@ -173,20 +181,30 @@ func TestWrapWSLCommandForCancellation(t *testing.T) {
 	got := wrapWSLCommandForCancellation(`nmap -sS -sV -p- 10.129.12.172`, "test123")
 	for _, want := range []string{
 		"MAULER_RUN_ID='test123'",
-		"bash -lc",
 		"nmap -sS -sV -p- 10.129.12.172",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("wrapped WSL command missing %q: %s", want, got)
 		}
 	}
-	for _, avoid := range []string{"wait \"$child\"", "exit \"$status\"", "/tmp/mauler-shell-test123.pid"} {
+	for _, avoid := range []string{"bash -lc", "wait \"$child\"", "exit \"$status\"", "/tmp/mauler-shell-test123.pid"} {
 		if strings.Contains(got, avoid) {
 			t.Fatalf("wrapped WSL command should not contain brittle process wrapper %q: %s", avoid, got)
 		}
 	}
 	if runID := extractWSLRunID(got); runID != "test123" {
 		t.Fatalf("extractWSLRunID = %q, want test123", runID)
+	}
+}
+
+func TestWrapWSLCommandPreservesComplexQuotedScript(t *testing.T) {
+	command := `out='/tmp/http probe.txt'; mkdir -p "$(dirname "$out")"; printf '%s\n' "${out}"; if [ "$?" -ne 0 ]; then exit 1; fi`
+	got := wrapWSLCommandForCancellation(command, "complex123")
+	if !strings.HasSuffix(got, command) {
+		t.Fatalf("wrapped command changed quoted script:\n got: %s\nwant suffix: %s", got, command)
+	}
+	if strings.Count(got, "bash -lc") != 0 {
+		t.Fatalf("wrapped command introduced a redundant nested shell: %s", got)
 	}
 }
 
@@ -237,6 +255,31 @@ func TestCleanShellCommandCollapsesDeeplyEscapedOperators(t *testing.T) {
 func TestPrepareShellCommandRejectsResidualHTMLEntities(t *testing.T) {
 	if _, err := PrepareShellCommand(`curl http://example.test &ammp; echo bad`); err == nil {
 		t.Fatal("expected malformed residual entity to be rejected")
+	}
+}
+
+func TestPrepareShellCommandRejectsConflictingNmapPortScopes(t *testing.T) {
+	for _, command := range []string{
+		`nmap --top-ports 1000 -p 1-65535 192.0.2.1`,
+		`sudo nmap -Pn --top-ports=100 -p- 192.0.2.1`,
+		`/usr/bin/nmap --top-ports 50 -p80,443 192.0.2.1`,
+	} {
+		if _, err := PrepareShellCommand(command); err == nil || !strings.Contains(err.Error(), "conflicting port scopes") {
+			t.Fatalf("PrepareShellCommand(%q) error = %v, want conflicting scope rejection", command, err)
+		}
+	}
+}
+
+func TestPrepareShellCommandAllowsOneNmapPortScope(t *testing.T) {
+	for _, command := range []string{
+		`nmap -Pn --top-ports 1000 192.0.2.1`,
+		`nmap -PS80,443 --top-ports 1000 192.0.2.1`,
+		`nmap -Pn -p- 192.0.2.1`,
+		`nmap -Pn -p 1-65535 192.0.2.1`,
+	} {
+		if _, err := PrepareShellCommand(command); err != nil {
+			t.Fatalf("PrepareShellCommand(%q) unexpected error: %v", command, err)
+		}
 	}
 }
 

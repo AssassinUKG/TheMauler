@@ -11,6 +11,7 @@ import './FileTree.css'
 interface Props {
   onOpenFile?: (file: { path: string; name: string; content: string; lang: string }) => void
   onDropFile?: (path: string) => void
+  onBeforeWorkspaceChange?: (nextPath?: string) => Promise<boolean>
 }
 
 interface CtxMenu {
@@ -19,7 +20,7 @@ interface CtxMenu {
   node: FileNode
 }
 
-export function FileTree({ onOpenFile, onDropFile }: Props) {
+export function FileTree({ onOpenFile, onDropFile, onBeforeWorkspaceChange }: Props) {
   const [cwd, setCwd] = useState('')
   const [folders, setFolders] = useState<WorkspaceFolder[]>([])
   const [rootTrees, setRootTrees] = useState<Record<string, FileNode[]>>({})
@@ -85,12 +86,14 @@ export function FileTree({ onOpenFile, onDropFile }: Props) {
 
   const changeDir = async (dir: string) => {
     if (!dir) return
+    if (onBeforeWorkspaceChange && !(await onBeforeWorkspaceChange(dir))) return
     await SetWorkingDir(dir)
     setExpanded(new Set())
     await refresh()
   }
 
   const handleCwdChange = async () => {
+    if (onBeforeWorkspaceChange && !(await onBeforeWorkspaceChange())) return
     const dir = await SelectWorkingDir(cwd).catch(() => '')
     if (dir && dir !== cwd) await refresh(dir)
   }

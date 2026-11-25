@@ -58,6 +58,26 @@ func TestBuildAnthropicBodyConvertsMessagesAndTools(t *testing.T) {
 	}
 }
 
+func TestBuildAnthropicBodyStripsToolsForNoneChoice(t *testing.T) {
+	body, err := buildAnthropicBody("claude-test", llm.Request{
+		Messages:   []llm.Message{llm.NewTextMessage(llm.RoleUser, "summarize")},
+		ToolChoice: "none",
+		Tools: []llm.ToolDef{{Type: "function", Function: llm.ToolFunctionDef{
+			Name: "shell", Parameters: json.RawMessage(`{"type":"object"}`),
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["tools"]; ok {
+		t.Fatalf("tools must be omitted for none choice: %s", body)
+	}
+}
+
 func TestAnthropicSSEParsingTextToolAndUsage(t *testing.T) {
 	raw := strings.Join([]string{
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}`,

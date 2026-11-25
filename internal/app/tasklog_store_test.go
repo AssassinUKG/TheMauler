@@ -18,22 +18,25 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 	defer db.Close()
 
 	run := TaskRun{
-		ID:                "task-1",
-		Generation:        1_800_000_000_001,
-		ConversationEpoch: 7,
-		ParentRunID:       "task-parent",
-		Prompt:            "do thing",
-		Mode:              "Builder",
-		Profile:           "qwen",
-		Model:             "model",
-		ClaimantID:        "channel:telegram:chat-1:msg-9",
-		ClaimantAlias:     "operator",
-		Origin:            "telegram",
-		Status:            "done",
-		State:             "done",
-		StartedAt:         "2026-06-15T10:00:00+01:00",
-		EndedAt:           "2026-06-15T10:01:00+01:00",
-		Summary:           "first",
+		ID:                     "task-1",
+		Generation:             1_800_000_000_001,
+		ConversationEpoch:      7,
+		ParentRunID:            "task-parent",
+		Prompt:                 "do thing",
+		RoutingPrompt:          "trusted do thing",
+		Mode:                   "Builder",
+		AgentDefinitionID:      "builder",
+		AgentDefinitionVersion: "1",
+		Profile:                "qwen",
+		Model:                  "model",
+		ClaimantID:             "channel:telegram:chat-1:msg-9",
+		ClaimantAlias:          "operator",
+		Origin:                 "telegram",
+		Status:                 "done",
+		State:                  "done",
+		StartedAt:              "2026-06-15T10:00:00+01:00",
+		EndedAt:                "2026-06-15T10:01:00+01:00",
+		Summary:                "first",
 		FinalizedArtifacts: []FinalizedArtifact{{
 			Path: "missing-report.md", SHA256: strings.Repeat("a", 64), Size: 12,
 			RunID: "task-1", Generation: 1_800_000_000_001, ConversationEpoch: 7,
@@ -75,6 +78,12 @@ func TestTaskRunDBSaveLoadAndReplace(t *testing.T) {
 	}
 	if runs[0].ClaimantID != run.ClaimantID || runs[0].ClaimantAlias != run.ClaimantAlias || runs[0].Origin != run.Origin {
 		t.Fatalf("claimant provenance did not round-trip: %#v", runs[0])
+	}
+	if runs[0].AgentDefinitionID != run.AgentDefinitionID || runs[0].AgentDefinitionVersion != run.AgentDefinitionVersion {
+		t.Fatalf("agent definition provenance did not round-trip: %#v", runs[0])
+	}
+	if runs[0].RoutingPrompt != run.RoutingPrompt {
+		t.Fatalf("trusted routing prompt did not round-trip: got %q want %q", runs[0].RoutingPrompt, run.RoutingPrompt)
 	}
 	if runs[0].Generation != run.Generation {
 		t.Fatalf("run generation did not round-trip: got %d want %d", runs[0].Generation, run.Generation)

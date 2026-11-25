@@ -42,13 +42,21 @@ jobs:
         run: go build ./...
 
       - name: Vet
-        run: go vet ./internal/...
+        run: go vet ./...
+
+      - name: Reachable vulnerability scan
+        env:
+          GOTOOLCHAIN: local
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Test
         # Retry once: a couple of backend tests spin up httptest servers and assert
         # on short timing windows, which can flake on a loaded runner. A real failure
         # reproduces on the retry; a one-off flake is absorbed.
         run: go test ./... -count=1 || (echo "::warning::go test flaked, retrying once" && go test ./... -count=1)
+
+      - name: Race-sensitive agent and tool tests
+        run: go test -race ./internal/app ./internal/tools -count=1
 
   frontend:
     name: Frontend typecheck
@@ -69,8 +77,39 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Full dependency audit
+        run: npm audit
+
       - name: Check type-model drift
         run: npm run check-types
 
       - name: Typecheck
         run: npx tsc --noEmit
+
+  native-windows:
+    name: Native Windows production build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Install pinned Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
+
+      - name: Build native application
+        run: wails build

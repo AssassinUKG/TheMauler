@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestInferenceBridgeImageClientAsyncSSEFlow(t *testing.T) {
@@ -75,9 +77,74 @@ func TestInferenceBridgeImageClientFallsBackToPolling(t *testing.T) {
 	}
 }
 
+func TestInferenceBridgeImageClientShowsDisconnectAndRecovery(t *testing.T) {
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/images/events":
+			http.Error(w, "stream unavailable", http.StatusServiceUnavailable)
+		case "/v1/images/generations/img-3":
+			if polls.Add(1) == 1 {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"img-3","status":"completed","result":{"url":"/v1/images/generations/img-3/content"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := &inferenceBridgeImageClient{baseURL: server.URL + "/v1", httpClient: server.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var states []string
+	job, err := client.wait(ctx, imageJob{ID: "img-3", EventsURL: "/v1/images/events?job_id=img-3"}, func(update imageJob) {
+		mu.Lock()
+		states = append(states, update.ConnectionState)
+		mu.Unlock()
+	})
+	if err != nil || job.Status != "completed" {
+		t.Fatalf("completed = %#v, err = %v", job, err)
+	}
+	if got := strings.Join(states, ","); got != "reconnecting,disconnected,connected" {
+		t.Fatalf("connection states = %q", got)
+	}
+}
+
 func TestImageToolResultNeverContainsBase64(t *testing.T) {
 	tool := (&generateImageTool{}).Description()
 	if !strings.Contains(strings.ToLower(tool), "never base64") {
 		t.Fatalf("tool description must keep image bytes out of model context: %q", tool)
+	}
+}
+
+func TestImageToolSchemaMatchesCurrentQwenImagePresets(t *testing.T) {
+	var schema struct {
+		Properties map[string]struct {
+			Enum []any `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal((&generateImageTool{}).Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"2048x2048", "1536x1024"} {
+		found := false
+		for _, value := range schema.Properties["size"].Enum {
+			found = found || value == expected
+		}
+		if !found {
+			t.Fatalf("missing current Qwen-Image 2.1 size %s", expected)
+		}
+	}
+	for _, expected := range []float64{8, 20} {
+		found := false
+		for _, value := range schema.Properties["steps"].Enum {
+			found = found || value == expected
+		}
+		if !found {
+			t.Fatalf("missing current Qwen-Image 2.1 step preset %v", expected)
+		}
 	}
 }

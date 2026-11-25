@@ -4,6 +4,10 @@ type APIResponse[T any] struct {
 	OK          bool   `json:"ok"`
 	Result      T      `json:"result,omitempty"`
 	Description string `json:"description,omitempty"`
+	ErrorCode   int    `json:"error_code,omitempty"`
+	Parameters  struct {
+		RetryAfter int `json:"retry_after,omitempty"`
+	} `json:"parameters,omitempty"`
 }
 
 type User struct {
@@ -21,15 +25,16 @@ type Chat struct {
 }
 
 type Message struct {
-	MessageID int64       `json:"message_id"`
-	From      *User       `json:"from,omitempty"`
-	Chat      Chat        `json:"chat"`
-	Text      string      `json:"text,omitempty"`
-	Caption   string      `json:"caption,omitempty"`
-	Voice     *Voice      `json:"voice,omitempty"`
-	Audio     *Audio      `json:"audio,omitempty"`
-	Photo     []PhotoSize `json:"photo,omitempty"`
-	Document  *Document   `json:"document,omitempty"`
+	MessageID       int64       `json:"message_id"`
+	MessageThreadID int64       `json:"message_thread_id,omitempty"`
+	From            *User       `json:"from,omitempty"`
+	Chat            Chat        `json:"chat"`
+	Text            string      `json:"text,omitempty"`
+	Caption         string      `json:"caption,omitempty"`
+	Voice           *Voice      `json:"voice,omitempty"`
+	Audio           *Audio      `json:"audio,omitempty"`
+	Photo           []PhotoSize `json:"photo,omitempty"`
+	Document        *Document   `json:"document,omitempty"`
 }
 
 type Voice struct {
@@ -64,8 +69,31 @@ type Document struct {
 }
 
 type Update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *Message `json:"message,omitempty"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *Message       `json:"message,omitempty"`
+	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
+}
+
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	From    User     `json:"from"`
+	Message *Message `json:"message,omitempty"`
+	Data    string   `json:"data,omitempty"`
+}
+
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+type MessageOptions struct {
+	ThreadID         int64
+	ReplyToMessageID int64
+	ReplyMarkup      *InlineKeyboardMarkup
 }
 
 type File struct {

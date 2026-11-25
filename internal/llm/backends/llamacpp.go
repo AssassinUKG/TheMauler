@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"mauler/internal/llm"
 	"mauler/internal/settings"
-	"os"
 )
 
 // NewLlamacpp creates a llm.Client for a llama.cpp /v1 server.
@@ -15,10 +14,7 @@ func NewLlamacpp(p settings.Profile) llm.Client {
 	if baseURL == "" {
 		baseURL = "http://localhost:8080/v1"
 	}
-	apiKey := ""
-	if p.APIKeyEnv != "" {
-		apiKey = os.Getenv(p.APIKeyEnv)
-	}
+	apiKey := settings.ResolveProviderAPIKey(p.Provider, p.APIKeyEnv)
 	client := newOpenAICompat("llamacpp", baseURL, p.ModelID, p.CtxTokens, apiKey, true)
 	client.kvCachePrecision, client.kvCacheTypeK, client.kvCacheTypeV =
 		settings.ResolveKVCacheConfig(p.KVCachePrecision, p.KVCacheTypeK, p.KVCacheTypeV)

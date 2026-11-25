@@ -133,7 +133,7 @@ func deriveNextAction(run *TaskRun) string {
 }
 
 func detectRunTarget(run *TaskRun) string {
-	if ip := firstTargetLikeIP(run.Prompt); ip != "" {
+	if ip := firstTargetLikeIP(taskRoutingPrompt(*run)); ip != "" {
 		return ip
 	}
 	for _, tool := range run.Tools {
@@ -222,7 +222,7 @@ func milestoneImportance(run *TaskRun, milestones []string) int {
 
 func milestoneTags(run *TaskRun, target string) []string {
 	tags := []string{"run", "milestone"}
-	prompt := strings.ToLower(run.Prompt)
+	prompt := strings.ToLower(taskRoutingPrompt(*run))
 	if target != "" {
 		tags = append(tags, "target-"+strings.ReplaceAll(target, ".", "-"))
 	}

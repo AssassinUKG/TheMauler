@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "id": "todo-1",
+      "text": "Read current artifact.txt bytes",
+      "status": "done",
+      "created_at": "2026-11-17T20:21:22Z",
+      "updated_at": "2026-11-17T20:21:27Z"
+    },
+    {
+      "id": "todo-2",
+      "text": "Append exact JSON-decoded suffix",
+      "status": "done",
+      "created_at": "2026-11-17T20:21:22Z",
+      "updated_at": "2026-11-17T20:21:37Z"
+    },
+    {
+      "id": "todo-3",
+      "text": "Read back and verify complete file",
+      "status": "done",
+      "created_at": "2026-11-17T20:21:22Z",
+      "updated_at": "2026-11-17T20:21:40Z"
+    },
+    {
+      "id": "todo-4",
+      "text": "Report handoff in chat",
+      "status": "done",
+      "created_at": "2026-11-17T20:21:22Z",
+      "updated_at": "2026-11-17T20:21:41Z"
+    }
+  ]
+}

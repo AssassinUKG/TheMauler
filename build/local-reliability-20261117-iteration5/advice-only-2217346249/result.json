@@ -1,0 +1,203 @@
+{
+  "case": "advice-only",
+  "evidence": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-iteration5\\advice-only-2217346249",
+  "joined": true,
+  "modelCalls": 1,
+  "pass": true,
+  "repetition": 1,
+  "run": {
+    "id": "task-2026-11-17T20-06-52.0564235Z-4",
+    "generation": 1794946012056,
+    "conversation_epoch": 1,
+    "prompt": "Explain how I could list files in a folder on Windows. Advice only; do not inspect or access any files.",
+    "routing_prompt": "Explain how I could list files in a folder on Windows. Advice only; do not inspect or access any files.",
+    "mode": "Auto",
+    "agent_definition_id": "auto",
+    "agent_definition_version": "1",
+    "profile": "local-qualification",
+    "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+    "origin": "desktop",
+    "contract": {
+      "version": 1,
+      "revision": 1,
+      "run_id": "task-2026-11-17T20-06-52.0564235Z-4",
+      "objective": "Explain how I could list files in a folder on Windows. Advice only; do not inspect or access any files.",
+      "workspace_root": "C:\\Users\\richa\\AppData\\Local\\Temp\\mauler-local-fixture-1860474128",
+      "constraints": [
+        "Do not mutate outside the authoritative workspace or an explicitly approved scope."
+      ],
+      "risk": "low",
+      "instruction_revision": 1,
+      "plan_required": false,
+      "budgets": {
+        "max_tool_calls": 16,
+        "max_run_seconds": 90
+      },
+      "approval_policy": "tool_policy_and_scope_gates",
+      "completion_policy": "evidence_owned",
+      "created_at": "2026-11-17T20:06:52.0564235Z",
+      "digest": "sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba"
+    },
+    "control": {
+      "version": 1,
+      "contract_digest": "sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba",
+      "contract_revision": 1,
+      "phase": "complete",
+      "revision": 5,
+      "plan_required": false,
+      "plan_accepted": true,
+      "last_event": "verification_passed",
+      "last_detail": "all blocking acceptance checks have immutable evidence ids",
+      "updated_at": "2026-11-17T20:06:57.4884189Z"
+    },
+    "status": "done",
+    "state": "done",
+    "started_at": "2026-11-17T20:06:52Z",
+    "ended_at": "2026-11-17T20:06:57Z",
+    "duration_ms": 5432,
+    "prompt_tokens": 2180,
+    "completion_tokens": 175,
+    "total_tokens": 2355,
+    "summary": "On Windows, you can list files in a folder using:\n\n**Command Prompt (cmd.exe):**\n```\ndir C:\\path\\to\\folder\n```\n- `dir` lists files and subdirectories.\n- Add `/s` to include subfolders recursively.\n- Add `/a` to include hidden files.\n\n**PowerShell:**\n```\nGet-ChildItem C:\\path\\to\\folder\n```\n- Short form: `ls C:\\path\\to\\folder` (alias works in PowerShell).\n- Add `-Recurse` for subfolders.\n- Add `-Force` to include hidden files.\n\n**File Explorer (GUI):**\n- Open the folder in Windows Explorer and browse visually.\n\nThe most common quick options are `dir` in Command Prompt or `Get-ChildItem` in PowerShell.",
+    "response": "On Windows, you can list files in a folder using:\n\n**Command Prompt (cmd.exe):**\n```\ndir C:\\path\\to\\folder\n```\n- `dir` lists files and subdirectories.\n- Add `/s` to include subfolders recursively.\n- Add `/a` to include hidden files.\n\n**PowerShell:**\n```\nGet-ChildItem C:\\path\\to\\folder\n```\n- Short form: `ls C:\\path\\to\\folder` (alias works in PowerShell).\n- Add `-Recurse` for subfolders.\n- Add `-Force` to include hidden files.\n\n**File Explorer (GUI):**\n- Open the folder in Windows Explorer and browse visually.\n\nThe most common quick options are `dir` in Command Prompt or `Get-ChildItem` in PowerShell.",
+    "events": [
+      {
+        "kind": "start",
+        "message": "Run started",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "mode=Auto agent_definition_id=auto agent_definition_version=1 profile=local-qualification model=RVN-Q4_K_M-multilingual-mtp.gguf autonomous=true thinking_mode=off claimant=task-2026-11-17T20-06-52.0564235Z-4 origin=desktop"
+      },
+      {
+        "kind": "thinking_mode",
+        "message": "Resolved Chat thinking override",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "requested=off effective=off supported=true profile_thinking=false preserve_thinking=false"
+      },
+      {
+        "kind": "task_contract",
+        "message": "Validated and sealed task contract",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "revision=1 digest=sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba risk=low plan_required=false blocking_checks="
+      },
+      {
+        "kind": "control_transition",
+        "message": "contract_validated",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "from=intake to=planning machine_revision=2 contract_revision=1 contract_digest=sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba"
+      },
+      {
+        "kind": "control_transition",
+        "message": "plan_accepted",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "from=planning to=acting machine_revision=3 contract_revision=1 contract_digest=sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba"
+      },
+      {
+        "kind": "context_packet",
+        "message": "Selected task-aware project context",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "{\n  \"policy\": \"relevant_workspace\",\n  \"requested_class\": \"auto\",\n  \"effective_class\": \"relevant\",\n  \"sources\": [\n    \"C:/Users/richa/AppData/Local/Temp/mauler-local-fixture-1860474128/AGENTS.md\"\n  ],\n  \"source_bytes\": 148,\n  \"prompt_bytes\": 997,\n  \"estimated_tokens\": 250,\n  \"packet_limit_bytes\": 16384,\n  \"packet_limit_tokens\": 4096,\n  \"manifest_status\": \"bypassed\",\n  \"fallback_reason\": \"explicit project instruction source configured\"\n}"
+      },
+      {
+        "kind": "state",
+        "message": "model_loading",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "model",
+        "message": "Model ready",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "runtime_lock",
+        "message": "Saved runtime lock",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "{\"updated_at\":\"2026-11-17T20:06:52Z\",\"profile_name\":\"local-qualification\",\"provider_name\":\"local-qualification\",\"backend\":\"llamacpp\",\"base_url\":\"http://127.0.0.1:8804/v1\",\"model_id\":\"RVN-Q4_K_M-multilingual-mtp.gguf\",\"model_hash\":\"3b84cb4774ed03a0\",\"adapter\":\"qwen38\",\"tool_protocol\":\"native-openai\",\"ctx_tokens\":35072,\"thinking\":false,\"preserve_thinking\":false,\"kv_cache_precision\":\"f16\",\"kv_cache_type_k\":\"f16\",\"kv_cache_type_v\":\"f16\",\"launch_signature\":\"local-qualification | local-qualification | llamacpp | http://127.0.0.1:8804/v1 | RVN-Q4_K_M-multilingual-mtp.gguf |  | f16 | f16 | f16 |  | \"}"
+      },
+      {
+        "kind": "context_budget",
+        "message": "Applied agent working context budget",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "budget=26880 preset=32768 profile_ctx=35072"
+      },
+      {
+        "kind": "reasoning_effort",
+        "message": "Initial reasoning effort",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "none"
+      },
+      {
+        "kind": "tool_routing",
+        "message": "Tool routing state",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "phase=default\nrouting_mode=auto\ntool_choice=none\ntool_count=0\nterminal_state=missing\ntools="
+      },
+      {
+        "kind": "session_repair",
+        "message": "Repaired 1 malformed history message(s)",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "phase=3 action=merge_consecutive_system index=1"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 3309\u003e3000",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "turn=1\nestimated_total_tokens=3865\nsystem_tokens=3309\nsystem_target_tokens=3000\ntool_schema_tokens=0\ntool_schema_target_tokens=1500\nconversation_tokens=44\ncontext_window=35072\nsystem_plus_tools_pct=0.094\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=false\nsystem_prompt_hash=496ccc9c9c0e2ba1\nprompt_hash=c0b710dfbc97fed6\ntool_schema_hash=\nselected_tools="
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T20:06:52Z",
+        "detail": "tool_choice=none messages=3 tools=0 no_think=true effort=none"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "turn=1\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=skipped\ntool_choice=none\ntools=0\nselected_tools=\nttft_ms=2249\nduration_ms=5288\navg_inter_delta_ms=17\ndeltas=176\ncontent_deltas=174\nprompt_tokens=2180\ncached_prompt_tokens=0\ncompletion_tokens=175\ntotal_tokens=2355\nprompt_tokens_per_second=1053.11\ntokens_per_second=57.28\nsystem_prompt_hash=496ccc9c9c0e2ba1\nprompt_hash=c0b710dfbc97fed6\ntool_schema_hash="
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_requested",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "from=acting to=verifying machine_revision=4 contract_revision=1 contract_digest=sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_passed",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "from=verifying to=complete machine_revision=5 contract_revision=1 contract_digest=sha256:26c8cf10e6a563c2abbd34061b3be121ec6f6899926f427eda333511a15d8dba"
+      },
+      {
+        "kind": "direct_answer",
+        "message": "Completed direct-answer turn",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "mode=adaptive; one model response; no tools, repair pass, or reviewer pass required."
+      },
+      {
+        "kind": "state",
+        "message": "done",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "On Windows, you can list files in a folder using:\n\n**Command Prompt (cmd.exe):**\n```\ndir C:\\path\\to\\folder\n```\n- `dir` lists files and subdirectories.\n- Add `/s` to include subfolders recursively.\n- Add `/a` to include hidden files.\n\n**PowerShell:**\n```\nGet-ChildItem C:\\path\\to\\folder\n```\n- Short form: `ls C:\\path\\to\\folder` (alias works in PowerShell).\n- Add `-Recurse` for subfolders.\n- Add `-Force` to include hidden files.\n\n**File Explorer (GUI):**\n- Open the folder in Windows Explorer and browse visually.\n\nThe most common quick options are `dir` in Command Prompt or `Get-ChildItem` in PowerShell."
+      },
+      {
+        "kind": "finish",
+        "message": "Run completed",
+        "timestamp": "2026-11-17T20:06:57Z"
+      },
+      {
+        "kind": "loop_metrics",
+        "message": "Loop-health metrics",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "{\"tool_calls\":0,\"auto_continues\":0,\"truncations\":0,\"tool_errors\":0,\"compactions\":0,\"context_clears\":0,\"verifier_prompts\":0,\"review_cycles\":0,\"verify_gate_fails\":0,\"completion_rail_fails\":0,\"reviewer_change_requests\":0,\"repeated_tool_inputs\":0,\"repeated_identical_outcomes\":0,\"repeated_skips\":0,\"tool_cycle_detected\":false,\"tool_routing_events\":1,\"max_routed_tools\":0,\"prompt_warnings\":0,\"stability_score\":100,\"prompt_tokens\":2180,\"completion_tokens\":175}"
+      },
+      {
+        "kind": "progress",
+        "message": "Progress artifact update",
+        "timestamp": "2026-11-17T20:06:57Z",
+        "detail": "section=Run Finish\nstatus=done\nprogress appended: .mauler/progress.md"
+      }
+    ]
+  }
+}

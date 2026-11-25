@@ -139,6 +139,12 @@ func verifyVerdictFromCommand(command verifyCommand, output string, err error) V
 		Evidence: trimEvidence(output),
 	}
 	if err == nil {
+		if _, safe := failurePropagatingCommands(command.Command); !safe {
+			verdict.Status = "inconclusive"
+			verdict.Blocking = true
+			verdict.Summary = "Verification command did not provide an unambiguous check exit status."
+			verdict.Improvements = []string{"Run each check directly, or join checks with && so a failure reaches the caller. Remove fallbacks, pipes, and unconditional continuations from the verification command."}
+		}
 		return verdict
 	}
 	verdict.Status = "fail"

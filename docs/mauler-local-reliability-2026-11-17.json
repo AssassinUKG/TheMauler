@@ -1,0 +1,106 @@
+{
+  "schemaVersion": "mauler-local-qualification-record-v1",
+  "date": "2026-11-17",
+  "framework": "TheMauler",
+  "status": "bounded-local-chat-file-cancellation-slice-qualified",
+  "register": ["MAULER-AR-006", "MAULER-AR-007", "MAULER-AR-008", "MAULER-AR-009"],
+  "boundary": {
+    "localOnly": true,
+    "runtime": "http://127.0.0.1:8804/v1",
+    "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+    "contextTokens": 35072,
+    "modelLoadOrReconfigurationAllowed": false,
+    "productionAppStarted": false,
+    "productionSettingsAndCredentialsUnchanged": true,
+    "providerKeyCopiedIntoSecretStore": false,
+    "dependencyFilesChangedByBuild": false,
+    "hostRebootPerformed": false,
+    "profile": "Temporary isolated local-qualification, OpenAI-compatible llamacpp transport to the existing InferenceBridge endpoint.",
+    "testEnvelope": {"temperature": 0.1, "topP": 0.95, "topK": 20, "maxOutputTokens": 2048, "thinking": "off", "maxRunSeconds": 90, "maxToolCalls": 16},
+    "nativeTools": ["read", "write", "edit", "glob", "grep", "todo_write"],
+    "isolation": "Disposable settings and temporary file fixtures outside the source checkout; no shell, browser, MCP, remote target or cloud actions."
+  },
+  "fixes": [
+    "Separate normal greeting/composition/advice and short observed answers from tool-requiring actions; preserve explicit named-file actions when delivery is in Chat.",
+    "Use whole-word live-data and repair intent instead of substring collisions such as fixture/suffix/deliverable/planet.",
+    "Seal expected literal-file size/hash and original append prefix in the immutable task contract. Require current exact bytes and this run's native write witness before completion.",
+    "Keep mixed goals under ordinary semantic rails; do not skip blocking review when tool/run budget is exhausted.",
+    "Validate contract digest, run ID and control revision before passing completion.",
+    "Close only the owned HTTP stream/context on cancellation; remove delayed server-wide inference cancellation."
+  ],
+  "diagnostics": [
+    {"stage": "initial", "passed": 6, "total": 13, "report": "build/local-reliability-20261117-initial/report.json", "sha256": "10503945d947ba7fa7326c171c6c522bf89d1fb4c3946a27ecbeb1bd5ef7f99f"},
+    {"stage": "iteration4", "passed": 10, "total": 13, "report": "build/local-reliability-20261117-iteration4/report.json", "sha256": "5e9a388a69483355fe9ddf808061a88467e0fb20c705d9a903672a6a39507851"},
+    {"stage": "iteration5-v1-not-qualification", "passed": 12, "total": 13, "report": "build/local-reliability-20261117-iteration5/report.json", "sha256": "106141503977b93eadc3db0b1b40dc3c32a2e5c54abc366eb6f257561ba76d54"},
+    {"stage": "iteration6-stronger-v2-grader", "passed": 13, "total": 13, "report": "build/local-reliability-20261117-iteration6/report.json", "sha256": "41e165749c6ac69dd5db85596a1bf923ffe1b1c63b87ad6e17e7e475979f17ba"}
+  ],
+  "diagnosticNotes": [
+    "Initial cancellation/idle false failures included a 1 MiB metadata decode limit; runtime history exceeded it. The harness now uses a finite 8 MiB metadata budget and verifies idle after cancellation.",
+    "Iterations 2 and 3 stopped during metadata preflight; they are not scored matrices.",
+    "The initial source-nested fixture inherited repository instructions. Final fixtures have a separate disposable workspace and explicit instruction file.",
+    "The v1 grader could accept a write with unresolved review failures after budget exhaustion. The v2 grader rejects unresolved blocking verdicts; original reports remain retained."
+  ],
+  "qualification": {
+    "matrix": {
+      "schemaVersion": "mauler-local-reliability-v2",
+      "passed": 65,
+      "total": 65,
+      "repetitionsPerCase": 5,
+      "elapsedSeconds": 602.78,
+      "cases": ["greeting", "simple-answer", "normal-writing", "advice-only", "list-files", "list-paraphrase", "explicit-file-tools", "read-file", "read-followup", "write-verify-finalize", "append-verify-finalize", "cancel-startup", "cancel-output"],
+      "ordinaryChat": {"passed": 20, "toolsPerCase": 0, "modelCallsPerCase": 1},
+      "exactWriteAppendHandoffs": {"passed": 10, "total": 10},
+      "cancellationWithFreshModelRecovery": {"passed": 10, "total": 10},
+      "allOwnedStreamsJoined": true,
+      "modelUnchangedAndIdle": true,
+      "report": "build/local-reliability-20261117-qualified/report.json",
+      "sha256": "aaa9b63d55f678b13fa705a9cc28702a0ab274db36bb59a2fa1fe40b55ee9a28"
+    },
+    "finalGuardAudit": {
+      "passed": true,
+      "runSnapshots": 80,
+      "currentExactArtifacts": 10,
+      "modelCalls": 0,
+      "effectsReplayed": 0,
+      "report": "build/local-reliability-20261117-qualified/admission-audit.json",
+      "sha256": "07f9dc735c1638cdab726df7637bed9f1c7b1bf02906ad2cda5b6e5c5b2e0209",
+      "scope": "The final completion contract-validation guard was tightened after the live matrix process had compiled. All 65 primary, five follow-up and ten recovery snapshots were revalidated against that final guard, including current exact artifact bytes; no actions were replayed."
+    },
+    "currentSourceGate": {
+      "fullGoTests": "passed: go test ./... -count=1",
+      "vet": "passed: go vet ./...",
+      "race": "passed: go test -race ./internal/app ./internal/tools ./internal/controlplane ./internal/llm/backends -count=1",
+      "offline": true,
+      "goVersion": "1.27.3 cached local toolchain",
+      "logs": [
+        {"path": "build/local-reliability-20261117-current-gate/tests.log", "sha256": "69c7c056c108c246b21409ff33ab7cf05ef4a3f97451d1e8e977bdf13f703da3"},
+        {"path": "build/local-reliability-20261117-current-gate/vet.log", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"path": "build/local-reliability-20261117-current-gate/race.log", "sha256": "501d7742090f015053724e0e24a4fd33c1d87e5363cdcad39d7ecd6b02b8b5f2"}
+      ]
+    },
+    "productionBuild": {
+      "status": "passed",
+      "command": "wails build -m -nosyncgomod -nocolour",
+      "offline": true,
+      "frontendTypeAndBundleBuild": "passed as part of Wails build",
+      "log": "build/local-reliability-20261117-current-gate/build.log",
+      "logSha256": "c2f7a0531ed6054ffa4c59dd6c31d2197282c64e6121a20d83fb6a5779e997f3",
+      "binary": "build/bin/TheMauler.exe",
+      "sha256": "60327728507be66f051e4e4e9ada7d7b311f6c7767a493d32b54456282b81555",
+      "appStarted": false,
+      "warning": "Existing nonfatal Wails binding diagnostic: Not found: time.Time. No clean lint or new dependency-advisory audit is claimed."
+    }
+  },
+  "reproduction": {
+    "script": "scripts/run-local-reliability.ps1",
+    "inputs": "An already loaded idle loopback model; existing credential supplied ephemerally with MAULER_LOCAL_EVAL_KEY or INFERENCE_BRIDGE_API_KEY; fresh -OutputRoot; -Repeats 5; cached Go 1.27.3 via -GoBinary when the system SDK is older.",
+    "admissionAuditTest": "TestRecheckRetainedLocalCompletionAdmissions requires explicit absolute MAULER_LOCAL_RECHECK_REPORT and fresh MAULER_LOCAL_RECHECK_OUTPUT; no provider key or model is needed."
+  },
+  "remainingUnqualified": [
+    "Native Wails Send/Stop/New chat/workspace-switch UI lifecycle and event delivery; the matrix exercises the headless production agent loop, not those entry points.",
+    "Mauler whole-app hard crash, automatic restart, physical reboot/power loss, and persistent terminal/descendant recovery.",
+    "Broader browser, remote, channel, MCP and long unattended mixed-task reliability.",
+    "The original fresh 12/12 UI Gate 1, full Agent Eval x5 and context M5 acceptance remain open.",
+    "General semantic correctness, arbitrary natural-language byte expectations, atomic file snapshots and OS filesystem containment are not certified by this bounded literal-file verifier."
+  ]
+}

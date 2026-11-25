@@ -43,6 +43,9 @@ func TestTaskRunMirrorsCoreEventsToLedger(t *testing.T) {
 		if event.Kind == "state" && event.State == "thinking" {
 			sawState = true
 		}
+		if event.Metadata["agent_definition_id"] != "builder" || event.Metadata["agent_definition_version"] != "1" {
+			t.Fatalf("event missing exact agent definition provenance: %#v", event)
+		}
 	}
 	if !sawTool {
 		t.Fatalf("missing mirrored shell tool event: %#v", events)

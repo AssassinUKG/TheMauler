@@ -18,29 +18,48 @@ type reviewPhaseDecision struct {
 	Verdicts       []VerifyVerdict
 }
 
-func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings, mode AgentMode, autonomous bool, reviewCyclesUsed *int, budgetExhausted bool) reviewPhaseDecision {
+type reviewPhaseLimits struct {
+	budgetsExhausted bool
+	replyRecovered   bool
+}
+
+func (a *App) runReviewPhase(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings, mode AgentMode, autonomous bool, reviewCyclesUsed *int, limits reviewPhaseLimits) reviewPhaseDecision {
 	if run == nil || cfg == nil || reviewCyclesUsed == nil {
 		return reviewPhaseDecision{Proceed: true}
 	}
 	rl := cfg.Agents.ReviewLoop
-	if !rl.Enabled || (rl.OnlyAutonomous && !autonomous) || budgetExhausted || !runIsGateable(*run, mode) {
-		return reviewPhaseDecision{Proceed: true}
+	if !rl.Enabled || (rl.OnlyAutonomous && !autonomous) || !runIsGateable(*run, mode) {
+		return reviewPhaseDecision{Proceed: true, Verdicts: a.ensureControlVerification(ctx, run, cfg, nil)}
 	}
 
 	var verdicts []VerifyVerdict
 	if rl.VerifyGate {
 		verdicts = append(verdicts, a.runVerifyGate(ctx, run, cfg)...)
+	} else {
+		verdicts = a.ensureControlVerification(ctx, run, cfg, verdicts)
 	}
 	if len(blockingReviewVerdicts(verdicts)) == 0 && rl.CompletionRails {
-		verdicts = append(verdicts, runCompletionRails(run, cfg)...)
+		verdicts = append(verdicts, runCompletionRails(run, cfg, verdicts)...)
 	}
-	if len(blockingReviewVerdicts(verdicts)) == 0 && rl.ReviewerPass {
-		verdicts = append(verdicts, a.runReviewerPass(ctx, run, profile, cfg))
+	if len(blockingReviewVerdicts(verdicts)) == 0 && rl.ReviewerPass && !limits.budgetsExhausted {
+		verdicts = append(verdicts, a.runReviewerPass(ctx, run, profile, cfg, reviewerPassOptions{
+			evidenceOnly: limits.replyRecovered,
+			verdicts:     verdicts,
+		}))
+	}
+	if limits.budgetsExhausted && rl.ReviewerPass {
+		verdicts = append(verdicts, VerifyVerdict{Gate: "review", Status: "inconclusive", Blocking: true, Summary: "The required model reviewer could not run within the remaining budget."})
 	}
 	recordReviewGateEvent(run, *reviewCyclesUsed, verdicts)
 	blocking := blockingReviewVerdicts(verdicts)
 	if len(blocking) == 0 {
 		return reviewPhaseDecision{Proceed: true, Verdicts: verdicts}
+	}
+	if limits.budgetsExhausted {
+		return reviewPhaseDecision{Proceed: true, StopReason: "review_incomplete", StopDetail: "Budget exhausted with unresolved blocking verification: " + reviewBlockingSummary(blocking), Verdicts: verdicts}
+	}
+	if limits.replyRecovered {
+		return reviewPhaseDecision{Proceed: true, StopReason: "review_incomplete", StopDetail: "The final reply was recovered with unresolved verification: " + reviewBlockingSummary(blocking), Verdicts: verdicts}
 	}
 	if inconclusive := inconclusiveReviewVerdicts(blocking); len(inconclusive) > 0 {
 		detail := reviewBlockingSummary(inconclusive)

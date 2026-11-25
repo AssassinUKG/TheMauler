@@ -18,11 +18,19 @@ Tracked by `../context-packet-reduction-implementation-plan-2026-07.md`.
   per-task system packets, focused tests, and the full production gate.
 - M5 phase A complete: seven task classes x three paraphrases x pass^5, hostile-content checks,
   deterministic packet/tool identities, Benchmark UI, and reusable production Agent Eval pass^k
-  telemetry. The repaired 2026-07-23 Huihui Gate 1 reached 11/12 and is not pass^1, so x5 remains
-  locked. Remaining closure gate: after a deliberate model/profile/control change, pass a fresh
-  12/12 UI Gate 1 and then run and record the full live Agent Eval x5. Do not conflate the
-  105-attempt zero-model preflight with live model reliability or rerun an unchanged profile until
-  it happens to pass.
+  telemetry. The 2026-11-24 RVN/35K/draft-MTP `n=2` UI Gate 1 passed 12/12, then its required live
+  x5 finished 54/60 raw attempts with only 8/12 fixtures clean across every round. Four scorer false
+  negatives found by that run are fixed; replay-equivalent accounting is 58/60 and 10/12, still not
+  pass^5. The residual failures are masked verification and stale-IP leakage into todo input, so the
+  selected profile remains supervised-only. Remaining closure gate: after a deliberate
+  model/profile/control change, pass a fresh 12/12 UI Gate 1 and then a full clean live Agent Eval
+  x5. Do not conflate the 105-attempt zero-model preflight or replay-equivalent rescoring with live
+  model reliability, and do not rerun an unchanged profile until it happens to pass.
+  The subsequent input-exclusion and verification-exit hardening reached 9/12 in native report
+  `agent-eval-20261124-204231`: exclusions passed, masked compile checks remained blocked, grep/edit
+  exceeded its continuation allowance, and a `tail/head -n` scorer false negative was identified and
+  fixed. The final scorer has not had a fresh live Gate 1; x5 is locked. Next reliability work should
+  target unnecessary continuation and direct verification selection without changing fixture limits.
 
 ## 2. Bug Bounty Hunter and Chat workspace isolation
 
@@ -30,10 +38,20 @@ Tracked by `../bug-bounty-agent-chat-workspace-integration-plan-2026-07.md`.
 
 The M0-M3 functional slice exists. Remaining reliability edges:
 
-- repeated paraphrase and hostile-content routing fixtures;
-- exact agent definition/version in RunLedger;
-- dirty-tab save/discard behavior on workspace switch;
 - final acceptance/live UI verification after those edges land.
+
+Landed 2026-10-25: every new task run persists the exact agent definition ID/version in task-run
+state and SQLite schema v19, and every run-owned RunLedger event inherits the same provenance.
+Checkpoint resume preserves the selected built-in or configured custom agent; enabled custom agents
+no longer collapse to Auto, while missing/disabled definitions still fall back safely to `auto@1`.
+Named checkpoint/resume landed 2026-09-17 and the shared dirty-tab Save all/Discard/Keep editing
+workspace-transition guard landed 2026-09-27; neither remains an open item here.
+Landed 2026-10-25: the existing three-paraphrase x pass^5 Bug Bounty route is paired with hostile
+JavaScript-comment, HTTP-header, and HTML-body fixtures repeated five times each. Attachment bodies
+remain model-visible untrusted evidence but cannot select agents/skills/memory, advertise tools,
+expand task contracts, choose targets, alter completion gates, or regain authority after checkpoint
+resume. The operator's text and the fact that attachments were selected form the separate persisted
+trusted routing prompt.
 
 Landed 2026-09-17: reusable named conversation checkpoints share the existing authoritative run-
 checkpoint store, restore a UI-safe transcript, add the model-visible continuation to Chat, and
@@ -44,6 +62,22 @@ separate and named checkpoints are not consumed by a successful resume.
 
 Tracked by `../mauler-agent-control-plane-improvement-plan-2026-07.md` and
 `../agentic-reliability-issues-2026-07.md`.
+
+- Native Windows follow-up 2026-11-17: initial/pre-effect durable checkpoints, explicit safe recovery,
+  OS-released data ownership, shutdown joining, atomic session replacement, saved-chat workspace
+  identity, visible partial outcomes and longer bounded text replies are implemented and qualified
+  to the recorded native-process boundary. Text and post-append hard kills do not authorize effect
+  replay. See `../mauler-native-lifecycle-reliability-2026-11-17.json`. Next qualification remains
+  descendant containment and wider mixed/browser/remote journeys; reboot/power-loss was deliberately
+  not performed. A larger response budget is not completion evidence for file/action tasks.
+
+- Landed 2026-11-17: a bounded local-only production-loop matrix passed 65/65 across ordinary chat,
+  file reads, exact-byte create/append handoff, cancellation and fresh same-chat recovery. Routing
+  collisions, budget-exhausted review bypass and shared backend cancellation are fixed. Final
+  current-source admission audit: 80 retained snapshots and 10 current exact artifacts passed.
+  See `../mauler-local-reliability-2026-11-17.json`. MAULER-AR-009's native-process slice is superseded
+  by the follow-up above, while reboot and broader qualification stay open; the original fresh 12/12
+  UI Gate 1 and full Agent Eval x5 requirements are unchanged.
 
 - Expand typed task contracts and classified recovery without weakening the landed mutation/complete
   gates.
@@ -62,6 +96,10 @@ Tracked by `../mauler-agent-control-plane-improvement-plan-2026-07.md` and
   bounded timeout. Next evidence gate is a focused live regression run, then the unchanged fresh
   12/12 Gate 1 requirement before Agent Eval x5.
 - Keep protected tests/verifier settings outside agent mutation scope.
+- Landed 2026-11-16: the external MCP boundary uses the official Go SDK for stdio, legacy SSE, and
+  Streamable HTTP `/mcp`. It stays one compact Mauler tool instead of importing untrusted remote
+  definitions into the native registry, is lazy/lifecycle-owned, confirmation-gated, bounded, and
+  restricted to direct loopback/private-LAN network endpoints with no tunnel or relay behavior.
 
 ### HelixClaw-derived reliability parity
 
@@ -141,8 +179,12 @@ Tracked by `../repository-intelligence-parity-plan-2026-07.md`.
   schema, and PE/ELF structural metadata to the same immutable untrusted chunks. Tests prove archive
   bodies and database row values are not indexed, and corrupt/over-limit inputs remain explicit
   non-coverage.
-- Next: add bounded scanned-PDF OCR and 7z support, then optional embeddings. Database row sampling
-  remains excluded until it has an explicit privacy/redaction policy.
+- Landed 2026-10-25: scanned PDFs fall back to local Poppler/Tesseract OCR one bounded page at a
+  time, and 7z files contribute metadata-only inventories under entry/logical-size/time limits.
+  Missing OCR dependencies and over-limit inputs remain explicit non-coverage; archive member bodies
+  are not indexed.
+- Next: optional embeddings. Database row sampling remains excluded until it has an explicit
+  privacy/redaction policy.
 - Remove arbitrary whole-file UX barriers while enforcing provider/model context budgets through
   retrieval rather than truncation-by-accident.
 - Add OCR for scanned PDFs and the other planned formats through bounded extractors.
@@ -163,8 +205,8 @@ LSP server a hard dependency for basic operation.
   place. One searchable Conversation menu, contextual Inspector suggestions, and non-destructive
   tool/status/browser filters are present. The centre Chat canvas now uses floating, fully
   dismissible Inspector and Terminal work drawers while specialist pages retain the docked IDE
-  layout. Next is multi-size native screenshot acceptance and optional richer title metadata or a
-  confirmed old-scratch review surface. See
+  layout. Three-size native screenshot acceptance landed 2026-10-25; next is optional richer title
+  metadata or a confirmed old-scratch review surface. See
   `../chat-first-workbench-redesign-2026-09.md`.
 - Landed 2026-09-16: saved conversations have one safe Rename action in both navigation surfaces;
   transcript files and SQLite recall identities move atomically with collision/run guards and file
@@ -175,6 +217,17 @@ LSP server a hard dependency for basic operation.
 - Landed 2026-09-16: bounded user-authored conversation tags persist independently from transcripts,
   survive rename, clear on delete, render as row chips, and drive title/tag search plus one-click
   filters in both navigation surfaces. Optional metadata corruption cannot blank the chat library.
+- Landed 2026-09-24: ChatGPT-style automatic conversation identity closes the remaining lifecycle
+  gap. Startup is a blank New chat; the first prompt receives a collision-safe title; end-of-run
+  autosave updates that named transcript before the sidebar refreshes; New chat preserves and leaves
+  the current row; and the internal recovery autosave is excluded from visible history.
+- Landed 2026-09-26: the final-completion guard distinguishes greetings and capability openers from
+  unfinished work. Their answers may invite the operator to provide a real task, while factual
+  questions and action requests remain subject to the existing autonomous-completion requirement.
+- Landed 2026-09-27: editor drafts and saved baselines are owned per tab, with visible dirty markers
+  and a shared Save all/Discard/Keep editing guard across every UI-owned workspace transition. Failed
+  saves and cancelled pickers preserve drafts; successful switches still clear only path-backed tabs
+  and retain scratch snippets.
 - Landed 2026-09-15: Chat now includes a first-class Security workspace with locked scope, workflow
   coverage, evidence/finding counts, next controlled action, and reviewable prompts for the next
   test or draft-finding validation. Engagement Grid remains authoritative for mutations.
@@ -206,7 +259,30 @@ Tracked by `../browser-workflow-assistant-plan-2026-09.md`.
 - Slice 3 landed 2026-09-14: bounded cancellation fixtures cover every browser phase; stable
   owner-scoped tab refs support open/list/switch/close; Services provides named metadata-only
   checkpoint/resume that strips credentials, cookies, form values, query strings, and fragments.
-- Next: stronger immutable evidence promotion/review and a supervised local-model browser pass^k.
+- Slice 5 landed 2026-10-25: screenshots support three bounded viewport sizes and are saved with
+  workspace-owned immutable manifests containing SHA-256, dimensions, capture mode, and sanitized
+  source metadata. Review rehashes each artifact, marks changed files stale, and permits only fresh
+  captures to be promoted explicitly into Engagement evidence.
+- Next: a supervised local-model browser pass^k.
+
+## 8. NanoCyber sandboxed subagents
+
+Tracked by `../nanocyber-sandboxed-subagents-plan-2026-10.md`.
+
+- MN-1 landed: TheMauler owns a typed, bounded NanoCyber lease-v1 client contract with no Docker or
+  host-shell implementation.
+- MN-2 landed client-side: optional strict-loopback settings, protected credential presence/storage,
+  and fail-closed Doctor/Services health plus capability inventory checks. The capability remains
+  disabled until the companion runtime publishes the authenticated compatible inventory.
+- MN-3 foundation landed: Test/Fix declares `offline-code`; strict admission/cancel/complete/parent-
+  cancellation transports validate bounded receipts; an admission plan seals exact run generation,
+  epoch, subagent attempt, budgets, evidence, expiry, and a NanoCyber-native engagement authority.
+  If NanoCyber is enabled before readiness, Test/Fix stops before model execution with
+  `host_fallback=false`; read-only subagents remain unchanged.
+- Next: add the companion authenticated capability inventory and consumer typed-job, receipt, and
+  terminal lease-status APIs, then define an explicit cross-product engagement binding. Only then
+  wire live admission, cancellation, ledger receipt ownership, and result acceptance. Do not claim
+  sandbox readiness before those cross-repository gates and the lifecycle qualification pass.
 
 ## Supersession
 

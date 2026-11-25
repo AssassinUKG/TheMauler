@@ -82,6 +82,89 @@ state, status_json, plan_json, submissions_json, merge_json, started_at, updated
 	}
 }
 
+func TestMigrateV19PreservesRunsAndAddsAgentDefinitionDefaults(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 18; version++ {
+		if err := runMigration(db, version); err != nil {
+			db.Close()
+			t.Fatalf("migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.Exec(`insert into task_runs (id, started_at) values ('legacy-agent-run', '2026-10-25T12:00:00Z')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var definitionID, definitionVersion, routingPrompt string
+	if err := db.QueryRow(`select agent_definition_id, agent_definition_version, routing_prompt from task_runs where id = 'legacy-agent-run'`).Scan(&definitionID, &definitionVersion, &routingPrompt); err != nil {
+		t.Fatal(err)
+	}
+	if definitionID != "" || definitionVersion != "" || routingPrompt != "" {
+		t.Fatalf("legacy routing/agent definition defaults = %q %q %q", routingPrompt, definitionID, definitionVersion)
+	}
+}
+
+func TestMigrateV20UpgradesBothV19RoutingPromptLayouts(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		routingPrompt string
+	}{
+		{name: "published v19"},
+		{name: "v19 with routing prompt", routingPrompt: "existing routing prompt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for version := 1; version <= 19; version++ {
+				if err := runMigration(db, version); err != nil {
+					t.Fatalf("migration %d: %v", version, err)
+				}
+			}
+			if _, err := db.Exec(`INSERT INTO task_runs (id, prompt, started_at)
+				VALUES ('saved-run', 'existing prompt', '2026-11-17T00:00:00Z')`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.routingPrompt != "" {
+				if _, err := db.Exec(`ALTER TABLE task_runs ADD COLUMN routing_prompt TEXT NOT NULL DEFAULT ''`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE task_runs SET routing_prompt = ? WHERE id = 'saved-run'`, tc.routingPrompt); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			if version, err := schemaVersion(db); err != nil || version != 20 {
+				t.Fatalf("schema version = %d, err = %v; want 20", version, err)
+			}
+			var prompt, routingPrompt string
+			if err := db.QueryRow(`SELECT prompt, routing_prompt FROM task_runs WHERE id = 'saved-run'`).Scan(&prompt, &routingPrompt); err != nil {
+				t.Fatal(err)
+			}
+			if prompt != "existing prompt" || routingPrompt != tc.routingPrompt {
+				t.Fatalf("saved prompts = (%q, %q); want (existing prompt, %q)", prompt, routingPrompt, tc.routingPrompt)
+			}
+		})
+	}
+}
+
 func TestMigrateExistingV0DatabaseIsIdempotent(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "state.db")
 	db, err := sql.Open("sqlite", dbPath)

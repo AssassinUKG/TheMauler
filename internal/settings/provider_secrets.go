@@ -22,8 +22,18 @@ type ProviderAPIKeyStatus struct {
 	EffectiveConfigured   bool   `json:"effective_configured"`
 }
 
+// ServiceCredentialStatus exposes only credential presence. The credential
+// value itself is never returned through Wails, logs, prompts, or settings.
+type ServiceCredentialStatus struct {
+	Service               string `json:"service"`
+	EnvironmentConfigured bool   `json:"environment_configured"`
+	StoredConfigured      bool   `json:"stored_configured"`
+	EffectiveConfigured   bool   `json:"effective_configured"`
+}
+
 type providerSecretsFile struct {
 	Providers map[string]string `json:"providers"`
+	Services  map[string]string `json:"services,omitempty"`
 }
 
 // ResolveProviderAPIKey gives an environment variable precedence over the
@@ -100,8 +110,76 @@ func ClearProviderAPIKey(providerName string) error {
 	return writeProviderSecretsLocked(secrets)
 }
 
+// ResolveServiceCredential gives the configured environment variable
+// precedence over the UI-managed protected service secret.
+func ResolveServiceCredential(serviceRef, envName string) string {
+	if name := strings.TrimSpace(envName); name != "" {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	providerSecretsMu.Lock()
+	defer providerSecretsMu.Unlock()
+	secrets, err := loadProviderSecretsLocked()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(secrets.Services[strings.TrimSpace(serviceRef)])
+}
+
+func GetServiceCredentialStatus(serviceRef, envName string) ServiceCredentialStatus {
+	serviceRef = strings.TrimSpace(serviceRef)
+	environmentConfigured := false
+	if name := strings.TrimSpace(envName); name != "" {
+		environmentConfigured = strings.TrimSpace(os.Getenv(name)) != ""
+	}
+	providerSecretsMu.Lock()
+	secrets, err := loadProviderSecretsLocked()
+	providerSecretsMu.Unlock()
+	storedConfigured := err == nil && strings.TrimSpace(secrets.Services[serviceRef]) != ""
+	return ServiceCredentialStatus{
+		Service: serviceRef, EnvironmentConfigured: environmentConfigured,
+		StoredConfigured:    storedConfigured,
+		EffectiveConfigured: environmentConfigured || storedConfigured,
+	}
+}
+
+func SaveServiceCredential(serviceRef, credential string) error {
+	serviceRef = strings.TrimSpace(serviceRef)
+	credential = strings.TrimSpace(credential)
+	if !nanoCyberCredentialRefPattern.MatchString(serviceRef) {
+		return fmt.Errorf("service credential reference must be a bounded opaque label")
+	}
+	if credential == "" {
+		return fmt.Errorf("service credential is required")
+	}
+	providerSecretsMu.Lock()
+	defer providerSecretsMu.Unlock()
+	secrets, err := loadProviderSecretsLocked()
+	if err != nil {
+		return err
+	}
+	secrets.Services[serviceRef] = credential
+	return writeProviderSecretsLocked(secrets)
+}
+
+func ClearServiceCredential(serviceRef string) error {
+	serviceRef = strings.TrimSpace(serviceRef)
+	if !nanoCyberCredentialRefPattern.MatchString(serviceRef) {
+		return fmt.Errorf("service credential reference must be a bounded opaque label")
+	}
+	providerSecretsMu.Lock()
+	defer providerSecretsMu.Unlock()
+	secrets, err := loadProviderSecretsLocked()
+	if err != nil {
+		return err
+	}
+	delete(secrets.Services, serviceRef)
+	return writeProviderSecretsLocked(secrets)
+}
+
 func loadProviderSecretsLocked() (providerSecretsFile, error) {
-	secrets := providerSecretsFile{Providers: make(map[string]string)}
+	secrets := providerSecretsFile{Providers: make(map[string]string), Services: make(map[string]string)}
 	dir, err := ConfigDir()
 	if err != nil {
 		return secrets, err
@@ -118,6 +196,9 @@ func loadProviderSecretsLocked() (providerSecretsFile, error) {
 	}
 	if secrets.Providers == nil {
 		secrets.Providers = make(map[string]string)
+	}
+	if secrets.Services == nil {
+		secrets.Services = make(map[string]string)
 	}
 	return secrets, nil
 }

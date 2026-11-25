@@ -77,6 +77,36 @@ func (a *App) repositoryIndexRuntimeStatus(workspace string) (RepositoryIndexSta
 	return status, status.Indexing && sameFilesystemPath(status.Workspace, workspace)
 }
 
+func repositoryIndexStartingStatus(previous *RepositoryIndexStatus, workspace string, sources []settings.RepositoryIndexSource, refreshMode string, startedAt time.Time) RepositoryIndexStatus {
+	status := RepositoryIndexStatus{
+		Available: true,
+		Workspace: workspace,
+		Omissions: []RepositoryIndexOmission{},
+	}
+	if previous != nil {
+		// A replacement scan does not retire the committed generation. Keep its
+		// identity and coverage visible until the new transaction activates.
+		status = *previous
+	}
+	status.Available = true
+	status.Workspace = workspace
+	status.Status = "starting"
+	status.Indexing = true
+	status.CanCancel = true
+	status.CurrentPath = ""
+	status.ProgressFilesSeen = 0
+	status.ProgressIndexed = 0
+	status.ProgressBytesRead = 0
+	status.ProgressChunkCount = 0
+	status.Sources = append([]settings.RepositoryIndexSource(nil), sources...)
+	status.RefreshMode = refreshMode
+	status.Error = ""
+	status.StartedAt = startedAt.UTC().Format(time.RFC3339Nano)
+	status.Health = ""
+	status.HealthDetail = ""
+	return status
+}
+
 func (a *App) repositoryIndexStatus(ctx context.Context) (RepositoryIndexStatus, error) {
 	workspace := ""
 	if a != nil {
@@ -211,38 +241,27 @@ func (a *App) runWorkspaceRepositoryIndex(parent context.Context, progressSink r
 		cancel()
 		return repoindex.IndexResult{}, root, fmt.Errorf("repository indexing is already active for %s", activeWorkspace)
 	}
-	a.repositoryIndexRunID++
-	runID := a.repositoryIndexRunID
-	a.repositoryIndexCancel = cancel
-	a.repositoryIndexDone = make(chan struct{})
+	a.repositoryIndexMu.Unlock()
+
 	policy, sources := a.repositoryIndexPolicy(root)
 	refreshMode := "full"
 	if incremental {
 		refreshMode = "incremental"
 	}
-	a.repositoryIndexRuntime = RepositoryIndexStatus{
-		Available: true, Workspace: root, Status: "starting", Indexing: true, CanCancel: true,
-		Omissions: []RepositoryIndexOmission{}, Sources: sources, RefreshMode: refreshMode, StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	var previous *RepositoryIndexStatus
+	if active, err := a.repositoryIndexStatusFromDatabase(ctx, root); err == nil {
+		previous = &active
 	}
+
+	a.repositoryIndexMu.Lock()
+	a.repositoryIndexRunID++
+	runID := a.repositoryIndexRunID
+	a.repositoryIndexCancel = cancel
+	a.repositoryIndexDone = make(chan struct{})
+	a.repositoryIndexRuntime = repositoryIndexStartingStatus(previous, root, sources, refreshMode, time.Now())
 	a.repositoryIndexMu.Unlock()
 	processStateMu.Unlock()
 	defer cancel()
-
-	// Snapshot the previous active generation before opening the replacement
-	// transaction. This preserves useful provenance while status polling stays
-	// independent from SQLite's single-writer connection.
-	if previous, err := a.repositoryIndexStatusFromDatabase(ctx, root); err == nil {
-		a.repositoryIndexMu.Lock()
-		if a.repositoryIndexRunID == runID && a.repositoryIndexRuntime.Indexing {
-			startedAt := a.repositoryIndexRuntime.StartedAt
-			a.repositoryIndexRuntime = previous
-			a.repositoryIndexRuntime.Indexing = true
-			a.repositoryIndexRuntime.CanCancel = true
-			a.repositoryIndexRuntime.Status = "scanning"
-			a.repositoryIndexRuntime.StartedAt = startedAt
-		}
-		a.repositoryIndexMu.Unlock()
-	}
 
 	index, err := repoindex.NewStore(a.db)
 	if err != nil {

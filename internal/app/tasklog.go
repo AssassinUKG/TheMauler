@@ -15,35 +15,38 @@ import (
 )
 
 type TaskRun struct {
-	ID                 string                     `json:"id"`
-	Generation         uint64                     `json:"generation,omitempty"`
-	ConversationEpoch  uint64                     `json:"conversation_epoch,omitempty"`
-	ParentRunID        string                     `json:"parent_run_id,omitempty"`
-	Prompt             string                     `json:"prompt"`
-	Mode               string                     `json:"mode"`
-	Profile            string                     `json:"profile"`
-	Model              string                     `json:"model,omitempty"`
-	ContextPacketClass string                     `json:"context_packet_class,omitempty"`
-	ClaimantID         string                     `json:"claimant_id,omitempty"`
-	ClaimantAlias      string                     `json:"claimant_alias,omitempty"`
-	Origin             string                     `json:"origin,omitempty"`
-	Contract           *controlplane.TaskContract `json:"contract,omitempty"`
-	Control            *controlplane.MachineState `json:"control,omitempty"`
-	Status             string                     `json:"status"`
-	State              string                     `json:"state,omitempty"`
-	StopReason         string                     `json:"stop_reason,omitempty"`
-	StopDetail         string                     `json:"stop_detail,omitempty"`
-	StartedAt          string                     `json:"started_at"`
-	EndedAt            string                     `json:"ended_at,omitempty"`
-	DurationMs         int64                      `json:"duration_ms,omitempty"`
-	PromptTokens       int                        `json:"prompt_tokens,omitempty"`
-	CompletionTokens   int                        `json:"completion_tokens,omitempty"`
-	TotalTokens        int                        `json:"total_tokens,omitempty"`
-	Summary            string                     `json:"summary,omitempty"`
-	Response           string                     `json:"response,omitempty"`
-	FinalizedArtifacts []FinalizedArtifact        `json:"finalized_artifacts,omitempty"`
-	Tools              []TaskToolEvent            `json:"tools,omitempty"`
-	Events             []TaskRunEvent             `json:"events,omitempty"`
+	ID                     string                     `json:"id"`
+	Generation             uint64                     `json:"generation,omitempty"`
+	ConversationEpoch      uint64                     `json:"conversation_epoch,omitempty"`
+	ParentRunID            string                     `json:"parent_run_id,omitempty"`
+	Prompt                 string                     `json:"prompt"`
+	RoutingPrompt          string                     `json:"routing_prompt,omitempty"`
+	Mode                   string                     `json:"mode"`
+	AgentDefinitionID      string                     `json:"agent_definition_id,omitempty"`
+	AgentDefinitionVersion string                     `json:"agent_definition_version,omitempty"`
+	Profile                string                     `json:"profile"`
+	Model                  string                     `json:"model,omitempty"`
+	ContextPacketClass     string                     `json:"context_packet_class,omitempty"`
+	ClaimantID             string                     `json:"claimant_id,omitempty"`
+	ClaimantAlias          string                     `json:"claimant_alias,omitempty"`
+	Origin                 string                     `json:"origin,omitempty"`
+	Contract               *controlplane.TaskContract `json:"contract,omitempty"`
+	Control                *controlplane.MachineState `json:"control,omitempty"`
+	Status                 string                     `json:"status"`
+	State                  string                     `json:"state,omitempty"`
+	StopReason             string                     `json:"stop_reason,omitempty"`
+	StopDetail             string                     `json:"stop_detail,omitempty"`
+	StartedAt              string                     `json:"started_at"`
+	EndedAt                string                     `json:"ended_at,omitempty"`
+	DurationMs             int64                      `json:"duration_ms,omitempty"`
+	PromptTokens           int                        `json:"prompt_tokens,omitempty"`
+	CompletionTokens       int                        `json:"completion_tokens,omitempty"`
+	TotalTokens            int                        `json:"total_tokens,omitempty"`
+	Summary                string                     `json:"summary,omitempty"`
+	Response               string                     `json:"response,omitempty"`
+	FinalizedArtifacts     []FinalizedArtifact        `json:"finalized_artifacts,omitempty"`
+	Tools                  []TaskToolEvent            `json:"tools,omitempty"`
+	Events                 []TaskRunEvent             `json:"events,omitempty"`
 
 	startMs              int64 // not serialised; used to compute DurationMs
 	ledger               *ledger.Ledger
@@ -122,18 +125,47 @@ func (a *App) ImportTaskRunsJSON(raw string) (int, error) {
 func startTaskRun(prompt, mode, profile, model string) TaskRun {
 	now := time.Now()
 	generation := nextTaskRunGeneration(now)
+	definitionID, definitionVersion := "auto", "1"
+	if definition, ok := builtinAgentDefinition(mode); ok {
+		definitionID, definitionVersion = definition.ID, definition.Version
+	}
 	return TaskRun{
 		ID: "task-" + strings.ReplaceAll(now.Format(time.RFC3339Nano), ":", "-") +
 			"-" + strconv.FormatUint(taskRunSequence.Add(1), 36),
-		Generation: generation,
-		Prompt:     strings.TrimSpace(prompt),
-		Mode:       mode,
-		Profile:    profile,
-		Model:      model,
-		Status:     "running",
-		State:      "planning",
-		StartedAt:  now.Format(time.RFC3339),
-		startMs:    now.UnixMilli(),
+		Generation:             generation,
+		Prompt:                 strings.TrimSpace(prompt),
+		RoutingPrompt:          strings.TrimSpace(prompt),
+		Mode:                   mode,
+		AgentDefinitionID:      definitionID,
+		AgentDefinitionVersion: definitionVersion,
+		Profile:                profile,
+		Model:                  model,
+		Status:                 "running",
+		State:                  "planning",
+		StartedAt:              now.Format(time.RFC3339),
+		startMs:                now.UnixMilli(),
+	}
+}
+
+func taskRoutingPrompt(run TaskRun) string {
+	if prompt := strings.TrimSpace(run.RoutingPrompt); prompt != "" {
+		return prompt
+	}
+	return strings.TrimSpace(run.Prompt)
+}
+
+func (r *TaskRun) setAgentDefinition(mode AgentMode) {
+	if r == nil {
+		return
+	}
+	r.Mode = strings.TrimSpace(mode.Name)
+	r.AgentDefinitionID = strings.TrimSpace(mode.DefinitionID)
+	r.AgentDefinitionVersion = strings.TrimSpace(mode.DefinitionVersion)
+	if r.AgentDefinitionID == "" || r.AgentDefinitionVersion == "" {
+		if definition, ok := builtinAgentDefinition(r.Mode); ok {
+			r.AgentDefinitionID = definition.ID
+			r.AgentDefinitionVersion = definition.Version
+		}
 	}
 }
 
@@ -307,6 +339,15 @@ func (r *TaskRun) recordLedger(event ledger.Event) {
 		return
 	}
 	event.RunID = r.ID
+	if event.Metadata == nil {
+		event.Metadata = map[string]string{}
+	}
+	if r.AgentDefinitionID != "" {
+		event.Metadata["agent_definition_id"] = r.AgentDefinitionID
+	}
+	if r.AgentDefinitionVersion != "" {
+		event.Metadata["agent_definition_version"] = r.AgentDefinitionVersion
+	}
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().Format(time.RFC3339)
 	}

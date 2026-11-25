@@ -47,6 +47,7 @@ import {
 import type { AgentActivity, BrowserHandoffPayload, ChatMessage, RunProfileOption, RunStatePayload, ToolCountdown } from '../App'
 import { ChatSecurityWorkspace } from './ChatSecurityWorkspace'
 import { UiIcon, type UiIconName } from './UiIcon'
+import { replyOutcomeNotice } from '../replyOutcome'
 import './ChatPane.css'
 
 const sharedMarkdownComponents: Components = {
@@ -1357,6 +1358,7 @@ export function ChatPane({
             onCodeBlock={handleCodeBlock}
             onImageClick={setLightboxImage}
             onAttachmentOpen={att => openAttachment(att, 'message')}
+            onContinue={!streaming ? () => { setInput('Continue the previous answer from its last sentence, without repeating earlier paragraphs. Text only; no files or tools.'); setTimeout(() => inputRef.current?.focus(), 0) } : undefined}
             onReadResult={(id) => {
               setInput(`Use read_tool_result to read result_id=${id} offset=0 limit=8000`)
               setTimeout(() => inputRef.current?.focus(), 0)
@@ -2534,12 +2536,14 @@ function MessageBubble({
   onImageClick,
   onAttachmentOpen,
   onReadResult,
+  onContinue,
 }: {
   msg: ChatMessage
   onCodeBlock: (code: string, lang: string) => void
   onImageClick: (src: string) => void
   onAttachmentOpen: (attachment: ChatAttachment) => void
   onReadResult: (id: string) => void
+  onContinue?: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -2586,6 +2590,7 @@ function MessageBubble({
   }
 
   const canCopy = msg.role === 'user' || msg.role === 'assistant' || msg.role === 'system' || msg.role === 'tool_result'
+  const outcome = msg.role === 'assistant' ? replyOutcomeNotice(msg.deliveryStatus, msg.stopReason) : null
 
   return (
     <div className={roleClass}>
@@ -2605,6 +2610,10 @@ function MessageBubble({
           </button>
         )}
       </div>
+      {outcome && <div className="msg-outcome-notice" role="status">
+        <strong>{outcome.label}</strong><span>{outcome.detail}</span>
+        {msg.stopReason === 'output_limit' && onContinue && <button onClick={onContinue}>Continue answer</button>}
+      </div>}
       {msg.role === 'assistant' && msg.thinking && (
         <ThinkingBlock text={msg.thinking} />
       )}

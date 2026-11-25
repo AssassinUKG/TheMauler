@@ -1,10 +1,36 @@
 # Current state
 
-Last consolidated: 2026-09-24. This is a concise operational view, not an exhaustive release log.
+Last consolidated: 2026-11-23. This is a concise operational view, not an exhaustive release log.
 The pre-split full inventory is preserved in
 `../archive/agents-handoff-snapshot-2026-07-21.md`.
 
 ## Workbench
+
+- Latest Telegram slice: preserve Mauler's action routing while adding Jade-style single progress,
+  verbatim report previews, Full report/Markdown download and tool-observed Sources. Callbacks bind
+  user/chat/topic/message, expire and cannot dispatch work. Balanced UTF-16 HTML and conservative
+  uncertain-delivery handling prevent broken long output and duplicate cards. Default general-news
+  queries use dated publisher feeds with search fallback; configured services remain authoritative.
+  Both frameworks pass the exact headline prompt with the loaded local model and isolated state.
+  Durable callback/outbox recovery and real-client layout remain unqualified. See
+  `../telegram-news-parity-2026-11-23.json` and root `FIXES-RECENT.md`.
+
+- Latest native slice: Windows Wails lifecycle, stream Stop/New chat/reopen, workspace A/B transcript
+  retention, text-stream and post-append process-crash recovery were exercised in disposable state.
+  Recovery commits before external work; uncertain effects cannot be replayed. Native shutdown joins
+  cancellation, and text partial/outcome metadata survives saving. A real 2,000-word-request answer
+  completed at 2,374 words with its requested ending. Long answers now have an 8K context-aware budget
+  and at most three tool-free continuations, not the old hidden 1K/2K caps. Windows PTY path/waiter
+  defects are repaired. Full offline Go/vet/race and production build gates pass. No reboot occurred;
+  physical power loss, descendants, browser/remote and full unattended Gate 1/x5 remain open. See
+  `../mauler-native-lifecycle-reliability-2026-11-17.json` and MAULER-AR-009 through 012.
+
+- Earlier reliability slice: local-only chat/read/write/append/cancel/recover qualification passed
+  65/65. Intent collisions, exact-literal byte proof, budget-exhausted review and request-owned HTTP
+  cancellation are repaired. Production settings/keys and the loaded model/context were unchanged.
+  Both the current-source offline production build and expanded race gate pass; the app is stopped.
+  Its native-process limitations are refined by the newer record above; reboot remains untested. See
+  `../mauler-local-reliability-2026-11-17.json` and canonical MAULER-AR-006 through 009.
 
 - Native Wails desktop shell with a React/TypeScript workbench and Monaco editor.
 - Chat opens first in a conversation-first shell: the sidebar owns New chat, title search, saved
@@ -12,8 +38,21 @@ The pre-split full inventory is preserved in
   **Workspaces**. Complete retains model turns, tools, run milestones, and browser events with
   non-destructive filters/search. Explicit persistent conversation scratch can be promoted in place.
   See `../chat-first-workbench-redesign-2026-09.md`.
+- Each app launch begins on an honest blank **New chat** instead of merely selecting the newest saved
+  row. The first message creates a collision-safe title, completed runs auto-save that transcript
+  before notifying the UI, and the sidebar refreshes immediately. **New chat** preserves the current
+  named conversation and opens a blank transcript without a discard prompt; **Clear conversation**
+  remains the separately confirmed reset. The legacy recovery autosave stays hidden from history.
+- Greetings and capability openers can finish with an invitation such as “tell me what to work on”
+  without triggering the unfinished-action completion guard. The exception is intentionally narrow:
+  factual questions and requested work still cannot complete by merely promising a later answer or
+  action.
 - Explorer, Inspector, bottom work area, and Terminal/AI Commands retain visible draggable
   separators, collapsed rails, keyboard resizing, narrow-layout behavior, and persistence.
+- Monaco drafts are owned per tab rather than only by the currently visible editor. Tab switches keep
+  independent dirty content and saved baselines. Closing a dirty tab or replacing the workspace from
+  Chat, Explorer, Projects, scratch creation, or Settings requires Save, Discard, or Keep editing;
+  failed/cancelled transitions keep the drafts, and pathless scratch tabs survive workspace changes.
 - One View command menu and panel-local close controls govern those surfaces; Focus chat closes them
   together to zero-width columns, optional edge rails can be enabled, and automatic run-panel
   opening is an opt-in preference rather than a forced layout.
@@ -88,6 +127,11 @@ The pre-split full inventory is preserved in
   files** picker accepts multiple files; Explorer-copied absolute paths and dropped paths use the
   same validation. Path attachments remain metadata-only so complete large files are read through
   bounded chunks/extractors instead of being silently stuffed into one prompt.
+- Model output crosses a backend-owned display guard before streaming, transcript persistence, or
+  escalation delivery. If a local backend echoes request input after a valid answer, exact prior-turn
+  anchors and active private prompt markers cut the echo and replace the live stream with only the
+  answer. Saved contaminated assistant turns are scrubbed in memory on load, and all system/control
+  messages remain outside the user transcript.
 - Chat renders a streaming answer as one cohesive response, gives GFM tables the available message
   width with readable headers/rows and narrow-screen horizontal scrolling, and preserves completed
   streamed text if a later run-finalisation error occurs. If a read-only shell check captures the
@@ -111,6 +155,14 @@ The pre-split full inventory is preserved in
   Chat owner-checks task refresh, workspace-file and learning-suggestion events. Both Go and the UI
   refuse to clear or load a different conversation while a run executes.
   Doctor/Services expose a payload-free stale-event counter and latest rejected owner for diagnosis.
+- Task-run identity includes the exact agent definition ID/version in JSON, SQLite schema v19, the
+  Logs detail view, and every run-owned RunLedger event. Checkpoint resume reattaches the ledger and
+  resolves the saved built-in or enabled custom definition; missing definitions fall back to
+  `auto@1` rather than producing unversioned provenance.
+- Chat attachments have a separate persisted trusted routing prompt. JavaScript comments, HTTP
+  headers, HTML bodies, pasted text, and other attachment content still reach the model behind the
+  untrusted-data boundary, but cannot influence code-owned agent/skill/memory selection, tool
+  routing, task contracts, target inference, completion gates, or checkpoint-resume authority.
 - Verified mutation handoffs persist finalized artifact path, SHA-256, size, run/generation/epoch and
   verifier-evidence provenance. Task-run reads derive whether those exact bytes are still fresh,
   changed or missing without overwriting the captured fingerprint. Later tasks import those files as
@@ -151,6 +203,12 @@ The pre-split full inventory is preserved in
 - The compact model-facing registry covers file read/write/edit, shell/terminal, HTTP, glob/grep,
   session search, todos, lazy skills, bounded subagents, web/fetch/browser, memory, progress,
   evidence, SQLite, and supporting reasoning controls.
+- The compact `mcp` boundary supports stdio child servers, legacy HTTP+SSE, and current Streamable
+  HTTP endpoints including `/mcp`. Network endpoints are direct local-only connections to loopback
+  or literal private-LAN IPs; Mauler creates no SSH tunnels, port forwards, relays, or implicit
+  proxy routes. Remote tool descriptions/results remain untrusted, binary results are represented by
+  metadata/digests rather than base64 prompt payloads, secrets stay environment-referenced, and all
+  MCP actions require confirmation unless the exact call is explicitly approved.
 - Destructive actions have confirmation/safe-list support, mutation snapshots, postcondition checks,
   and rollback.
 - Auto routing offers Builder, Fixer, Reviewer, Researcher, Planner, Auto, Manual, and the built-in
@@ -196,7 +254,12 @@ The pre-split full inventory is preserved in
   conversation-owned tab refs support open/list/switch/close, and Services can save metadata-only
   checkpoints that strip query/fragment/userinfo and never retain credentials, cookies, or form
   values. Every browser phase has bounded cancellation coverage. Typed values are not returned in
-  tool output. Explicit open/show/launch wording is enforced as a visible session even when a local
+  tool output. Screenshots now accept bounded desktop/mobile viewport dimensions and are written to
+  workspace-owned evidence storage with a JSON manifest containing SHA-256, actual PNG dimensions,
+  capture mode, and sanitized URL/title metadata. Evidence review rehashes every capture, labels
+  changed artifacts stale, and exposes explicit promotion of fresh captures into Engagement evidence.
+  The native fixture verifies 375x667, 1024x768, and 1440x900 captures.
+  Explicit open/show/launch wording is enforced as a visible session even when a local
   model omits the flag; Chat can explicitly restart an existing headless session visibly. Reopening
   a host already blocked by CAPTCHA, Cloudflare, unusual traffic, or access denial is skipped. See
   `../browser-workflow-assistant-plan-2026-09.md`.
@@ -204,6 +267,44 @@ The pre-split full inventory is preserved in
 ## Providers and context
 
 - InferenceBridge via the local OpenAI-compatible provider is the default live path.
+- The provider catalogue consumes InferenceBridge's `max_context_length`, active/load state,
+  modalities, reasoning-effort support, and vision readiness instead of reducing local entries to
+  model IDs. Profiles shows those capabilities when selecting a model. The Qwen setup guide also
+  recognizes the exact RVN MTP artifact and reports the saved draft depth (`n=2`, `n=3`, or another
+  explicit benchmark candidate) without silently replacing it.
+- On 2026-11-22, InferenceBridge desktop validated cutoff recovery with
+  `RVN-Q4_K_M-multilingual-mtp.gguf`, native MTP x3, F16 KV cache, and a 35,072-token context.
+  Three plain replies and three post-tool replies recovered from forced limits. Every post-tool case
+  completed exactly one audited `read_file` call. A reply still capped after the bounded retry stayed
+  visible as incomplete. The warm turn reused 9,119 of 9,158 prompt tokens in the same conversation.
+  Mauler's OpenAI-compatible client owns recovery for its API turns. Use the terminal
+  `finish_reason=length` signal and preserve completed tool results and call IDs. Retry pending model
+  inference with room in context, and finish a cut-off final reply with tools disabled.
+- Mauler applies this recovery to final replies in Adaptive and Agent chat. The live RVN MTP x3
+  check capped the first post-tool reply at 64 tokens. Mauler completed the requested answer for
+  both an existing file and a missing file, with exactly one audited `read` in each case. It keeps
+  a failed read in the tool record and prevents completion checks from reopening tool execution.
+  `TestPostToolCutoffUsesSavedOutcomeOnce` also checks that a second cutoff keeps the partial reply.
+- During cutoff recovery, configured project tests run before keyword coverage is evaluated. A
+  passing configured test makes keyword gaps advisory, and the reviewer uses saved file and test
+  evidence without tools. The RVN MTP x3 inventory rerun at 35,072 context passed four unit tests,
+  seven independent acceptance checks, and the reviewer. The run reached `complete`, the chat kept
+  its final line after a forced 24-token cutoff, and the failed optional read executed once.
+- NanoCyber is an optional, disabled-by-default local sandbox service for future execution-bearing
+  subagents. Settings stores only its loopback endpoint/API version and opaque credential reference;
+  the bearer token uses environment-first protected secret storage and is never returned to React.
+  Doctor and Services perform bounded proxy-free/redirect-free health and capability checks and
+  expose sandbox execution only for a healthy compatible v1 service. Mauler now has strict admission
+  and lease-lifecycle transports plus an attempt plan bound to exact run generation/epoch, subagent
+  attempt, budgets, and a NanoCyber-native engagement ID. Enabled Test/Fix routing fails closed
+  before model execution and records that host fallback is forbidden. The companion now has an
+  opt-in running admission/scheduler/cancellation service, but no capability inventory, consumer
+  typed-job/receipt/status API, or cross-product engagement binding, so live sandbox execution
+  correctly remains unavailable. See `../nanocyber-sandboxed-subagents-plan-2026-10.md`.
+- Doctor reports provider credential presence and source without ever returning a value. Its
+  InferenceBridge endpoint diagnosis follows the same configuration precedence as runtime startup,
+  so an active LocalAppData port 8804 configuration is not falsely overridden by a stale lower-
+  precedence port 8800 file.
 - OpenRouter is optional and UI-only for keys. Catalogue limits seed sensible cloud context/output
   defaults. A composer selection is a one-task boost and resets to local afterward.
 - Local/Hugging Face catalogue models use code-owned Qwen3.8, Qwen3.6, Qwen3.5, and Gemma4 templates before profile
@@ -247,11 +348,12 @@ The pre-split full inventory is preserved in
   Replacement scans expose live metadata-only path/file/chunk progress and a responsive Cancel
   action; workspace switching is blocked until the scan completes or cancels, and shutdown waits
   briefly for rollback before closing SQLite. Doctor and Services report the same index health.
-  The rich-format registry adds readable PDF and DOCX/PPTX/XLSX/ODS text, bounded ZIP and TAR/TGZ
-  inventory metadata, SQLite schema metadata, and PE/ELF structural metadata. Archive member bodies
-  and SQLite row values are not indexed. Expanded bytes, archive/metadata entries and extractor time
-  are limited; corrupt, encrypted, scanned/no-text and over-expanded inputs remain explicit
-  non-indexed manifest entries.
+  The rich-format registry adds readable PDF and DOCX/PPTX/XLSX/ODS text, bounded ZIP/TAR/TGZ/7z
+  inventory metadata, SQLite schema metadata, and PE/ELF structural metadata. A scanned PDF may fall
+  back to local Poppler/Tesseract OCR one page at a time under page, image, output, and extractor-time
+  limits; missing OCR tools are reported as explicit non-coverage. Archive member bodies and SQLite
+  row values are not indexed. Expanded bytes, archive/metadata entries and extractor time are
+  limited; corrupt, encrypted and over-expanded inputs remain explicit non-indexed manifest entries.
   Incremental refresh now creates a fresh immutable generation while copying only SHA-verified
   unchanged chunks and re-extracting changed/new files; deletions disappear only when the complete
   replacement commits. The Files card exposes manual **Refresh changes**, exact reused/changed/
@@ -285,10 +387,11 @@ The pre-split full inventory is preserved in
 
 - Web search selects SearXNG, Brave, then DuckDuckGo fallback, with per-task budgets and ranked source
   quality. Fetch and browser tools cover readable pages and interactive sites.
-- Readable PDFs, DOCX/PPTX/XLSX/ODS text, ZIP and TAR/TGZ inventories, SQLite schema metadata, and
-  PE/ELF structural metadata now participate in workspace indexing and keyword search. Scanned-PDF
-  OCR and 7z remain on the repository-intelligence plan. Archive member bodies and SQLite row values
-  are deliberately excluded; any future row sampling requires a separate explicit privacy policy.
+- Readable PDFs, scanned-PDF OCR, DOCX/PPTX/XLSX/ODS text, ZIP/TAR/TGZ/7z inventories, SQLite schema
+  metadata, and PE/ELF structural metadata now participate in workspace indexing and keyword search.
+  OCR remains local and bounded and reports missing Poppler/Tesseract rather than false coverage. 7z
+  remains metadata-only. Archive member bodies and SQLite row values are deliberately excluded; any
+  future row sampling requires a separate explicit privacy policy.
 - The Files card can add exact files or folders as explicit read-only knowledge sources. Sources
   persist per authoritative workspace, are visible/removable in Chat, and affect only the immutable
   index policy—not file-tool scope or engagement authorization. Changing sources makes the previous
@@ -355,8 +458,31 @@ deterministic harness, canonical-envelope override isolation, hostile-content ch
 and tool identities, repeated Agent Eval telemetry, full Go tests, vet, app/tools race tests,
 frontend production build, clean Wails production build, and a native Benchmark smoke all passed.
 The rebuilt app reported pass^5, 7/7 fixtures, 105/105 attempts, hostile guard pass, and zero model
-calls against the selected Gemma profile/workspace context. The full live model Agent Eval x5 remains
-an explicit separate closure gate. See `verification.md`.
+calls against the selected Gemma profile/workspace context. The full live model Agent Eval x5 is a
+separate closure gate and has now been exercised without closing the milestone. See `verification.md`.
+
+The 2026-11-24 follow-up adds pre-dispatch enforcement of explicit IP-literal exclusions from the
+sealed operator objective across tool arguments, including plans and delegated calls. A rejected
+proposal is retained for audit and stops the run before effects. Completion checks require direct
+verification or failure-propagating `&&` chains; masked exits and quoted success text are not proof.
+Standalone `go vet` can provide compiler/type-check evidence. Focused/full/race/build gates pass.
+The hardened UI Gate 1 report `agent-eval-20261124-204231` finished 9/12 with zero unsupported
+completions, policy blocks, or human interventions. The exclusion fixture passed; masked compile
+verification remained blocked, while grep/edit exceeded its continuation allowance. A third failure
+was a `tail/head -n` scorer false negative, now regression-fixed. The final scorer patch has not had
+another live Gate 1; x5 remains locked and RVN stays supervised-only.
+
+On 2026-11-24 the exact RVN profile (`RVN-Q4_K_M-multilingual-mtp.gguf`, InferenceBridge, 35K,
+thinking/preservation on, draft-MTP `n=2`) passed a fresh native UI Gate 1 at 12/12 in report
+`agent-eval-20261124-184627`, with zero unsupported completions, tool errors, policy violations, or
+human interventions. The required x5 report `agent-eval-20261124-185651` did not pass: 54/60 raw
+attempts and 8/12 fixtures across all five rounds. Four scorer false negatives exposed by that run
+are regression-fixed: alternate-valid compile repair scoring, successful content-verification shell
+commands, and plan-before-grep ordering. Replay-equivalent accounting becomes 58/60 and 10/12, but
+this is not a corrected live pass^5. The two remaining failures are genuine RVN behavior: masked
+verification (`go vet ... || true`) and a forbidden stale IP copied into `todo_write`. RVN therefore
+remains supervised-only for unattended loops. After a deliberate model/profile/control change,
+require a fresh 12/12 Gate 1 and a clean native x5 before closing Context M5.
 
 On 2026-07-23 the repaired live Huihui 27B/35K Gate 1 reached 11/12 after product-level scorer,
 overwrite-protection, controller-message, completion-rail, planning-only, and cache-invalidation

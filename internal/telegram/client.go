@@ -96,37 +96,11 @@ func (c *Client) DeleteWebhook(ctx context.Context, dropPendingUpdates bool) err
 }
 
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
-	htmlText := TelegramHTMLFromMarkdownish(text)
-	chunks := SplitTelegramHTML(htmlText)
-	var firstID int64
-	for i, chunk := range chunks {
-		msgID, err := c.sendMessageChunk(ctx, chatID, chunk)
-		if err != nil {
-			return firstID, err
-		}
-		if i == 0 {
-			firstID = msgID
-		}
-	}
-	return firstID, nil
+	return c.SendMessageWithOptions(ctx, chatID, text, MessageOptions{})
 }
 
 func (c *Client) EditMessage(ctx context.Context, chatID, messageID int64, text string) error {
-	payload := map[string]any{
-		"chat_id":                  chatID,
-		"message_id":               messageID,
-		"text":                     TelegramHTMLFromMarkdownish(text),
-		"parse_mode":               "HTML",
-		"disable_web_page_preview": true,
-	}
-	var out APIResponse[json.RawMessage]
-	if err := c.doJSON(ctx, http.MethodPost, "editMessageText", payload, &out); err != nil {
-		return err
-	}
-	if !out.OK {
-		return fmt.Errorf("editMessageText failed: %s", out.Description)
-	}
-	return nil
+	return c.EditMessageWithOptions(ctx, chatID, messageID, text, MessageOptions{})
 }
 
 func (c *Client) DeleteMessage(ctx context.Context, chatID, messageID int64) error {
@@ -160,7 +134,7 @@ func (c *Client) DownloadFile(ctx context.Context, filePath string) ([]byte, err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, c.transportError("downloadFile", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
@@ -195,37 +169,24 @@ func (c *Client) sendMessageChunk(ctx context.Context, chatID int64, text string
 }
 
 func (c *Client) doJSON(ctx context.Context, method, apiMethod string, payload any, out any) error {
-	var body io.Reader
-	if payload != nil {
-		data, err := json.Marshal(payload)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.methodURL(apiMethod), body)
-	if err != nil {
-		return err
-	}
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s HTTP %d: %s", apiMethod, resp.StatusCode, strings.TrimSpace(string(data)))
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return c.requestJSON(ctx, method, apiMethod, payload, out)
 }
 
 func (c *Client) sendMultipartFile(ctx context.Context, apiMethod, field string, chatID int64, data []byte, filename, mimeType string) error {
+	return c.sendMultipartFileOptions(ctx, apiMethod, field, chatID, data, filename, mimeType, MessageOptions{})
+}
+
+func (c *Client) sendMultipartFileOptions(ctx context.Context, apiMethod, field string, chatID int64, data []byte, filename, mimeType string, options MessageOptions) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	_ = writer.WriteField("chat_id", fmt.Sprintf("%d", chatID))
+	if options.ThreadID != 0 {
+		_ = writer.WriteField("message_thread_id", fmt.Sprintf("%d", options.ThreadID))
+	}
+	if options.ReplyToMessageID != 0 {
+		reply, _ := json.Marshal(map[string]any{"message_id": options.ReplyToMessageID, "allow_sending_without_reply": true})
+		_ = writer.WriteField("reply_parameters", string(reply))
+	}
 	part, err := writer.CreateFormFile(field, filename)
 	if err != nil {
 		return err
@@ -246,15 +207,23 @@ func (c *Client) sendMultipartFile(ctx context.Context, apiMethod, field string,
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return c.transportError(apiMethod, err)
 	}
 	defer resp.Body.Close()
 	var out APIResponse[json.RawMessage]
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return err
+	dataOut, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024+1))
+	if err != nil || len(dataOut) > 2*1024*1024 {
+		return &APIError{Method: apiMethod, Description: "unconfirmed multipart response", Uncertain: true}
 	}
-	if !out.OK {
-		return fmt.Errorf("%s failed: %s", apiMethod, out.Description)
+	if err := json.Unmarshal(dataOut, &out); err != nil {
+		return &APIError{Method: apiMethod, Description: "unconfirmed malformed multipart response", Uncertain: true}
+	}
+	if resp.StatusCode >= 400 || !out.OK {
+		code := out.ErrorCode
+		if code == 0 {
+			code = resp.StatusCode
+		}
+		return &APIError{Method: apiMethod, Code: code, Description: c.redact(out.Description), Uncertain: code >= 500}
 	}
 	return nil
 }

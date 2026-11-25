@@ -15,7 +15,8 @@ const closeTo = (actual: number, expected: number) => Math.abs(actual - expected
 
 export function isQwen38Profile(profile: Profile | undefined): boolean {
   if (!profile) return false
-  return /qwen[\s._-]*3[\s._-]*8/i.test(`${profile.name} ${profile.model_id}`)
+  const identity = `${profile.name} ${profile.model_id}`
+  return /qwen[\s._-]*3[\s._-]*8/i.test(identity) || /RVN-Q4_K_M-multilingual-mtp/i.test(identity)
 }
 
 export function QwenProfileGuide({
@@ -40,13 +41,15 @@ export function QwenProfileGuide({
   const localContextReady = profile.ctx_tokens === 35000
   const kvReady = (profile.kv_cache_precision || 'f16') === 'f16' &&
     (profile.kv_cache_type_k || 'f16') === 'f16' && (profile.kv_cache_type_v || 'f16') === 'f16'
-  const mtpReady = profile.spec_type === 'draft-mtp' && profile.spec_draft_n_max === 2
+  const mtpReady = profile.spec_type === 'draft-mtp' && profile.spec_draft_n_max > 0
+  const mtpValue = mtpReady ? `n=${profile.spec_draft_n_max} · benchmark required` : 'Off or server default'
+  const modelLabel = /RVN-Q4_K_M-multilingual-mtp/i.test(profile.model_id) ? 'RVN / Qwen 3.8' : 'Qwen 3.8'
 
   return (
-    <section className="qwen-profile-guide" aria-label="Qwen 3.8 local setup">
+    <section className="qwen-profile-guide" aria-label={`${modelLabel} local setup`}>
       <div className="qwen-guide-head">
         <div>
-          <div className="qwen-guide-kicker">Qwen 3.8 · local agent setup</div>
+          <div className="qwen-guide-kicker">{modelLabel} · local agent setup</div>
           <h4>Recommended starting point for this RTX 3090</h4>
           <p>
             Qwen supports a much larger native window. Mauler keeps this local profile at the measured
@@ -64,7 +67,7 @@ export function QwenProfileGuide({
         <GuideCheck ready={profile.preserve_thinking} label="Reasoning continuity" value={profile.preserve_thinking ? 'Preserved between turns' : 'Not preserved'} />
         <GuideCheck ready={localContextReady} label="Local context" value={`${profile.ctx_tokens.toLocaleString()} tokens`} />
         <GuideCheck ready={kvReady} label="KV cache" value={`${(profile.kv_cache_precision || 'f16').toUpperCase()} quality mode`} />
-        <GuideCheck ready={mtpReady} label="MTP draft" value={mtpReady ? 'n=2 · benchmark required' : 'Off or custom'} review />
+        <GuideCheck ready={mtpReady} label="MTP draft" value={mtpValue} review />
       </div>
 
       <div className="qwen-reasoning-control">

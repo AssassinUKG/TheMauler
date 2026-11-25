@@ -26,6 +26,7 @@ import './ProjectsPage.css'
 
 interface Props {
   version: number
+  onBeforeWorkspaceChange: (nextPath?: string) => Promise<boolean>
   onProjectChanged: (project: LabProfile, previousName: string) => void
   onOpenEngagement: () => void
   onPrepareEngagementRun: (prompt: string) => void
@@ -33,7 +34,7 @@ interface Props {
 
 const defaultFolders = ['notes', 'scans', 'loot', 'scripts', 'screenshots']
 
-export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPrepareEngagementRun }: Props) {
+export function ProjectsPage({ version, onBeforeWorkspaceChange, onProjectChanged, onOpenEngagement, onPrepareEngagementRun }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [cwd, setCwd] = useState('')
   const [selectedId, setSelectedId] = useState('')
@@ -149,6 +150,10 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
     }
     const previousName = projects.find(item => item.id === activeId)?.name || settings.context.lab.name || 'previous workspace'
     if (activate) {
+      if (!(await onBeforeWorkspaceChange(profile.workspace_dir))) {
+        showStatus('Workspace change cancelled; editor changes kept')
+        return null
+      }
       await ensureProjectFolders(profile.workspace_dir, foldersFromDraft(folderDraft))
     }
     await UpdateSettings(next)
@@ -184,6 +189,10 @@ export function ProjectsPage({ version, onProjectChanged, onOpenEngagement, onPr
     if (!nextActiveProfile) {
       setDeleteBusy(false)
       showStatus('Could not choose the next active project')
+      return
+    }
+    if (deletingActive && !(await onBeforeWorkspaceChange(nextActiveProfile.workspace_dir))) {
+      showStatus('Project removal cancelled; editor changes kept')
       return
     }
     const next: Settings = {

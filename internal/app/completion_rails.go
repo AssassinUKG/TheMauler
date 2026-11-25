@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -15,11 +16,13 @@ import (
 var completionStopwords = map[string]bool{
 	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true, "be": true,
 	"by": true, "for": true, "from": true, "in": true, "into": true, "it": true,
-	"of": true, "on": true, "or": true, "please": true, "the": true, "this": true,
+	"of": true, "on": true, "or": true, "please": true, "that": true, "the": true, "this": true,
 	"to": true, "with": true, "you": true, "your": true, "only": true, "after": true,
 	"before": true, "then": true, "now": true, "current": true, "existing": true,
-	"both": true, "finish": true, "present": true, "project": true, "package": true,
+	"both": true, "finish": true, "finishing": true, "present": true, "project": true, "package": true,
 	"using": true, "tool": true, "shell": true, "redirection": true,
+	"containing": true, "through": true, "numbered": true, "true": true,
+	"later": true, "earlier": true,
 }
 
 var completionActionWords = map[string]bool{
@@ -34,13 +37,19 @@ var shortGoalFeatures = map[string]bool{
 
 // runCompletionRails checks goal coverage and deliverable existence. By default
 // it records advisory verdicts; cfg controls whether failures block completion.
-func runCompletionRails(run *TaskRun, cfg *settings.Settings) []VerifyVerdict {
+func runCompletionRails(run *TaskRun, cfg *settings.Settings, verification []VerifyVerdict) []VerifyVerdict {
 	if run == nil || cfg == nil {
 		return nil
 	}
 	blocking := cfg.Agents.ReviewLoop.CompletionBlocking
 	var verdicts []VerifyVerdict
-	features := extractGoalFeatures(run.Prompt)
+	trustedPrompt := taskRoutingPrompt(*run)
+	exactVerdicts, exclusive := exactFileCompletionVerdicts(*run)
+	verdicts = append(verdicts, exactVerdicts...)
+	features := extractGoalFeatures(trustedPrompt)
+	if exclusive {
+		features = nil
+	}
 	if len(features) > 0 {
 		coverage := goalFeatureCoverage(*run, features)
 		missing := uncoveredGoalFeatures(coverage, features)
@@ -54,16 +63,25 @@ func runCompletionRails(run *TaskRun, cfg *settings.Settings) []VerifyVerdict {
 				improvements = append(improvements, fmt.Sprintf("Goal feature %q was not clearly addressed.", feature))
 			}
 		}
+		// An operator-configured test gate measures behavior. Keyword coverage
+		// still explains possible gaps, but wording alone cannot veto that gate.
+		blockingCoverage := blocking && len(missing) > 0
+		if blockingCoverage && controlNeedsProjectVerification(*run) && len(cfg.Agents.ReviewLoop.VerifyCommands) > 0 && slices.ContainsFunc(verification, func(verdict VerifyVerdict) bool {
+			return verdict.Gate == "test" && verdict.Status == "pass"
+		}) {
+			blockingCoverage = false
+			summary += " Configured project tests passed, so keyword coverage is advisory."
+		}
 		verdicts = append(verdicts, VerifyVerdict{
 			Gate:         "completion",
 			Status:       status,
-			Blocking:     blocking && status != "pass",
+			Blocking:     blockingCoverage,
 			Summary:      summary,
 			Improvements: improvements,
 			Evidence:     formatGoalFeatureEvidence(features, coverage),
 		})
 	}
-	if promptImpliesDeliverable(run.Prompt) {
+	if promptImpliesDeliverable(trustedPrompt) {
 		status := "pass"
 		summary := "Deliverable rail passed: file/artifact/evidence output exists."
 		var improvements []string
@@ -164,8 +182,12 @@ func uncoveredGoalFeatures(coverage map[string]string, features []string) []stri
 }
 
 type completionEvidenceItem struct {
-	source string
-	text   string
+	source     string
+	text       string
+	toolName   string
+	toolIndex  int
+	toolInput  string
+	toolResult string
 }
 
 func goalFeatureCoverage(run TaskRun, features []string) map[string]string {
@@ -174,7 +196,9 @@ func goalFeatureCoverage(run TaskRun, features []string) map[string]string {
 	for _, feature := range features {
 		needle := strings.ToLower(feature)
 		for _, item := range items {
-			if strings.Contains(strings.ToLower(item.text), needle) {
+			haystack := strings.ToLower(item.source + "\n" + item.text)
+			textCoverage := item.toolName == "" && item.source != "successful verification command" && strings.Contains(haystack, needle)
+			if textCoverage || verificationEvidenceCoversFeature(item, needle) || toolActionEvidenceCoversFeature(item, needle, features, run.Tools) {
 				coverage[feature] = item.source
 				break
 			}
@@ -183,14 +207,161 @@ func goalFeatureCoverage(run TaskRun, features []string) map[string]string {
 	return coverage
 }
 
-func independentCompletionEvidence(run TaskRun) []completionEvidenceItem {
-	var items []completionEvidenceItem
-	paths := map[string]bool{}
-	for _, tool := range run.Tools {
+// toolActionEvidenceCoversFeature translates a small set of controller-owned,
+// successful tool events into procedural evidence. It deliberately inspects
+// tool identity, ordering, structured arguments, and controller status rather
+// than trusting assistant prose or arbitrary tool-result text.
+func toolActionEvidenceCoversFeature(item completionEvidenceItem, feature string, goalFeatures []string, tools []TaskToolEvent) bool {
+	name := strings.ToLower(strings.TrimSpace(item.toolName))
+	if name == "" {
+		return false
+	}
+	if feature == "first" {
+		if containsAnyFeature(goalFeatures, "grep") {
+			return name == "grep" && toolPrecedesFirstSuccessful(item.toolIndex, tools, "edit", "edit_file")
+		}
+		if containsAnyFeature(goalFeatures, "todo_write") {
+			return name == "todo_write" && toolPrecedesFirstSuccessful(item.toolIndex, tools, "write", "write_file")
+		}
+		return item.toolIndex == 0
+	}
+	obj := toolInputObject(item.toolInput)
+	switch name {
+	case "todo_write":
+		switch feature {
+		case "todo_write", "plan":
+			return todoPlanItemCount(obj) > 0
+		case "short":
+			count := todoPlanItemCount(obj)
+			return count > 0 && count <= 8
+		}
+	case "grep":
+		if !toolResultHasObservedMatch(item.toolResult) {
+			return false
+		}
+		switch feature {
+		case "grep", "find", "marker", "verify":
+			return true
+		case "todo":
+			return toolStringArgumentContains(obj, "pattern", feature)
+		}
+	case "edit", "edit_file":
+		if !hasStructuredReplacement(obj) {
+			return false
+		}
+		switch feature {
+		case "edit", "replace", "definition":
+			return true
+		}
+	case "write", "write_file":
+		switch feature {
+		case "write", "model-facing":
+			return true
+		case "append", "chunk", "overwrite":
+			return toolBoolArgument(obj, "append")
+		}
+	}
+	return false
+}
+
+func toolPrecedesFirstSuccessful(toolIndex int, tools []TaskToolEvent, laterNames ...string) bool {
+	for index, tool := range tools {
 		if !strings.EqualFold(tool.Status, "done") {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(tool.Name))
+		if slices.Contains(laterNames, name) {
+			return toolIndex < index
+		}
+	}
+	return false
+}
+
+func toolInputObject(input string) map[string]any {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(input), &obj); err != nil {
+		return nil
+	}
+	return obj
+}
+
+func todoPlanItemCount(obj map[string]any) int {
+	if obj == nil || !strings.EqualFold(strings.TrimSpace(fmt.Sprint(obj["action"])), "replace") {
+		return 0
+	}
+	items, ok := obj["items"].([]any)
+	if !ok {
+		return 0
+	}
+	return len(items)
+}
+
+func toolStringArgumentContains(obj map[string]any, key, want string) bool {
+	value, ok := obj[key].(string)
+	return ok && strings.Contains(strings.ToLower(value), strings.ToLower(want))
+}
+
+func toolBoolArgument(obj map[string]any, key string) bool {
+	value, ok := obj[key].(bool)
+	return ok && value
+}
+
+func hasStructuredReplacement(obj map[string]any) bool {
+	if obj == nil {
+		return false
+	}
+	oldValue, oldOK := obj["old"].(string)
+	newValue, newOK := obj["new"].(string)
+	return oldOK && newOK && oldValue != newValue
+}
+
+func toolResultHasObservedMatch(result string) bool {
+	lower := strings.ToLower(strings.TrimSpace(result))
+	return lower != "" && !hasAny(lower, "no match", "not found", "0 matches")
+}
+
+// verificationEvidenceCoversFeature supplies narrow semantic aliases for a
+// successful, independently executed build command. A compiler does not need
+// to print the words "compile error fixed" when exit-zero build evidence proves
+// exactly that outcome. Keep this restricted to trusted verification tools;
+// model prose and ordinary tool claims must never satisfy blocking coverage.
+func verificationEvidenceCoversFeature(item completionEvidenceItem, feature string) bool {
+	if item.source != "successful verification command" {
+		return false
+	}
+	if feature == "verify" {
+		return true
+	}
+	_, compileVerified := verificationCommandEvidence(item.toolInput)
+	if !compileVerified {
+		return false
+	}
+	switch feature {
+	case "build", "compile", "error", "fixed":
+		return true
+	default:
+		return false
+	}
+}
+
+func independentCompletionEvidence(run TaskRun) []completionEvidenceItem {
+	var items []completionEvidenceItem
+	paths := map[string]bool{}
+	for index, tool := range run.Tools {
+		if !strings.EqualFold(tool.Status, "done") {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(tool.Name))
+		switch name {
+		case "todo_write", "grep", "edit", "edit_file", "write", "write_file":
+			items = append(items, completionEvidenceItem{
+				source:     "successful " + name + " action",
+				toolName:   name,
+				toolIndex:  index,
+				toolInput:  tool.Input,
+				toolResult: tool.Result,
+			})
+		}
 		if isWriteTool(name) {
 			if path := pathFromToolInput(tool.Input); path != "" {
 				paths[path] = true
@@ -201,8 +372,9 @@ func independentCompletionEvidence(run TaskRun) []completionEvidenceItem {
 		case "evidence_bundle", "file_changes":
 			items = append(items, completionEvidenceItem{source: name, text: tool.Result})
 		case "shell":
-			if looksLikeVerificationCommand(tool.Input) {
-				items = append(items, completionEvidenceItem{source: "successful verification command", text: tool.Input + "\n" + tool.Result})
+			command := shellCommandFromToolArgs([]byte(tool.Input))
+			if check, _ := verificationCommandEvidence(command); check {
+				items = append(items, completionEvidenceItem{source: "successful verification command", toolInput: command, text: tool.Result})
 			}
 		}
 	}
@@ -218,11 +390,6 @@ func independentCompletionEvidence(run TaskRun) []completionEvidenceItem {
 		items = append(items, completionEvidenceItem{source: "file " + path, text: path + "\n" + text})
 	}
 	return items
-}
-
-func looksLikeVerificationCommand(input string) bool {
-	lower := strings.ToLower(input)
-	return hasAny(lower, " test", "test ", "pytest", "go vet", "lint", "build", "compile", "check-types")
 }
 
 func formatGoalFeatureEvidence(features []string, coverage map[string]string) string {

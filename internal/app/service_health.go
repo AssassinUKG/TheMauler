@@ -23,6 +23,9 @@ func (a *App) GetServiceHealth() []ServiceHealth {
 	now := time.Now().Format(time.RFC3339)
 	audioHealth := a.GetAudioHealth()
 	services := []ServiceHealth{audioServiceHealth(audioHealth, now)}
+	nanoCyber := a.GetNanoCyberHealth()
+	services = append(services, nanoCyberServiceHealth(nanoCyber, now))
+	services = append(services, a.mcpServiceHealth(now))
 
 	telegram := a.telegramRuntimeDiagnostics()
 	telegramStatus := "disabled"
@@ -105,6 +108,56 @@ func (a *App) GetServiceHealth() []ServiceHealth {
 	a.bgMu.Unlock()
 	services = append(services, ServiceHealth{ID: "jobs", Name: "Background jobs", Status: activeCountStatus(jobs), Summary: fmt.Sprintf("%d running", jobs), UpdatedAt: now})
 	return services
+}
+
+func (a *App) mcpServiceHealth(now string) ServiceHealth {
+	statuses := a.GetMCPStatus()
+	state := "disabled"
+	summary := "No MCP servers configured"
+	connected, configured, failed := 0, 0, 0
+	metadata := make(map[string]string)
+	for index, status := range statuses {
+		if status.Configured {
+			configured++
+		}
+		if status.Connected {
+			connected++
+		}
+		if status.State == "error" {
+			failed++
+		}
+		if index < 4 {
+			metadata[fmt.Sprintf("server_%d", index+1)] = fmt.Sprintf("%s · %s · %s · %d tools", status.ID, status.Transport, status.State, status.ToolCount)
+		}
+	}
+	if configured > 0 {
+		state = "idle"
+		summary = fmt.Sprintf("%d configured · %d connected", configured, connected)
+	}
+	if connected > 0 {
+		state = "ready"
+	}
+	if failed > 0 {
+		state = "error"
+		summary += fmt.Sprintf(" · %d error", failed)
+	}
+	return ServiceHealth{ID: "mcp", Name: "Model Context Protocol", Status: state, Summary: summary, UpdatedAt: now, Metadata: metadata}
+}
+
+func nanoCyberServiceHealth(health NanoCyberHealth, now string) ServiceHealth {
+	metadata := map[string]string{
+		"endpoint":              health.Endpoint,
+		"api_version":           health.APIVersion,
+		"credential_configured": strconv.FormatBool(health.CredentialConfigured),
+		"compatible":            strconv.FormatBool(health.Compatible),
+		"lease_schema_version":  strconv.FormatUint(uint64(health.LeaseSchemaVersion), 10),
+		"capabilities":          strings.Join(health.Capabilities, ", "),
+		"environment_profiles":  strings.Join(health.EnvironmentProfiles, ", "),
+	}
+	return ServiceHealth{
+		ID: "nanocyber", Name: "NanoCyber sandbox", Status: health.Status,
+		Summary: health.Summary, Detail: health.Detail, UpdatedAt: now, Metadata: metadata,
+	}
 }
 
 func audioServiceHealth(health AudioHealth, now string) ServiceHealth {

@@ -77,3 +77,18 @@ func TestNonHTTPInteractiveCommandIsNotRewritten(t *testing.T) {
 		t.Fatalf("non-HTTP live command should not be rewritten: %#v", got)
 	}
 }
+
+func TestStandaloneBackgroundPollBypassesSharedTerminal(t *testing.T) {
+	standalone := llm.ToolCallDef{Function: llm.FunctionCall{
+		Name:      "shell",
+		Arguments: json.RawMessage(`{"job":"isolated-7"}`),
+	}}
+	if !shellCallPollsStandaloneBackground(standalone) {
+		t.Fatal("isolated background id must route back to the standalone manager")
+	}
+	shared := standalone
+	shared.Function.Arguments = json.RawMessage(`{"job":"terminal-7"}`)
+	if shellCallPollsStandaloneBackground(shared) {
+		t.Fatal("shared-terminal job id must stay on the shared manager")
+	}
+}

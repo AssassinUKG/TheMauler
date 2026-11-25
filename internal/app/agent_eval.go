@@ -512,9 +512,10 @@ func runOneAgentEvalScenario(cfg settings.Settings, profiles settings.ProfilesFi
 		cfg.Agents.ReviewLoop.ReviewerPass = *scenario.ReviewerPass
 	}
 	modeName := firstNonEmpty(scenario.Mode, "Builder")
-	mode := applyPresetToMode(baseMode(modeName), cfg.Agents.Presets)
+	mode := configuredAgentMode(modeName, cfg.Agents.Presets)
 	userMsg := llm.NewTextMessage(llm.RoleUser, scenario.Prompt)
 	run := startTaskRun(scenario.Prompt, mode.Name, cfg.ActiveProfile, profile.ModelID)
+	run.setAgentDefinition(mode)
 	finished := runApp.runAgentLoop(context.Background(), userMsg, profile, &cfg, true, mode, nil, nil, run)
 	result.DurationMs = time.Since(start).Milliseconds()
 	result.ModelID, result.Provider, result.ContextTokens = profile.ModelID, profile.Provider, profile.CtxTokens

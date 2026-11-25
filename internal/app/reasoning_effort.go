@@ -209,7 +209,9 @@ func configuredReasoningEffort(cfg settings.Settings, mode AgentMode) string {
 func effortToThinking(effort string, profile settings.Profile) effortPlan {
 	switch normaliseReasoningEffort(effort) {
 	case "minimal", "none":
-		return effortPlan{enableThinking: false, maxTokensCap: 1024, coding: true}
+		// Reasoning depth controls thinking, not the length of the visible
+		// answer or a tool's JSON arguments. The response budget owns that limit.
+		return effortPlan{enableThinking: false, maxTokensCap: 0, coding: true}
 	case "low":
 		if isQwen38Profile(profile) {
 			return effortPlan{enableThinking: profile.Thinking, maxTokensCap: 0, coding: true}

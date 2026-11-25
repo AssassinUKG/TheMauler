@@ -55,6 +55,7 @@ func Registry() []RuntimeProfile {
 			MatchAliases: []string{
 				"Qwen3.8-27B-Q4_K_M",
 				"Qwen3.8-27B-Uncensored-Q4_K_M",
+				"RVN-Q4_K_M-multilingual-mtp",
 			},
 			Backend:       "llama.cpp",
 			Quant:         "Q4_K_M",

@@ -153,12 +153,14 @@ func buildAnthropicBody(model string, req llm.Request) ([]byte, error) {
 	if req.TopP != 0 {
 		body.TopP = &req.TopP
 	}
-	for _, tool := range req.Tools {
-		body.Tools = append(body.Tools, anthropicTool{
-			Name:        tool.Function.Name,
-			Description: tool.Function.Description,
-			InputSchema: tool.Function.Parameters,
-		})
+	if !strings.EqualFold(strings.TrimSpace(req.ToolChoice), "none") {
+		for _, tool := range req.Tools {
+			body.Tools = append(body.Tools, anthropicTool{
+				Name:        tool.Function.Name,
+				Description: tool.Function.Description,
+				InputSchema: tool.Function.Parameters,
+			})
+		}
 	}
 	switch req.ToolChoice {
 	case "required":

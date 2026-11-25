@@ -3,6 +3,7 @@ package repoindex
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -23,23 +25,28 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bodgit/sevenzip"
 	"github.com/ledongthuc/pdf"
 	_ "modernc.org/sqlite"
 )
 
 const (
 	pdfExtractorVersion         = "pdf-text-v1"
+	pdfOCRExtractorVersion      = "pdf-ocr-v1"
 	officeExtractorVersion      = "openxml-text-v1"
 	zipExtractorVersion         = "zip-inventory-v1"
 	tarExtractorVersion         = "tar-inventory-v1"
+	sevenZIPExtractorVersion    = "7z-inventory-v1"
 	sqliteExtractorVersion      = "sqlite-schema-v1"
 	peMetadataExtractorVersion  = "pe-metadata-v1"
 	elfMetadataExtractorVersion = "elf-metadata-v1"
 )
 
 var (
-	errExpandedLimit = errors.New("expanded output limit reached")
-	errEncrypted     = errors.New("encrypted archive member is unsupported")
+	errExpandedLimit  = errors.New("expanded output limit reached")
+	errEncrypted      = errors.New("encrypted archive member is unsupported")
+	errOCRUnavailable = errors.New("scanned PDF OCR is unavailable")
+	errOCRPageLimit   = errors.New("scanned PDF exceeds OCR page limit")
 )
 
 func richExtractorKind(path string) string {
@@ -57,6 +64,8 @@ func richExtractorKind(path string) string {
 		return "office"
 	case ".zip":
 		return "zip"
+	case ".7z":
+		return "7z"
 	case ".tar":
 		return "tar"
 	case ".db", ".sqlite", ".sqlite3":
@@ -101,6 +110,9 @@ func indexRichFile(ctx context.Context, path string, entry *ManifestEntry, polic
 	case "tar":
 		entry.Extractor, entry.Language, entry.Encoding = tarExtractorVersion, "archive-metadata", "utf-8"
 		err = extractTARInventory(ctx, path, policy, acc)
+	case "7z":
+		entry.Extractor, entry.Language, entry.Encoding = sevenZIPExtractorVersion, "archive-metadata", "utf-8"
+		err = extract7ZIPInventory(ctx, path, policy, acc)
 	case "sqlite":
 		entry.Extractor, entry.Language, entry.Encoding = sqliteExtractorVersion, "database-metadata", "utf-8"
 		err = extractSQLiteSchema(ctx, path, policy, acc)
@@ -128,6 +140,12 @@ func indexRichFile(ctx context.Context, path string, entry *ManifestEntry, polic
 			return nil
 		case errors.Is(err, errEncrypted):
 			entry.Status, entry.Detail = StatusEncrypted, err.Error()
+			return nil
+		case errors.Is(err, errOCRUnavailable):
+			entry.Status, entry.Detail = StatusUnsupported, err.Error()
+			return nil
+		case errors.Is(err, errOCRPageLimit):
+			entry.Status, entry.Detail = StatusExpansionLimit, err.Error()
 			return nil
 		default:
 			entry.Status, entry.Detail = StatusExtractorError, err.Error()
@@ -313,9 +331,141 @@ func extractPDF(ctx context.Context, path string, out *extractedChunkAccumulator
 		}
 	}
 	if !found {
+		return extractScannedPDFOCR(ctx, path, pages, out.policy, out)
+	}
+	return nil
+}
+
+type pdfOCRTools struct {
+	rasterize func(context.Context, string, int, string, int64) (string, error)
+	recognize func(context.Context, string, int64) (string, error)
+}
+
+func extractScannedPDFOCR(ctx context.Context, path string, pages int, policy ExtractorPolicy, out *extractedChunkAccumulator) error {
+	pdftoppm, pdfErr := exec.LookPath("pdftoppm")
+	tesseract, tessErr := exec.LookPath("tesseract")
+	if pdfErr != nil || tessErr != nil {
+		return fmt.Errorf("%w: install both pdftoppm (Poppler) and tesseract; no OCR text was indexed", errOCRUnavailable)
+	}
+	return extractScannedPDFOCRWith(ctx, path, pages, policy, out, pdfOCRTools{
+		rasterize: func(ctx context.Context, source string, page int, outputPrefix string, maxBytes int64) (string, error) {
+			args := []string{"-f", strconv.Itoa(page), "-l", strconv.Itoa(page), "-singlefile", "-r", "150", "-scale-to", "3000", "-png", source, outputPrefix}
+			if _, err := runCommandOutputBounded(ctx, maxBytes, pdftoppm, args...); err != nil {
+				return "", fmt.Errorf("render PDF page %d for OCR: %w", page, err)
+			}
+			imagePath := outputPrefix + ".png"
+			info, err := os.Stat(imagePath)
+			if err != nil {
+				return "", fmt.Errorf("render PDF page %d for OCR: output missing: %w", page, err)
+			}
+			if info.Size() > maxBytes {
+				return "", errExpandedLimit
+			}
+			return imagePath, nil
+		},
+		recognize: func(ctx context.Context, imagePath string, maxBytes int64) (string, error) {
+			text, err := runCommandOutputBounded(ctx, maxBytes, tesseract, imagePath, "stdout", "-l", "eng", "--psm", "6", "quiet")
+			if err != nil {
+				return "", fmt.Errorf("OCR image: %w", err)
+			}
+			return text, nil
+		},
+	})
+}
+
+func extractScannedPDFOCRWith(ctx context.Context, path string, pages int, policy ExtractorPolicy, out *extractedChunkAccumulator, tools pdfOCRTools) error {
+	if pages <= 0 {
+		return nil
+	}
+	if pages > policy.MaxOCRPages {
+		return fmt.Errorf("%w: PDF has %d pages; max_ocr_pages is %d", errOCRPageLimit, pages, policy.MaxOCRPages)
+	}
+	if tools.rasterize == nil || tools.recognize == nil {
+		return fmt.Errorf("%w: OCR toolchain is incomplete", errOCRUnavailable)
+	}
+	tempDir, err := os.MkdirTemp("", "mauler-pdf-ocr-")
+	if err != nil {
+		return fmt.Errorf("create OCR workspace: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	found := false
+	for pageNum := 1; pageNum <= pages; pageNum++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		remaining := policy.MaxExpandedBytes - out.extractedBytes
+		if remaining <= 0 {
+			return errExpandedLimit
+		}
+		prefix := filepath.Join(tempDir, fmt.Sprintf("page-%04d", pageNum))
+		imagePath, err := tools.rasterize(ctx, path, pageNum, prefix, remaining)
+		if err != nil {
+			return err
+		}
+		text, err := tools.recognize(ctx, imagePath, remaining)
+		if err != nil {
+			return fmt.Errorf("OCR PDF page %d: %w", pageNum, err)
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		found = true
+		out.entry.Extractor = pdfOCRExtractorVersion
+		out.entry.Language = "ocr-eng"
+		if err := out.append(fmt.Sprintf("[OCR PDF page %d of %d; engine=tesseract]\n%s\n", pageNum, pages, text)); err != nil {
+			return err
+		}
+	}
+	if !found {
 		return nil
 	}
 	return nil
+}
+
+type boundedCommandBuffer struct {
+	buf bytes.Buffer
+	max int64
+}
+
+func (b *boundedCommandBuffer) Write(p []byte) (int, error) {
+	if int64(b.buf.Len())+int64(len(p)) > b.max {
+		remaining := b.max - int64(b.buf.Len())
+		written := 0
+		if remaining > 0 {
+			written, _ = b.buf.Write(p[:remaining])
+		}
+		return written, errExpandedLimit
+	}
+	return b.buf.Write(p)
+}
+
+func runCommandOutputBounded(ctx context.Context, maxBytes int64, name string, args ...string) (string, error) {
+	if maxBytes <= 0 {
+		return "", errExpandedLimit
+	}
+	stdout := &boundedCommandBuffer{max: maxBytes}
+	stderr := &boundedCommandBuffer{max: minInt64(maxBytes, 64*1024)}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Run(); err != nil {
+		if errors.Is(err, errExpandedLimit) {
+			return "", errExpandedLimit
+		}
+		detail := strings.TrimSpace(stderr.buf.String())
+		if detail != "" {
+			return "", fmt.Errorf("%w: %s", err, detail)
+		}
+		return "", err
+	}
+	return stdout.buf.String(), nil
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func extractZIPInventory(ctx context.Context, path string, policy ExtractorPolicy, out *extractedChunkAccumulator) error {
@@ -394,6 +544,50 @@ func extractTARInventory(ctx context.Context, path string, policy ExtractorPolic
 	}
 	if entries == 0 {
 		return fmt.Errorf("TAR contains no entries")
+	}
+	return nil
+}
+
+func extract7ZIPInventory(ctx context.Context, path string, policy ExtractorPolicy, out *extractedChunkAccumulator) error {
+	reader, err := sevenzip.OpenReader(path)
+	if err != nil {
+		var readErr *sevenzip.ReadError
+		if errors.As(err, &readErr) && readErr.Encrypted {
+			return fmt.Errorf("%w: encrypted 7z headers", errEncrypted)
+		}
+		return fmt.Errorf("open 7z: %w", err)
+	}
+	defer reader.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(reader.File) == 0 {
+		return fmt.Errorf("7z contains no entries")
+	}
+	if len(reader.File) > policy.MaxArchiveEntries {
+		return errExpandedLimit
+	}
+	files := append([]*sevenzip.File(nil), reader.File...)
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	var logicalBytes uint64
+	for _, member := range files {
+		if member.UncompressedSize > uint64(policy.MaxExpandedBytes) || logicalBytes > uint64(policy.MaxExpandedBytes)-member.UncompressedSize {
+			return errExpandedLimit
+		}
+		logicalBytes += member.UncompressedSize
+	}
+	if err := out.append(fmt.Sprintf("[7z inventory: %d entries; logical_bytes=%d]\n", len(files), logicalBytes)); err != nil {
+		return err
+	}
+	for _, member := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info := member.FileInfo()
+		if err := out.append(fmt.Sprintf("%s\texpanded=%d\tdir=%t\tmode=%s\tmodified=%s\n",
+			filepath.ToSlash(member.Name), member.UncompressedSize, info.IsDir(), info.Mode().String(), member.Modified.UTC().Format(time.RFC3339))); err != nil {
+			return err
+		}
 	}
 	return nil
 }

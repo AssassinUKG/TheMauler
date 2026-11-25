@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
+import { lazy, Suspense, useState, useEffect, useCallback, useRef, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react'
 import { EventsOn } from './wailsjs/runtime'
 import { FileTree } from './components/FileTree'
 import { HermesSidebar } from './components/HermesSidebar'
@@ -7,21 +7,17 @@ import { ConversationMenu } from './components/ConversationMenu'
 import { ConversationCheckpointDialog } from './components/ConversationCheckpointDialog'
 import { LayoutMenu } from './components/LayoutMenu'
 import { UiIcon } from './components/UiIcon'
-import { FileViewer, type OpenFile } from './components/FileViewer'
+import {
+  dirtyPathBackedFiles,
+  markOpenFileSaved,
+  patchOpenFile,
+  prepareOpenFile,
+  sameWorkspacePath,
+  type OpenFile,
+  type OpenFilePatch,
+} from './editorTabs'
 import { AgentPanel } from './components/AgentPanel'
 import { RightInspector } from './components/RightInspector'
-import { LogsPage } from './components/LogsPage'
-import { MemoryPage } from './components/MemoryPage'
-import { BenchmarkPage } from './components/BenchmarkPage'
-import { LiveOpsPage } from './components/LiveOpsPage'
-import { BrainPage } from './components/BrainPage'
-import { ContextInspectorPage } from './components/ContextInspectorPage'
-import { ProjectsPage } from './components/ProjectsPage'
-import { EngagementPage } from './components/EngagementPage'
-import { TelegramPage } from './components/TelegramPage'
-import { DoctorPage } from './components/DoctorPage'
-import { SideChatPage } from './components/SideChatPage'
-import { ServicesPage } from './components/ServicesPage'
 import { StatusBar } from './components/StatusBar'
 import { SettingsModal } from './components/SettingsModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -48,6 +44,7 @@ import {
   PromoteScratchWorkspace,
   ResumeBrowserWorkflow,
   RespondConfirm,
+  SaveFileContent,
   SaveSession,
   StartConversation,
   SaveConversationCheckpoint,
@@ -65,6 +62,7 @@ import {
   GetSettings,
   GetHistoryStats,
   GetConversationMode,
+  GetActiveConversationName,
   ListTodos,
   SendMessage,
   SendMessageWithProfile,
@@ -86,6 +84,20 @@ import {
   type AgentDefinition,
 } from './wailsjs/go'
 import './App.css'
+
+const FileViewer = lazy(() => import('./components/FileViewer').then(module => ({ default: module.FileViewer })))
+const LogsPage = lazy(() => import('./components/LogsPage').then(module => ({ default: module.LogsPage })))
+const MemoryPage = lazy(() => import('./components/MemoryPage').then(module => ({ default: module.MemoryPage })))
+const BenchmarkPage = lazy(() => import('./components/BenchmarkPage').then(module => ({ default: module.BenchmarkPage })))
+const LiveOpsPage = lazy(() => import('./components/LiveOpsPage').then(module => ({ default: module.LiveOpsPage })))
+const BrainPage = lazy(() => import('./components/BrainPage').then(module => ({ default: module.BrainPage })))
+const ContextInspectorPage = lazy(() => import('./components/ContextInspectorPage').then(module => ({ default: module.ContextInspectorPage })))
+const ProjectsPage = lazy(() => import('./components/ProjectsPage').then(module => ({ default: module.ProjectsPage })))
+const EngagementPage = lazy(() => import('./components/EngagementPage').then(module => ({ default: module.EngagementPage })))
+const TelegramPage = lazy(() => import('./components/TelegramPage').then(module => ({ default: module.TelegramPage })))
+const DoctorPage = lazy(() => import('./components/DoctorPage').then(module => ({ default: module.DoctorPage })))
+const SideChatPage = lazy(() => import('./components/SideChatPage').then(module => ({ default: module.SideChatPage })))
+const ServicesPage = lazy(() => import('./components/ServicesPage').then(module => ({ default: module.ServicesPage })))
 
 function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace('#', '')
@@ -185,6 +197,8 @@ export interface ChatMessage {
   toolName?: string
   toolCallId?: string
   category?: 'reply' | 'tool' | 'status' | 'browser'
+  deliveryStatus?: string
+  stopReason?: string
 }
 
 type InspectorFocus = 'agent' | 'workspace' | 'facts' | 'commands' | 'activity'
@@ -214,6 +228,13 @@ interface ConfirmAction {
   cancelLabel?: string
   danger?: boolean
   onConfirm: () => void | Promise<void>
+}
+
+type DirtyEditorDecision = 'save' | 'discard' | 'cancel'
+
+interface DirtyEditorPrompt {
+  files: OpenFile[]
+  reason: string
 }
 
 export interface AgentActivity {
@@ -403,6 +424,9 @@ export default function App() {
   const [chatLane, setChatLane] = useState<'project' | 'quick'>('project')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileIdx, setActiveFileIdx] = useState(0)
+  const openFilesRef = useRef<OpenFile[]>([])
+  const dirtyEditorDecisionRef = useRef<((decision: DirtyEditorDecision) => void) | null>(null)
+  const [dirtyEditorPrompt, setDirtyEditorPrompt] = useState<DirtyEditorPrompt | null>(null)
   const [artifactOutput, setArtifactOutput] = useState('')
   const [artifactRunning, setArtifactRunning] = useState(false)
   const [activity, setActivity] = useState<AgentActivity[]>([])
@@ -479,6 +503,15 @@ export default function App() {
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [chatDraftRequest, setChatDraftRequest] = useState<{ id: string; text: string } | null>(null)
+
+  useEffect(() => {
+    openFilesRef.current = openFiles
+  }, [openFiles])
+
+  useEffect(() => () => {
+    dirtyEditorDecisionRef.current?.('cancel')
+    dirtyEditorDecisionRef.current = null
+  }, [])
 
 	// One-time migration from the earlier cockpit layout. Existing dimensions
 	// remain intact, but Chat starts with auxiliary work surfaces dismissed.
@@ -776,7 +809,9 @@ export default function App() {
                 cleanAssistantTranscriptText(message.content) === visible
               )
               return [
-                ...m,
+                ...m.map(message => message.role === 'assistant' && (!owner || message.runId === owner.run_id) && cleanAssistantTranscriptText(message.content) === visible
+                  ? { ...message, deliveryStatus: terminalStatus, stopReason }
+                  : message),
                 ...(!sameTurnAlreadyVisible ? [{
                 id: crypto.randomUUID(),
                 role: 'assistant' as const,
@@ -784,6 +819,8 @@ export default function App() {
                 thinking,
                 timestamp: Date.now(),
                 runId: owner?.run_id,
+                deliveryStatus: terminalStatus,
+                stopReason,
               }] : []),
               ...(!answerDelivered && stopReason ? [{
                 id: crypto.randomUUID(),
@@ -950,13 +987,17 @@ export default function App() {
           progress?: number
           current_step?: number
           total_steps?: number
+          connection_state?: string
         }
         if (!progress?.tool_call_id) return
         const percent = Math.max(0, Math.min(100, Math.round((progress.progress ?? 0) * 100)))
         const steps = progress.total_steps
           ? ` · step ${progress.current_step ?? 0}/${progress.total_steps}`
           : ''
-        const detail = `${progress.message || progress.status || 'Generating image'} · ${percent}%${steps}`
+        const connection = progress.connection_state
+        const detail = connection === 'disconnected' || connection === 'reconnecting'
+          ? `${connection === 'disconnected' ? 'Disconnected' : 'Reconnecting'} · ${progress.message || 'Waiting for InferenceBridge'}`
+          : `${progress.message || progress.status || 'Generating image'} · ${percent}%${steps}`
         setActivity(items => items.map(item => item.id === progress.tool_call_id
           ? { ...item, result: detail }
           : item))
@@ -1365,7 +1406,7 @@ export default function App() {
         setActiveFileIdx(existingIdx)
         return prev
       }
-      const next = [...prev, file]
+      const next = [...prev, prepareOpenFile(file)]
       setActiveFileIdx(next.length - 1)
       return next
     })
@@ -1382,16 +1423,94 @@ export default function App() {
     openOrFocusFile(file)
   }, [openOrFocusFile])
 
-  const closeFile = useCallback((idx: number) => {
+  const requestDirtyEditorDecision = useCallback((files: OpenFile[], reason: string): Promise<DirtyEditorDecision> => {
+    if (files.length === 0) return Promise.resolve('discard')
+    dirtyEditorDecisionRef.current?.('cancel')
+    return new Promise(resolve => {
+      dirtyEditorDecisionRef.current = resolve
+      setDirtyEditorPrompt({ files, reason })
+    })
+  }, [])
+
+  const resolveDirtyEditorDecision = useCallback((decision: DirtyEditorDecision) => {
+    const resolve = dirtyEditorDecisionRef.current
+    dirtyEditorDecisionRef.current = null
+    setDirtyEditorPrompt(null)
+    resolve?.(decision)
+  }, [])
+
+  useEffect(() => {
+    if (!dirtyEditorPrompt) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') resolveDirtyEditorDecision('cancel')
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [dirtyEditorPrompt, resolveDirtyEditorDecision])
+
+  const saveEditorFiles = useCallback(async (files: OpenFile[]): Promise<boolean> => {
+    for (const file of files) {
+      if (!file.path) return false
+      try {
+        await SaveFileContent(file.path, file.content)
+        setOpenFiles(current => markOpenFileSaved(current, file.path, file.content))
+      } catch (error) {
+        const index = openFilesRef.current.findIndex(candidate => candidate.path === file.path)
+        if (index >= 0) setActiveFileIdx(index)
+        setCenterTab('file')
+        pushToast(`Could not save ${file.name}: ${String(error)}. Workspace change cancelled.`, 'danger')
+        return false
+      }
+    }
+    return true
+  }, [pushToast])
+
+  const confirmWorkspaceEditorTransition = useCallback(async (nextPath = ''): Promise<boolean> => {
+    if (nextPath && sameWorkspacePath(workspaceRootLabel, nextPath)) return true
+    const dirtyFiles = dirtyPathBackedFiles(openFilesRef.current)
+    if (dirtyFiles.length === 0) return true
+    const decision = await requestDirtyEditorDecision(
+      dirtyFiles,
+      'Changing workspace closes path-backed editor tabs. Save these changes first, discard them, or keep editing.',
+    )
+    if (decision === 'cancel') return false
+    if (decision === 'save') return saveEditorFiles(dirtyFiles)
+    return true
+  }, [requestDirtyEditorDecision, saveEditorFiles, workspaceRootLabel])
+
+  const handleUpdateFile = useCallback((idx: number, patch: OpenFilePatch) => {
+    setOpenFiles(current => patchOpenFile(current, idx, patch))
+  }, [])
+
+  const handleFileSaved = useCallback((idx: number, content: string) => {
+    const path = openFilesRef.current[idx]?.path
+    if (!path) return
+    setOpenFiles(current => markOpenFileSaved(current, path, content))
+  }, [])
+
+  const closeFile = useCallback(async (idx: number) => {
+    const file = openFilesRef.current[idx]
+    if (!file) return
+    if (file.dirty) {
+      const decision = await requestDirtyEditorDecision(
+        [file],
+        file.path
+          ? 'This tab has changes that have not been saved to disk.'
+          : 'This scratch tab has unsaved changes. It has no file path, so it can only be kept or discarded.',
+      )
+      if (decision === 'cancel') return
+      if (decision === 'save' && !(await saveEditorFiles([file]))) return
+    }
     setOpenFiles(prev => {
       const next = prev.filter((_, i) => i !== idx)
       setActiveFileIdx(i => {
         if (next.length === 0) { setCenterTab('chat'); return 0 }
+        if (i > idx) return i - 1
         return Math.min(i, next.length - 1)
       })
       return next
     })
-  }, [])
+  }, [requestDirtyEditorDecision, saveEditorFiles])
 
   const handleToggleAutonomous = useCallback(async (enabled: boolean) => {
     await SetAutonomous(enabled)
@@ -1430,19 +1549,21 @@ export default function App() {
       pushToast('Stop the active run before changing workspace.')
       return
     }
+    if (!(await confirmWorkspaceEditorTransition(path))) return
     try {
       await SetWorkingDir(path)
       pushToast(`Workspace opened: ${path}`, 'success')
     } catch (error) {
       pushToast(`Could not open workspace: ${String(error)}`, 'danger')
     }
-  }, [pushToast, streaming])
+  }, [confirmWorkspaceEditorTransition, pushToast, streaming])
 
   const handleChooseWorkspace = useCallback(async (bugBounty: boolean) => {
     if (streaming) {
       pushToast('Stop the active run before changing workspace.')
       return
     }
+    if (!(await confirmWorkspaceEditorTransition())) return
     try {
       const settings = await GetSettings()
       const selected = await SelectWorkingDir(settings.context.workspace_dir || '')
@@ -1459,13 +1580,14 @@ export default function App() {
     } catch (error) {
       pushToast(`Could not choose workspace: ${String(error)}`, 'danger')
     }
-  }, [pushToast, streaming])
+  }, [confirmWorkspaceEditorTransition, pushToast, streaming])
 
   const handleCreateScratchWorkspace = useCallback(async () => {
     if (streaming) {
       pushToast('Stop the active run before attaching a scratch workspace.', 'warn')
       return
     }
+    if (!(await confirmWorkspaceEditorTransition())) return
     try {
       const status = await CreateScratchWorkspace(selectedSession || 'Scratch chat')
       setScratchWorkspace(status)
@@ -1474,13 +1596,14 @@ export default function App() {
     } catch (error) {
       pushToast(`Could not create scratch workspace: ${String(error)}`, 'danger')
     }
-  }, [pushToast, selectedSession, streaming])
+  }, [confirmWorkspaceEditorTransition, pushToast, selectedSession, streaming])
 
   const handleCreateWorkspaceProject = useCallback(async (name: string, bugBounty: boolean) => {
     if (streaming) {
       pushToast('Stop the active run before creating a project.', 'warn')
       return
     }
+    if (!(await confirmWorkspaceEditorTransition())) return
     try {
       const created = await CreateWorkspaceProject(name, '')
       if (!created) return
@@ -1497,7 +1620,7 @@ export default function App() {
     } catch (error) {
       pushToast(`Could not create project: ${String(error)}`, 'danger')
     }
-  }, [pushToast, streaming])
+  }, [confirmWorkspaceEditorTransition, pushToast, streaming])
 
   const handlePromoteScratchWorkspace = useCallback(async (name: string) => {
     if (streaming) {
@@ -1522,6 +1645,8 @@ export default function App() {
       role: m.role,
       content: m.content,
       thinking: m.thinking,
+      deliveryStatus: m.delivery_status,
+      stopReason: m.stop_reason,
       toolName: m.tool_name,
       toolCallId: m.tool_call_id,
       category: m.role === 'tool_call' || m.role === 'tool_result' ? 'tool' : m.role === 'system' ? 'status' : 'reply',
@@ -1582,6 +1707,7 @@ export default function App() {
     setCenterTab('chat')
     try {
       await ResumeRun(checkpoint.run_id)
+      setSelectedSession(await GetActiveConversationName().catch(() => ''))
       setShowConversationCheckpoints(false)
       setStatsVersion(value => value + 1)
       pushToast(`Resumed “${checkpoint.name || 'automatic recovery'}” as a new linked run.`, 'success')
@@ -2012,12 +2138,13 @@ export default function App() {
             </select>
             {openFiles.map((f, i) => (
               <span key={`${f.path || f.name}-${i}`} className={`center-file-tab ${centerTab === 'file' && activeFileIdx === i ? 'active' : ''}`}>
-                <button onClick={() => { setActiveFileIdx(i); setCenterTab('file') }}>{f.name}</button>
-                <button className="tab-close" onClick={() => closeFile(i)} title="Close">x</button>
+                <button onClick={() => { setActiveFileIdx(i); setCenterTab('file') }}>{f.name}{f.dirty ? ' •' : ''}</button>
+                <button className="tab-close" onClick={() => void closeFile(i)} title="Close">x</button>
               </span>
             ))}
           </div>
           <div className="center-content">
+            <Suspense fallback={<div role="status" style={{ padding: 24, color: 'var(--text-muted)' }}>Loading workbench…</div>}>
             {centerTab === 'chat' && chatLane === 'project' ? (
               <ChatPane
                 key={`project-chat-${workspaceVersion}`}
@@ -2106,6 +2233,7 @@ export default function App() {
             ) : centerTab === 'projects' ? (
               <ProjectsPage
                 version={statsVersion + workspaceVersion}
+                onBeforeWorkspaceChange={confirmWorkspaceEditorTransition}
                 onOpenEngagement={() => setCenterTab('engagement')}
                 onPrepareEngagementRun={prepareEngagementRun}
                 onProjectChanged={(project, previousName) => {
@@ -2145,9 +2273,12 @@ export default function App() {
                   setCenterTab('file')
                 }}
                 onCloseFile={closeFile}
-                onClose={() => closeFile(activeFileIdx)}
+                onUpdateFile={handleUpdateFile}
+                onFileSaved={handleFileSaved}
+                onClose={() => void closeFile(activeFileIdx)}
               />
             )}
+            </Suspense>
           </div>
         </main>
 
@@ -2176,7 +2307,7 @@ export default function App() {
               requestedTab={inspectorFocus}
               requestedTabVersion={inspectorFocusRequest}
               onClose={() => setRightOpen(false)}
-              workspaceBrowser={<FileTree key={`${workspaceVersion}-${workspaceFilesVersion}`} onOpenFile={handleOpenFile} />}
+              workspaceBrowser={<FileTree key={`${workspaceVersion}-${workspaceFilesVersion}`} onOpenFile={handleOpenFile} onBeforeWorkspaceChange={confirmWorkspaceEditorTransition} />}
               agentPanel={(
                 <AgentPanel
                   autonomous={autonomous}
@@ -2317,6 +2448,35 @@ export default function App() {
           onAllowRemember={() => handleConfirmRespond(true, true)}
           onDeny={() => handleConfirmRespond(false)}
         />
+      )}
+
+      {dirtyEditorPrompt && (
+        <div className="overlay">
+          <section className="confirm-dialog dirty-editor-dialog" role="alertdialog" aria-modal="true" aria-labelledby="dirty-editor-title">
+            <div className="confirm-header">
+              <span className="confirm-icon">!</span>
+              <span className="confirm-title" id="dirty-editor-title">
+                {dirtyEditorPrompt.files.length === 1 ? 'Unsaved editor change' : `${dirtyEditorPrompt.files.length} unsaved editor changes`}
+              </span>
+            </div>
+            <div className="confirm-message">{dirtyEditorPrompt.reason}</div>
+            <div className="dirty-editor-files">
+              {dirtyEditorPrompt.files.map(file => (
+                <div key={file.path || file.name}>
+                  <strong>{file.name}</strong>
+                  <small title={file.path}>{file.path || 'Scratch tab — no file path'}</small>
+                </div>
+              ))}
+            </div>
+            <div className="confirm-actions dirty-editor-actions">
+              <button onClick={() => resolveDirtyEditorDecision('cancel')}>Keep editing</button>
+              <button className="danger" onClick={() => resolveDirtyEditorDecision('discard')}>Discard changes</button>
+              {dirtyEditorPrompt.files.every(file => Boolean(file.path)) && (
+                <button className="primary" onClick={() => resolveDirtyEditorDecision('save')}>Save all</button>
+              )}
+            </div>
+          </section>
+        </div>
       )}
 
       {confirmAction && (
@@ -2478,7 +2638,7 @@ export default function App() {
       )}
 
       {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} onSaved={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
+        <SettingsModal onClose={() => setShowSettings(false)} onBeforeWorkspaceChange={confirmWorkspaceEditorTransition} onSaved={() => { void refreshProfiles(); setStatsVersion(v => v + 1) }} />
       )}
     </div>
   )

@@ -13,18 +13,59 @@ func selectAgentMode(text string, cfg settings.Settings) AgentMode {
 		override = "Auto"
 	}
 	if strings.EqualFold(override, "Manual") {
-		return manualAgentMode()
+		return withAgentDefinitionIdentity(manualAgentMode(), cfg.Agents.Presets)
 	}
 	var mode AgentMode
 	if !strings.EqualFold(override, "Auto") {
-		mode = baseMode(override)
+		mode = configuredAgentMode(override, cfg.Agents.Presets)
 	} else {
 		mode = classifyAgentMode(text)
+		mode = applyPresetToMode(mode, cfg.Agents.Presets)
 	}
-	mode = applyPresetToMode(mode, cfg.Agents.Presets)
+	mode = withAgentDefinitionIdentity(mode, cfg.Agents.Presets)
 	if strings.TrimSpace(mode.DefaultEffort) == "" {
 		mode.DefaultEffort = defaultReasoningEffortForMode(mode)
 	}
+	return mode
+}
+
+// configuredAgentMode resolves the same built-in/custom definition exposed by
+// ListAgentDefinitions. Unknown or disabled names retain the historical Auto
+// fallback instead of becoming an unversioned run identity.
+func configuredAgentMode(name string, presets map[string]settings.AgentModePreset) AgentMode {
+	if definition, ok := builtinAgentDefinition(name); ok {
+		return applyPresetToMode(baseMode(definition.Name), presets)
+	}
+	for presetName, preset := range presets {
+		if !preset.Enabled || (!strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(presetName)) &&
+			!strings.EqualFold(strings.TrimSpace(name), agentDefinitionID(presetName))) {
+			continue
+		}
+		return applyPresetToMode(AgentMode{
+			Name:              presetName,
+			Description:       "Configured Mauler agent preset.",
+			DefinitionID:      agentDefinitionID(presetName),
+			DefinitionVersion: "custom",
+		}, presets)
+	}
+	return baseMode("Auto")
+}
+
+func withAgentDefinitionIdentity(mode AgentMode, presets map[string]settings.AgentModePreset) AgentMode {
+	if definition, ok := builtinAgentDefinition(mode.Name); ok {
+		mode.DefinitionID = definition.ID
+		mode.DefinitionVersion = definition.Version
+		return mode
+	}
+	for presetName, preset := range presets {
+		if preset.Enabled && strings.EqualFold(strings.TrimSpace(mode.Name), strings.TrimSpace(presetName)) {
+			mode.DefinitionID = agentDefinitionID(presetName)
+			mode.DefinitionVersion = "custom"
+			return mode
+		}
+	}
+	mode.DefinitionID = "auto"
+	mode.DefinitionVersion = "1"
 	return mode
 }
 

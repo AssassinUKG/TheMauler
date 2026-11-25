@@ -73,6 +73,9 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 	}
 	selected := map[string]bool{}
 	addAlwaysAvailableTools(selected)
+	if looksLikeMCPTask(lower) {
+		selected["mcp"] = true
+	}
 	if looksLikeImageGenerationTask(lower) {
 		selected[generateImageToolName] = true
 	}
@@ -145,6 +148,14 @@ func routeToolsForTask(cfg settings.ToolsConfig, firstUserText string) map[strin
 		delete(selected, "skill")
 	}
 	return selected
+}
+
+func looksLikeMCPTask(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	return hasAny(lower,
+		"mcp server", "mcp tool", "model context protocol", "streamable http",
+		"legacy sse", "/mcp", "stdio mcp", "mcp status", "mcp connection",
+	)
 }
 
 func looksLikeImageGenerationTask(text string) bool {

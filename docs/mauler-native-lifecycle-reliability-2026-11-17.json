@@ -1,0 +1,122 @@
+{
+  "schemaVersion": "mauler-native-lifecycle-qualification-v1",
+  "date": "2026-11-17",
+  "framework": "TheMauler",
+  "status": "bounded-windows-native-process-slice-qualified",
+  "boundary": {
+    "localOnly": true,
+    "runtime": "http://127.0.0.1:8804/v1",
+    "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+    "contextTokens": 35072,
+    "modelLoadedOrReconfigured": false,
+    "hostRebootPerformed": false,
+    "normalUserAppStarted": false,
+    "productionExecutableUsedWithDisposableState": true,
+    "productionSettingsAndCredentialsUnchanged": true,
+    "credentialsPersistedByTests": false,
+    "dependencyUpgradePerformed": false,
+    "isolation": "Separate temporary configuration, workspaces and WebView2 profiles; native UI uses the real Wails entry points. The existing local key is inherited ephemerally, never copied into the secret store."
+  },
+  "findingsAndFixes": [
+    "Initial model streaming had no crash checkpoint until four tool calls. Commit the original run/contract and checkpoint before the first model request, after model/tool batches and before effectful execution.",
+    "Persist hashed effect intent before execution. Unknown or previously effectful recovery is review-required; never silently replay a write or recapture its append prefix.",
+    "Take an OS-released native data-owner lock before opening SQLite. Reconcile prior running records as interrupted without starting models/tools. Safe explicit resume creates a linked generation from the original sealed contract.",
+    "Retain agent ownership through autosave and terminal persistence; cancel and join on native shutdown. Atomically replace session files; terminal TaskRun/checkpoint retirement shares one SQLite transaction.",
+    "Workspace changes cleared the UI but retained the prior backend conversation name. Clear it in both workspace paths; checkpoint recovery uses a collision-safe saved-chat fork.",
+    "A 1024-token no-thinking cap and 2048-token direct cap truncated long messages, and the truncation flag could be discarded. Reasoning depth no longer limits answer length. Long text uses up to 8192 context-aware tokens and at most three tool-free continuations, retaining one assembled answer.",
+    "User cancellation, output limits and errors retain visible partial text and saved delivery metadata. Limits/no progress are not completion; file/action tasks retain verification gates.",
+    "The filename append-fixture.txt triggered live sports-fact routing and removed read tools. Exclude named file paths from live-fact keyword matching while retaining genuine surrounding live-data intent.",
+    "Windows PTY startup resolved a relative shell under Cmd.Dir. Resolve the executable first; remove the dependency's racing CommandContext waiter and retain one explicit process owner.",
+    "Wrap the complete review-required recovery explanation in the native dialog rather than hiding its meaning behind an ellipsis."
+  ],
+  "nativeObservations": [
+    {
+      "case": "stop-new-chat-reopen-and-followup",
+      "passed": true,
+      "detail": "Real Stop retained partial output with Stopped by you; New chat/reopen preserved that outcome; a fresh same-chat exact reply completed. Active New chat/workspace changes were refused while Stop remained available.",
+      "evidence": "build/native-lifecycle-20261117/evidence-text/after-native-stream-stop.json"
+    },
+    {
+      "case": "workspace-a-b-saved-transcript-identity",
+      "passed": true,
+      "detail": "Native workspace selector, B reply and autosave retained separate A/B chats. Original A bytes stayed unchanged after B actually saved; both backend switching paths also pass five repeated regressions.",
+      "originalASha256": "E9B2AB5C20EDAFE80CC63788A84EDF1393D8ABE3A98F69B00648BE9B2CA83229",
+      "evidence": "build/native-lifecycle-20261117/evidence-final/Reply-exactly-NATIVE_WORKSPACE_A-and-nothing-else.json"
+    },
+    {
+      "case": "whole-app-text-stream-crash-and-safe-resume",
+      "passed": true,
+      "originalRun": "task-2026-11-17T22-20-35.5400763Z-4",
+      "originalGeneration": 1794954035540,
+      "resumedRun": "task-2026-11-17T22-30-19.6874744Z-1",
+      "resumedGeneration": 1794954619687,
+      "detail": "Killed and joined only the exact owned test PID/start time during text generation. Startup marked it interrupted with no new work. Native Checkpoints Resume created an explicitly linked run and Recovered-* chat; it did not overwrite the source transcript.",
+      "evidence": ["build/native-lifecycle-20261117/evidence-text/after-text-hard-crash.json", "build/native-lifecycle-20261117/evidence-text/after-text-restart-before-resume.json", "build/native-lifecycle-20261117/evidence-text/during-text-resume.json"]
+    },
+    {
+      "case": "whole-app-crash-after-an-append",
+      "passed": true,
+      "run": "task-2026-11-17T22-39-16.5308602Z-3",
+      "appendCount": 1,
+      "fileSha256": "41F76A082C83D3522EB6A30BB51E603C0BAC9EBFAD40FF8A6BE7292D2EB9D582",
+      "detail": "A bounded watcher observed the exact disposable suffix, then revalidated/killed/joined the owned native process. Restart retained the same bytes and run count, marked interruption, and disabled unsafe Resume with the complete readable warning. No write was replayed.",
+      "evidence": ["build/native-lifecycle-20261117/evidence-final/after-append-hard-crash.json", "build/native-lifecycle-20261117/evidence-final/after-append-restart-no-replay.json", "build/native-lifecycle-20261117/evidence-final/append-fixture.txt"]
+    },
+    {
+      "case": "explicit-read-after-uncertain-write",
+      "passed": true,
+      "run": "task-2026-11-17T23-00-21.8075349Z-1",
+      "detail": "Exact native request Read append-fixture.txt and show its exact contents. Use file tools only. Do not modify any file. completed with one real read, complete control state and unchanged single-append SHA-256.",
+      "evidence": "build/native-lifecycle-20261117/evidence-final/after-fixed-native-post-crash-read.json"
+    },
+    {
+      "case": "long-native-answer-completes",
+      "passed": true,
+      "run": "task-2026-11-17T23-02-07.4971474Z-2",
+      "requestedWordsApproximately": 2000,
+      "savedWords": 2374,
+      "savedCharacters": 12060,
+      "requiredEnding": "NATIVE_LONG_COMPLETE",
+      "modelCalls": 1,
+      "tools": 0,
+      "delivery": "done",
+      "controlPhase": "complete",
+      "transcriptSha256": "9E9D94BB0183A2906D5C0D3A7ED0FCE9C9647B9F2DDC2D105B8926FA581D2649",
+      "detail": "Real native UI request generated and saved its finished ending without an output-limit stop. Forced-cut continuation, repetition limits and exact history assembly are separately covered by deterministic model fixtures, not misreported as forced-cut live-model qualification.",
+      "evidence": "build/native-lifecycle-20261117/evidence-final/Write-a-long-message-for-my-guild-celebrating.json"
+    },
+    {
+      "case": "native-close-during-active-generation",
+      "passed": true,
+      "run": "task-2026-11-17T23-06-27.3444494Z-3",
+      "detail": "Observed a live partial stream and enabled Stop, then Alt+F4 closed the test app. Exact owned process exited; no Mauler windows remained. Saved run is stopped/application_shutdown, control cancelled, partial output retained and recovery checkpoints retained.",
+      "evidence": "build/native-lifecycle-20261117/evidence-final/after-confirmed-active-close.json"
+    }
+  ],
+  "diagnosticsRetained": [
+    "The original baseline app had five runs and zero checkpoints after a hard kill; see evidence-baseline/baseline-after-hard-crash.json. Its long answer hit 1024 tokens and was incorrectly accepted as complete.",
+    "The initial isolated A/B test found a genuine saved-chat overwrite. Only disposable fixture data was affected; the fresh repaired A/B test above qualifies the fix, not recovery of any historically overwritten user chat.",
+    "evidence-final/after-native-post-crash-read.json is the failed filename-routing diagnostic. after-fixed-native-post-crash-read.json is the repaired exact-wording result.",
+    "evidence-final/after-active-native-close.json was an earlier late close observation whose output had already hit its limit. It is not active-close acceptance; after-confirmed-active-close.json is the actual active-stream shutdown result.",
+    "race.log retains the go-pty context-waiter data race. race-focused-after.log and race-final.log pass after using one process waiter. A test-only double-close of ConPTY was corrected separately; it was not counted as a product failure.",
+    "Initial long-answer test fixtures used an 8K context with insufficient prompt/output headroom. They now use the actual qualified 35K context. Exhausted real context fails visibly rather than overfilling the backend."
+  ],
+  "verification": {
+    "goTestAll": {"passed": true, "log": "build/native-lifecycle-20261117/tests-final.log", "sha256": "B39F5267305ADE4850A73B376907AFA31F3C854E782DD107ACA34CD3F4E23CEA"},
+    "goVetAll": {"passed": true, "log": "build/native-lifecycle-20261117/vet-final.log", "sha256": "48A0724A53C2A96AD0CFE280E86719E859562F63A14498851CBA1EB183AD5B96"},
+    "race": {"passed": true, "packages": ["internal/app", "internal/tools", "internal/controlplane", "internal/llm/backends"], "log": "build/native-lifecycle-20261117/race-final.log", "sha256": "51DA7DC4A1BCA0E6E6AEAD17C05CB33910C983F90DD19C4A469E092544208E29"},
+    "focused": {"passed": true, "log": "build/native-lifecycle-20261117/long-answer-focused-final.log", "includes": ["context-aware output budget", "no tool escalation", "forced-cut text completion", "one retained assembled answer", "bounded/repeated continuation", "honest output-limit stop", "exact file-read route", "separate reasoning/answer budgets"]},
+    "frontend": {"productionBuildPassed": true, "replyOutcomeTests": "3/3", "typeDriftFields": 420, "repositoryWideLintNotClaimedGreen": true},
+    "wailsBuild": {"passed": true, "command": "wails build -m -nosyncgomod -nocolour", "offline": true, "log": "build/native-lifecycle-20261117/build-revision3.log", "sha256": "800A5E003C6A1D8154095BFE297ADA8E5810A2BDC5104412A1AE797C7C7FAEB1"},
+    "freshLocalRegression": {"passed": 13, "total": 13, "repeats": 1, "allRequestsJoined": true, "report": "build/local-reliability-20261117-native-final/report.json", "sha256": "8E4D194C71932961F8BBFA9CBB23FA22E6C29D5CC73D823EFFA2A94A0CBC9AD5", "detail": "Fresh current-source chat/read/write/append/cancel/recover matrix after the native fixes. The earlier separate 65/65 result remains historical, not a claim that this native matrix ran five times."}
+  },
+  "binary": {"path": "build/bin/TheMauler.exe", "sha256": "A671F98D54FD8F942B3F92014DFF9BAC683D1808A1BA9F217621DEEC0E4260FF", "leftStopped": true},
+  "finalRuntime": {"model": "RVN-Q4_K_M-multilingual-mtp.gguf", "contextTokens": 35072, "activeRequests": 0, "queuedRequests": 0, "maulerProcesses": 0, "normalSettingsAndCredentialsUnchanged": true},
+  "remaining": [
+    "No physical reboot, power loss, torn-storage or cross-file/SQLite crash-atomicity qualification was performed.",
+    "Shell/PTY descendant containment, persistent PTY recovery, browser/MCP/remote/channel crash journeys and Unix native behavior remain unqualified.",
+    "Partial streaming is not checkpointed per token; safe text recovery may regenerate text. Unknown effects deliberately require explicit review/new scoped work, not unattended replay.",
+    "Continuation has finite context, time and three-continuation limits; these are honest stops, not a guarantee that every arbitrary-length or semantic task finishes correctly.",
+    "Fresh full 12/12 UI Gate 1 followed by complete Agent Eval x5 remains required for the broader unattended reliability milestone. No fresh dependency/security audit or blanket industry-standard claim is made."
+  ]
+}

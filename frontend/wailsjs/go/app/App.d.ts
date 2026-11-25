@@ -5,9 +5,10 @@ import {app} from '../models';
 import {settings} from '../models';
 import {packlibrary} from '../models';
 import {channelbus} from '../models';
+import {mcpclient} from '../models';
+import {tools} from '../models';
 import {ledger} from '../models';
 import {llm} from '../models';
-import {tools} from '../models';
 import {repoindex} from '../models';
 import {sessionstore} from '../models';
 
@@ -44,6 +45,8 @@ export function ClearHistory():Promise<void>;
 export function ClearLedgerEvents():Promise<void>;
 
 export function ClearMemoryEntries():Promise<void>;
+
+export function ClearNanoCyberCredential():Promise<void>;
 
 export function ClearProviderAPIKey(arg1:string):Promise<void>;
 
@@ -83,6 +86,8 @@ export function DeleteSkill(arg1:string):Promise<void>;
 
 export function DeleteTelegramMessage(arg1:string,arg2:string):Promise<void>;
 
+export function DisconnectMCPServer(arg1:string):Promise<void>;
+
 export function DispatchChannelMessage(arg1:channelbus.Envelope):Promise<channelbus.Response>;
 
 export function DispatchSideChatMessage(arg1:channelbus.Envelope):Promise<channelbus.Response>;
@@ -98,6 +103,8 @@ export function ExportMemoryJSON():Promise<string>;
 export function ExportPackJSON(arg1:string):Promise<string>;
 
 export function ExportTaskRunsJSON():Promise<string>;
+
+export function GetActiveConversationName():Promise<string>;
 
 export function GetAgentMode():Promise<string>;
 
@@ -128,6 +135,12 @@ export function GetHistoryStats():Promise<app.HistoryStats>;
 export function GetHomeDir():Promise<string>;
 
 export function GetLabStatus():Promise<app.LabStatus>;
+
+export function GetMCPStatus():Promise<Array<mcpclient.ServerStatus>>;
+
+export function GetNanoCyberCredentialStatus():Promise<settings.ServiceCredentialStatus>;
+
+export function GetNanoCyberHealth():Promise<app.NanoCyberHealth>;
 
 export function GetNextContextPacketClass():Promise<string>;
 
@@ -192,6 +205,8 @@ export function ListAgentSessions():Promise<Array<app.AgentSession>>;
 export function ListBenchmarkRuns():Promise<Array<app.ProfileBenchmarkResult>>;
 
 export function ListBrowserCheckpoints():Promise<Array<app.BrowserCheckpointStatus>>;
+
+export function ListBrowserEvidence():Promise<Array<tools.BrowserEvidenceRecord>>;
 
 export function ListChannelWorkQueue():Promise<Array<channelbus.WorkItem>>;
 
@@ -369,6 +384,8 @@ export function SetEngagementEndpointGroup(arg1:string,arg2:string,arg3:string):
 
 export function SetEngagementNotes(arg1:string,arg2:string,arg3:number):Promise<number>;
 
+export function SetNanoCyberCredential(arg1:string):Promise<void>;
+
 export function SetNextContextPacketClass(arg1:string):Promise<string>;
 
 export function SetPackArchived(arg1:string,arg2:boolean):Promise<packlibrary.Summary>;
@@ -393,6 +410,8 @@ export function ShellResize(arg1:string,arg2:number,arg3:number):Promise<void>;
 
 export function StartBrowserWorkflow(arg1:string):Promise<app.BrowserWorkflowStatus>;
 
+export function StartConversation(arg1:string):Promise<string>;
+
 export function StartRepositorySplitReview(arg1:number):Promise<app.RepositoryReviewStatus>;
 
 export function StopAgent():Promise<void>;
@@ -406,6 +425,8 @@ export function SwitchProfile(arg1:string):Promise<void>;
 export function SynthesizeSpeech(arg1:string):Promise<app.SpeechAudio>;
 
 export function TakeOverBrowserWorkflow():Promise<app.BrowserWorkflowStatus>;
+
+export function TestMCPServer(arg1:string):Promise<mcpclient.ServerStatus>;
 
 export function TranscribeVoiceClip(arg1:string):Promise<string>;
 

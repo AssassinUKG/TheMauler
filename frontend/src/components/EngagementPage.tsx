@@ -9,6 +9,7 @@ import {
   GetEngagementAvailable,
   GetEngagementNext,
   ImportEngagementJSON,
+  ListBrowserEvidence,
   ListEngagements,
   ReleaseEngagementClaim,
   SetEngagementEndpointGroup,
@@ -22,6 +23,7 @@ import {
   type EngagementRecord,
   type EngagementSummary,
   type EngagementWorkState,
+  type BrowserEvidenceRecord,
 } from '../wailsjs/go'
 import { EngagementSetupWizard } from './EngagementSetupWizard'
 import './EngagementPage.css'
@@ -69,6 +71,7 @@ export function EngagementPage({ version, onOpenChat, onPrepareRun }: Props) {
   const [endpointDraft, setEndpointDraft] = useState({ method: 'GET', url: '', feature_group: '' })
   const [groupDrafts, setGroupDrafts] = useState<Record<string, string>>({})
   const [evidenceDraft, setEvidenceDraft] = useState({ source_kind: 'artifact' as EngagementEvidence['source_kind'], path: '', ledger_event_id: '', description: '' })
+  const [browserEvidence, setBrowserEvidence] = useState<BrowserEvidenceRecord[]>([])
   const [findingDraft, setFindingDraft] = useState({ title: '', severity: 'medium' as EngagementFinding['severity'], description: '', reproduction: '', evidence_ids: '' })
   const [waiverDrafts, setWaiverDrafts] = useState<Record<string, string>>({})
   const [section, setSection] = useState<EngagementSection>('workflow')
@@ -81,6 +84,12 @@ export function EngagementPage({ version, onOpenChat, onPrepareRun }: Props) {
     setError('')
     try {
       const listed = await ListEngagements()
+      try {
+        const captures = await ListBrowserEvidence()
+        setBrowserEvidence(Array.isArray(captures) ? captures : [])
+      } catch {
+        setBrowserEvidence([])
+      }
       const items = Array.isArray(listed) ? listed : []
       setEngagements(items)
       const id = items.some(item => item.id === preferredID) ? preferredID : items[0]?.id || ''
@@ -260,6 +269,22 @@ export function EngagementPage({ version, onOpenChat, onPrepareRun }: Props) {
       showStatus('Evidence provenance attached')
       await load(record.state.id)
     } catch (evidenceError) { setError(errorText(evidenceError)) }
+  }
+
+  const promoteBrowserEvidence = async (capture: BrowserEvidenceRecord) => {
+    if (!record || !activeClaimedWork || !capture.fresh) return
+    try {
+      await AddEngagementEvidence(record.state.id, {
+        work: activeClaimedWork.ref,
+        source_kind: 'screenshot',
+        path: capture.workspace_file,
+        description: `Browser screenshot: ${capture.title || capture.url || `${capture.width}×${capture.height} capture`}`,
+      })
+      showStatus('Browser screenshot promoted to immutable engagement evidence')
+      await load(record.state.id)
+    } catch (promotionError) {
+      setError(errorText(promotionError))
+    }
   }
 
   const addFinding = async () => {
@@ -489,6 +514,21 @@ export function EngagementPage({ version, onOpenChat, onPrepareRun }: Props) {
             </div>}
 
             {section === 'evidence' && <div className="engagement-proof-grid">
+				<section className="engagement-panel engagement-browser-evidence">
+					<div className="engagement-panel-head"><div><span className="engagement-kicker">Browser capture review</span><h3>Hash-sealed screenshots</h3></div><span>{browserEvidence.length}</span></div>
+					<div className="engagement-proof-list">
+						{browserEvidence.map(item => {
+							const alreadyAttached = evidence.some(attached => attached.source_kind === 'screenshot' && attached.path === item.workspace_file)
+							return <div key={item.id} className="engagement-proof-row">
+								<span className={`engagement-status ${item.fresh ? 'ok' : 'bad'}`}>{item.fresh ? 'verified' : 'stale'}</span>
+								<div><strong>{item.title || item.url || 'Browser screenshot'}</strong><small>{item.width}×{item.height} · {formatTime(item.captured_at)} · {item.review_detail}</small><code>{item.workspace_file}</code></div>
+								<button disabled={!activeClaimedWork || !item.fresh || alreadyAttached} onClick={() => void promoteBrowserEvidence(item)}>{alreadyAttached ? 'Attached' : 'Attach'}</button>
+							</div>
+						})}
+						{browserEvidence.length === 0 && <div className="engagement-inline-empty">No browser screenshots have been captured in this workspace yet.</div>}
+					</div>
+					{!activeClaimedWork && browserEvidence.length > 0 && <div className="engagement-inline-empty">Claim the next work item before promoting a verified screenshot.</div>}
+				</section>
               <section className="engagement-panel">
                 <div className="engagement-panel-head"><div><span className="engagement-kicker">Immutable pointers</span><h3>Evidence provenance</h3></div><span>{evidence.length}</span></div>
                 <div className="engagement-proof-form">

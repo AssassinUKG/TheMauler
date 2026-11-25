@@ -173,6 +173,7 @@ function RunDetail({ run }: { run: TaskRun }) {
         <Metric label="Status" value={run.stop_reason || run.status} />
         <Metric label="State" value={run.state || '-'} />
 		<Metric label="Control" value={run.control?.phase?.replaceAll('_', ' ') || '-'} />
+        <Metric label="Agent definition" value={run.agent_definition_id ? `${run.agent_definition_id}@${run.agent_definition_version || '?'}` : 'legacy run'} />
         <Metric label="Origin" value={run.origin || 'desktop'} />
         <Metric label="Claimant" value={run.claimant_alias || run.claimant_id || run.id} />
         <Metric label="Duration" value={run.duration_ms != null ? fmtDuration(run.duration_ms) : '-'} />

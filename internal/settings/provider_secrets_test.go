@@ -36,3 +36,38 @@ func TestProviderSecretsRoundTripAndEnvironmentPrecedence(t *testing.T) {
 		t.Fatalf("cleared key = %q", got)
 	}
 }
+
+func TestServiceCredentialRoundTripAndEnvironmentPrecedence(t *testing.T) {
+	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
+	const service = "nanocyber"
+	const envName = "MAULER_TEST_NANOCYBER_TOKEN"
+	t.Setenv(envName, "")
+
+	if err := SaveServiceCredential(service, "stored-token"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveServiceCredential(service, envName); got != "stored-token" {
+		t.Fatalf("stored token = %q", got)
+	}
+	status := GetServiceCredentialStatus(service, envName)
+	if !status.StoredConfigured || status.EnvironmentConfigured || !status.EffectiveConfigured {
+		t.Fatalf("unexpected stored status: %#v", status)
+	}
+
+	t.Setenv(envName, "environment-token")
+	if got := ResolveServiceCredential(service, envName); got != "environment-token" {
+		t.Fatalf("environment token did not win: %q", got)
+	}
+	status = GetServiceCredentialStatus(service, envName)
+	if !status.StoredConfigured || !status.EnvironmentConfigured || !status.EffectiveConfigured {
+		t.Fatalf("unexpected combined status: %#v", status)
+	}
+
+	if err := ClearServiceCredential(service); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envName, "")
+	if got := ResolveServiceCredential(service, envName); got != "" {
+		t.Fatalf("cleared token = %q", got)
+	}
+}

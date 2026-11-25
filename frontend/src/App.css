@@ -569,6 +569,45 @@ html.workbench-resizing-col * {
   line-height: 1.45;
 }
 
+.dirty-editor-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.dirty-editor-files {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  margin: 0 0 18px;
+  overflow-y: auto;
+}
+
+.dirty-editor-files > div {
+  display: grid;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg1);
+}
+
+.dirty-editor-files strong {
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.dirty-editor-files small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirty-editor-actions {
+  flex-wrap: wrap;
+}
+
 .session-repair-dialog {
   width: min(680px, calc(100vw - 36px));
 }

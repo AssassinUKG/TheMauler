@@ -30,17 +30,24 @@ var reviewerVerdictSchema = json.RawMessage(`{
   "required":["verdict","severity","items"]
 }`)
 
+type reviewerPassOptions struct {
+	evidenceOnly bool
+	verdicts     []VerifyVerdict
+}
+
 // runReviewerPass runs a same-profile, fresh-context, read-only reviewer pass.
 // Infrastructure/protocol failures are retried once, then remain explicitly
 // inconclusive so unavailable review cannot strengthen a completion verdict.
-func (a *App) runReviewerPass(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings) VerifyVerdict {
+func (a *App) runReviewerPass(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings, options reviewerPassOptions) VerifyVerdict {
 	reviewProfile := profile
-	if sibling, ok := a.thinkingSiblingProfile(profile); ok {
-		reviewProfile = sibling
+	if !options.evidenceOnly {
+		if sibling, ok := a.thinkingSiblingProfile(profile); ok {
+			reviewProfile = sibling
+		}
 	}
 	var verdict VerifyVerdict
 	for attempt := 1; attempt <= 2; attempt++ {
-		verdict = a.runReviewerPassOnce(ctx, run, reviewProfile, cfg)
+		verdict = a.runReviewerPassOnce(ctx, run, reviewProfile, cfg, options)
 		if verdict.Status != "inconclusive" || ctx.Err() != nil {
 			return verdict
 		}
@@ -49,7 +56,7 @@ func (a *App) runReviewerPass(ctx context.Context, run *TaskRun, profile setting
 	return verdict
 }
 
-func (a *App) runReviewerPassOnce(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings) VerifyVerdict {
+func (a *App) runReviewerPassOnce(ctx context.Context, run *TaskRun, profile settings.Profile, cfg *settings.Settings, options reviewerPassOptions) VerifyVerdict {
 	if run == nil || cfg == nil {
 		return reviewerInconclusiveVerdict("reviewer unavailable: missing run or config")
 	}
@@ -70,8 +77,20 @@ func (a *App) runReviewerPassOnce(ctx context.Context, run *TaskRun, profile set
 		maxTools = 15
 	}
 	packet := buildReviewPacket(*run)
+	system := reviewerSystemPrompt(maxTools)
+	if options.evidenceOnly {
+		maxTools = 0
+		system = "You are a strict reviewer. Assess the final answer and current file evidence against the objective and the controller's verification results. Use only this packet. Return only JSON matching the schema. If approving, include the top residual risk in items."
+	}
+	if len(options.verdicts) > 0 {
+		var verification strings.Builder
+		for _, verdict := range options.verdicts {
+			fmt.Fprintf(&verification, "- %s: %s\n%s\n", verdict.Status, verdict.Summary, truncateForReview(verdict.Evidence, 1000))
+		}
+		packet += "\n\nController verification results:\n" + truncateForReview(verification.String(), 4000)
+	}
 	msgs := []llm.Message{
-		llm.NewTextMessage(llm.RoleSystem, reviewerSystemPrompt(maxTools)),
+		llm.NewTextMessage(llm.RoleSystem, system),
 		llm.NewTextMessage(llm.RoleUser, packet),
 	}
 	toolsUsed := 0
@@ -82,7 +101,7 @@ func (a *App) runReviewerPassOnce(ctx context.Context, run *TaskRun, profile set
 			reqToolDefs = nil
 			toolChoice = "none"
 		}
-		forceNoThink := toolChoice != "none"
+		forceNoThink := toolChoice != "none" || options.evidenceOnly
 		effort := "low"
 		if toolChoice == "none" {
 			effort = "high"
@@ -99,6 +118,9 @@ func (a *App) runReviewerPassOnce(ctx context.Context, run *TaskRun, profile set
 		text, calls, err := collectReviewerTurn(ch)
 		if err != nil {
 			return reviewerInconclusiveVerdict("reviewer stream failed: " + err.Error())
+		}
+		if options.evidenceOnly && len(calls) > 0 {
+			return reviewerInconclusiveVerdict("reviewer proposed a tool call during evidence-only review")
 		}
 		msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: text, ToolCalls: calls})
 		if len(calls) == 0 {

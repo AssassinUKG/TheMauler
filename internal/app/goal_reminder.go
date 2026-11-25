@@ -9,6 +9,9 @@ import (
 )
 
 func initialRunPromptText(firstMsg llm.Message, run TaskRun) string {
+	if text := taskRoutingPrompt(run); text != "" {
+		return text
+	}
 	if firstMsg.Role != "" {
 		if text := strings.TrimSpace(messageText(firstMsg)); text != "" {
 			return text

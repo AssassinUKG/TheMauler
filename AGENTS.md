@@ -190,13 +190,16 @@ code and a targeted document from `docs/context/README.md`.
 ## Current priorities
 
 1. Context M5 closure: the 105-attempt deterministic paraphrase/hostile preflight and reusable live
-   pass^k telemetry are implemented. The shared Agent Eval/control-state repairs pass focused, race,
-   and production build gates. The final 2026-07-23 Huihui UI Gate 1 reached 11/12: Mauler safely
-   blocked three missing-append overwrites, then the circuit breaker stopped the model. This is not
-   pass^1 and x5 remains locked. After a deliberate model/profile/control change, require a fresh
-   12/12 Gate 1 before the selected local profile's full Agent Eval x5. Follow
+   pass^k telemetry are implemented. The 2026-11-24 RVN/35K/draft-MTP `n=2` UI Gate 1 passed 12/12,
+   but the required x5 finished 54/60 raw attempts with only 8/12 fixtures clean across every round.
+   Four scorer false negatives are regression-fixed; replay-equivalent accounting is 58/60 and
+   10/12, still not pass^5. The remaining genuine failures were masked verification and stale-IP
+   leakage into todo input. Pre-dispatch exclusion and verification-exit guards now pass production
+   gates; their live follow-up reached 9/12 (excluded-IP fixture passed, masked verification blocked,
+   extra continuations, and a now-fixed tail/head flag false negative). The final scorer patch still
+   needs a fresh 12/12 Gate 1 before another full Agent Eval x5. Follow
    `docs/unattended-agent-reliability-gate-2026-07-22.md` and do not claim the model-reliability
-   milestone complete before pass^5 evidence exists.
+   milestone complete before clean pass^5 evidence exists.
 2. Finish Bug Bounty/Chat workspace reliability edges: hostile/paraphrase fixtures, exact agent
    definition/version ledgering, named conversation checkpoint/resume, and dirty-tab save/discard.
 3. Keep the control-plane and reliability gates green while expanding classified recovery and

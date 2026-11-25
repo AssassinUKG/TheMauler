@@ -1,0 +1,10 @@
+{
+  "config": "C:\\Users\\richa\\AppData\\Local\\Temp\\mauler-native-2278dd6cf00d48d49054c2fceaf56593\\config",
+  "contextTokens": 35072,
+  "credentialsPersisted": false,
+  "localOnly": true,
+  "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+  "root": "C:\\Users\\richa\\AppData\\Local\\Temp\\mauler-native-2278dd6cf00d48d49054c2fceaf56593",
+  "workspaceA": "C:\\Users\\richa\\AppData\\Local\\Temp\\mauler-native-2278dd6cf00d48d49054c2fceaf56593\\workspace-a",
+  "workspaceB": "C:\\Users\\richa\\AppData\\Local\\Temp\\mauler-native-2278dd6cf00d48d49054c2fceaf56593\\workspace-b"
+}

@@ -7,9 +7,15 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -211,6 +217,190 @@ func TestAdditionalMetadataExtractorsReportLimitsAndCorruption(t *testing.T) {
 	assertEntryStatus(t, manifest, "broken.elf", StatusExtractorError)
 	if manifest.FilesIndexed != 0 || manifest.Chunks != 0 || !manifest.Complete {
 		t.Fatalf("failed metadata extractors reported coverage: %#v", manifest)
+	}
+}
+
+func TestSevenZIPInventoryIsBoundedMetadataOnly(t *testing.T) {
+	root := t.TempDir()
+	archivePath := filepath.Join(root, "bundle.7z")
+	write7ZIPFixture(t, archivePath)
+	policy := DefaultPolicy(root)
+	policy.ExtractorPolicy.ChunkBytes = 1024
+	var chunks []Chunk
+	manifest, err := Scan(context.Background(), policy, func(_ context.Context, chunk Chunk) error {
+		chunks = append(chunks, chunk)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := assertEntryStatus(t, manifest, "bundle.7z", StatusIndexed)
+	if entry.Extractor != sevenZIPExtractorVersion || entry.SHA256 == "" || entry.ChunkCount == 0 {
+		t.Fatalf("7z entry missing immutable evidence: %#v", entry)
+	}
+	var joined strings.Builder
+	for _, chunk := range chunks {
+		joined.WriteString(chunk.Text)
+	}
+	text := joined.String()
+	if !strings.Contains(text, "[7z inventory:") || !strings.Contains(text, "go.mod") {
+		t.Fatalf("7z inventory missing metadata: %s", text)
+	}
+	if strings.Contains(text, "module mauler") {
+		t.Fatalf("7z inventory leaked member content: %s", text)
+	}
+
+	limitedPolicy := policy.ExtractorPolicy
+	limitedPolicy.MaxExpandedBytes = 1024
+	limitedEntry := ManifestEntry{Root: filepath.ToSlash(root), Path: "bundle.7z", Extractor: sevenZIPExtractorVersion}
+	limitedManifest := Manifest{}
+	limitedOut := newExtractedChunkAccumulator(context.Background(), &limitedEntry, limitedPolicy, nil, &limitedManifest, nil)
+	if err := extract7ZIPInventory(context.Background(), archivePath, limitedPolicy, limitedOut); !errors.Is(err, errExpandedLimit) {
+		t.Fatalf("7z logical expansion limit error = %v, want %v", err, errExpandedLimit)
+	}
+}
+
+func TestScannedPDFOCRIsPageAndOutputBounded(t *testing.T) {
+	policy := DefaultPolicy(t.TempDir()).ExtractorPolicy
+	policy.MaxOCRPages = 2
+	policy.MaxExpandedBytes = 64 * 1024
+	entry := ManifestEntry{Path: "scan.pdf", Root: "fixture", Extractor: pdfExtractorVersion}
+	manifest := Manifest{}
+	out := newExtractedChunkAccumulator(context.Background(), &entry, policy, nil, &manifest, nil)
+	var rasterized []int
+	tools := pdfOCRTools{
+		rasterize: func(_ context.Context, _ string, page int, prefix string, maxBytes int64) (string, error) {
+			rasterized = append(rasterized, page)
+			if maxBytes <= 0 || !strings.Contains(prefix, fmt.Sprintf("page-%04d", page)) {
+				t.Fatalf("unexpected OCR raster bounds: page=%d prefix=%q max=%d", page, prefix, maxBytes)
+			}
+			return prefix + ".png", nil
+		},
+		recognize: func(_ context.Context, imagePath string, maxBytes int64) (string, error) {
+			if maxBytes <= 0 {
+				t.Fatal("OCR output must have a positive remaining byte limit")
+			}
+			return "scanned evidence from " + filepath.Base(imagePath), nil
+		},
+	}
+	if err := extractScannedPDFOCRWith(context.Background(), "scan.pdf", 2, policy, out, tools); err != nil {
+		t.Fatal(err)
+	}
+	if err := out.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Extractor != pdfOCRExtractorVersion || entry.Language != "ocr-eng" || len(rasterized) != 2 || entry.ChunkCount == 0 {
+		t.Fatalf("OCR metadata/bounds = entry %#v pages %#v", entry, rasterized)
+	}
+
+	blockedEntry := ManifestEntry{Path: "long-scan.pdf", Root: "fixture", Extractor: pdfExtractorVersion}
+	blockedOut := newExtractedChunkAccumulator(context.Background(), &blockedEntry, policy, nil, &Manifest{}, nil)
+	if err := extractScannedPDFOCRWith(context.Background(), "long-scan.pdf", 3, policy, blockedOut, tools); !errors.Is(err, errOCRPageLimit) {
+		t.Fatalf("OCR page limit error = %v, want %v", err, errOCRPageLimit)
+	}
+}
+
+func TestScannedPDFOCRLiveSmoke(t *testing.T) {
+	if _, err := exec.LookPath("pdftoppm"); err != nil {
+		t.Skip("pdftoppm is not installed")
+	}
+	if _, err := exec.LookPath("tesseract"); err != nil {
+		t.Skip("tesseract is not installed")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "scanned.pdf")
+	writeFixture(t, path, repoScannedPDF("MAULER OCR"))
+	policy := DefaultPolicy(root)
+	policy.ExtractorPolicy.MaxOCRPages = 4
+	policy.ExtractorPolicy.TimeoutMillis = 120_000
+	var text strings.Builder
+	manifest, err := Scan(context.Background(), policy, func(_ context.Context, chunk Chunk) error {
+		text.WriteString(chunk.Text)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := assertEntryStatus(t, manifest, filepath.Base(path), StatusIndexed)
+	if entry.Extractor != pdfOCRExtractorVersion || entry.ChunkCount == 0 || !strings.Contains(strings.ToLower(text.String()), "mauler") {
+		t.Fatalf("live OCR evidence = entry %#v text %q", entry, text.String())
+	}
+}
+
+func repoScannedPDF(text string) []byte {
+	const width, height, scale = 1000, 220, 14
+	imageData := image.NewGray(image.Rect(0, 0, width, height))
+	for index := range imageData.Pix {
+		imageData.Pix[index] = 0xff
+	}
+	glyphs := map[rune][]string{
+		'M': {"10001", "11011", "10101", "10101", "10001", "10001", "10001"},
+		'A': {"01110", "10001", "10001", "11111", "10001", "10001", "10001"},
+		'U': {"10001", "10001", "10001", "10001", "10001", "10001", "01110"},
+		'L': {"10000", "10000", "10000", "10000", "10000", "10000", "11111"},
+		'E': {"11111", "10000", "10000", "11110", "10000", "10000", "11111"},
+		'R': {"11110", "10001", "10001", "11110", "10100", "10010", "10001"},
+		'O': {"01110", "10001", "10001", "10001", "10001", "10001", "01110"},
+		'C': {"01111", "10000", "10000", "10000", "10000", "10000", "01111"},
+		' ': {"00000", "00000", "00000", "00000", "00000", "00000", "00000"},
+	}
+	x, startY := 45, 55
+	for _, letter := range strings.ToUpper(text) {
+		pattern := glyphs[letter]
+		for row, bits := range pattern {
+			for column, bit := range bits {
+				if bit != '1' {
+					continue
+				}
+				for py := 0; py < scale; py++ {
+					for px := 0; px < scale; px++ {
+						imageData.SetGray(x+column*scale+px, startY+row*scale+py, color.Gray{Y: 0})
+					}
+				}
+			}
+		}
+		x += 6 * scale
+	}
+	var encoded bytes.Buffer
+	_ = jpeg.Encode(&encoded, imageData, &jpeg.Options{Quality: 95})
+
+	var output bytes.Buffer
+	output.WriteString("%PDF-1.4\n%scanned-image-only\n")
+	offsets := make([]int, 6)
+	writeObject := func(number int, header string, stream []byte) {
+		offsets[number] = output.Len()
+		fmt.Fprintf(&output, "%d 0 obj\n%s", number, header)
+		if stream != nil {
+			output.WriteString("\nstream\n")
+			output.Write(stream)
+			output.WriteString("\nendstream")
+		}
+		output.WriteString("\nendobj\n")
+	}
+	writeObject(1, "<< /Type /Catalog /Pages 2 0 R >>", nil)
+	writeObject(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", nil)
+	writeObject(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 132] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>", nil)
+	writeObject(4, fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length %d >>", width, height, encoded.Len()), encoded.Bytes())
+	content := []byte("q 600 0 0 132 0 0 cm /Im0 Do Q")
+	writeObject(5, fmt.Sprintf("<< /Length %d >>", len(content)), content)
+	xref := output.Len()
+	output.WriteString("xref\n0 6\n0000000000 65535 f \n")
+	for number := 1; number <= 5; number++ {
+		fmt.Fprintf(&output, "%010d 00000 n \n", offsets[number])
+	}
+	fmt.Fprintf(&output, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", xref)
+	return output.Bytes()
+}
+
+func write7ZIPFixture(t *testing.T, path string) {
+	t.Helper()
+	const encoded = "N3q8ryccAAQS/sHE8AMAAAAAAABaAAAAAAAAADqCey/gCo0D6F0ANpvIsa4S7u3Yfks2MwIdtExatdK23XV++Qpmi8Ermbw7Vk93nJIDnIaCnVdejB5TY9eLzvdzEULEp7OHpgDjxj+jhWpTQDzNuZ02rdVgJT/MMVWpkJofayAKSaK0l1Jfs4yKOEEP6j2FTcZX++LW+BeR00m39A+O62uQrkglt1+gz3RalcUEyHDi6pOGW2+z54+8O1E++h8qufz5U2EouqMpLi5jL3uaR3yHA7Ibqj/Z0BDbZgLgf8xXFUZFwyoRUcJCJwmbwgmu7Rfj/Oq3K2GjygrdxALDUj0DBlYkxS6axXg5p+gA6H8HWmjYj5bZQzdP3cIq/7FLefUL9qKfY6p448KsXOGZiZWZ/iaVzL335Qgm4Pp0zAlU5dKFsc5dKS+QdVU2WZZKppDxxbtJjmH91/J+XB0Je3VcNhHpCn1kDrUzOTKLyp6vdkvS252GhddFgiK0FbB9LoL/pPq472hwbU/C23ym5f5rMr8Wx/Shqcb7OEhSZhRwBtgHts958Irp42ZYFid5XLdsM3XCvJfxGshH53Ejx70kG6ZE9eGhTw/Z1S4Q/gHH1r+/x8XVq+9nu4mYDCTA22W4bT6Cc3nynEJBNyaFCHJvQONdrwCtW+Y74NILfFv0CHVc7IaRn6K6vpxSFDTKQzq4fqIYQER5jXeU0Ij8mxO5NP9nMZS9Yq6U2Q5OHR0WuKTQJ7+l8avkCeFXUKri5X4N5Q+2VZVxLeDD54m4PjmN56nOLBiBgZmI6narvl8INBhNN7DNlutnNnlXdg3Sgp8dstNnJsj62xsLP5SdOuMsSx+1IbkqKEZyCZV2vQ4n+R5HUm6r7rkgqdd12QfYBdijKGiUXAaKdBWCSMP/za2xPv9oNv/0GG4QJVUG8H+g2W42XcqxgoYDIdBXky44xw9afiN+pBGVixvvUwJ0evnrkl41wIBMyV7HH8DyvoSCcX8L+CmJsFjv7AqcqyClDn/k0ivhT40XPIOwttZFru3z2TlMcZAWjpp/YinMy0AU6DlWobrWvQz14uUWd2SgbTHdNUx2Amy9pWUZ/EVQ4Gj5KeNRtp3wr6ilBj3i9NgcNVDChDoNJV9QbQpyGU4EuD0RvTkKBRL6ltC1tYmmMVpa2eVm1mpJE0LNN+mV+sIdum4L1i5kUTBzAy+9+KmcUiMl87bGvz1IxxlfNFsMymi9ZLgYfqGxY9HsmqpthSxiZJLJCNwMYyc5z7qd6uB1E8vCxYFcX/xmzvSEid60TJinIqrgytLFRgfPNzmzTbQ+iFHxFCLqoK3wPUsdTC2ATeNbEMF96xIBv4x6O4xLySPegcv0usRCjByr1LIgAAABBAYAAQmD8AAHCwEAASEhAQAMio4ACAoBlLBVTwAABQEZCgAAAAAAAAAAAAARDwBnAG8ALgBtAG8AZAAAABkEAAAAABQKAQD/DyuhimTdARUGAQAgAAAAAAA="
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

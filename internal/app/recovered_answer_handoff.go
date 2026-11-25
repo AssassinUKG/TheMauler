@@ -10,7 +10,7 @@ func canHandOffRecoveredAnswer(run TaskRun, summary string) bool {
 }
 
 func readOnlyRecoveryEvidenceReady(run TaskRun) bool {
-	if strings.TrimSpace(run.StopReason) != "loop_circuit_breaker" || !promptLooksReadOnly(run.Prompt) || runHasFileMutation(run) {
+	if strings.TrimSpace(run.StopReason) != "loop_circuit_breaker" || !promptLooksReadOnly(taskRoutingPrompt(run)) || runHasFileMutation(run) {
 		return false
 	}
 	for _, tool := range run.Tools {

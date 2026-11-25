@@ -38,6 +38,7 @@ func (t *Shell) Description() string {
 		"On Windows auto uses the configured backend. Set backend=powershell for Windows-host facts such as processes, services, windows, Task Manager state, or GPU state; do not wrap those commands in powershell.exe or send them through a WSL terminal. Set backend=wsl only for Linux/Kali commands that need the distro's /etc/hosts, VPN routing, and tools. Use platform-native paths for the selected backend. "+
 		"Write commands as plain text with literal operators (&, >, <, |, \"); never HTML-escape them (do not write &amp;, &gt;, &lt;, &quot;). "+
 		"For HTB/CTF enumeration, use realistic timeouts (120-300s) for nmap/gobuster/ffuf/hydra, save scan output with -oA/-oN/-oG or tee, then grep/read the saved file instead of rerunning. "+
+		"For nmap choose exactly one port scope: use --top-ports N for a bounded scan or -p- (equivalently -p 1-65535) for a full TCP scan; never combine them. Verify the nmap footer before describing a scan as full. "+
 		"Do not pipe long scans through head because it can terminate the scan early and hide the real exit status. "+
 		"For long-running work (full nmap -p- scans, gobuster, hashcat) set background=true: the command runs detached and returns a job id immediately. "+
 		"Then call this tool again with job=\"<id>\" (and no command) to see its running/done state and latest output, instead of blocking on a timeout. "+
@@ -53,7 +54,7 @@ func (t *Shell) Schema() json.RawMessage {
 	"backend": {"type": "string", "enum": ["auto", "powershell", "wsl", "cmd", "bash"], "description": "Per-call shell backend. Use powershell for Windows host/process/service/app/GPU inspection and wsl for Kali/Linux target work. Omit to use the configured default."},
     "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 300). Use 120-300 for long-running scans/enumeration."},
     "background": {"type": "boolean", "description": "Run the command detached and return a job id immediately instead of waiting. Use for long scans (nmap -p-, gobuster, hashcat)."},
-    "job": {"type": "string", "description": "Poll a previously started background job by its id (e.g. \"j1\"). When set, omit command; returns the job's state and latest output. Respect the returned next-poll backoff instead of polling every turn."},
+    "job": {"type": "string", "description": "Poll a previously started background job by its exact returned id (for example \"isolated-1\" or \"terminal-1\"). When set, omit command; returns the job's state and latest output. Respect the returned next-poll backoff instead of polling every turn."},
     "verbose": {"type": "boolean", "description": "Return fuller diagnostic output when supported. For background job polls, returns up to 65000 bytes of job output plus job metadata/backoff details."}
   },
   "additionalProperties": false
@@ -290,6 +291,9 @@ func PrepareShellCommand(command string) (string, error) {
 	if err := rejectProtectedShellMutation(command); err != nil {
 		return "", err
 	}
+	if err := validateScanCommand(command); err != nil {
+		return "", err
+	}
 	// Quiet noisy scan tools (ffuf -s) so the model gets findings, not banners
 	// and progress spam. Idempotent; only touches recognised tools.
 	command = ApplyScanToolHygiene(command)
@@ -448,7 +452,11 @@ func wrapWSLCommandForCancellation(command, runID string) string {
 	if runID == "" {
 		runID = shellRunID()
 	}
-	return fmt.Sprintf("MAULER_RUN_ID=%s; bash -lc %s", shellQuote(runID), shellQuote(command))
+	// shellCommand already invokes one bash -lc inside WSL. A second nested login
+	// shell makes complex quoted scripts pass through Windows-to-WSL argument
+	// parsing twice, which can empty variables or leave unmatched quotes. Keep the
+	// run marker in the same shell and execute the original command verbatim.
+	return fmt.Sprintf("MAULER_RUN_ID=%s; %s", shellQuote(runID), command)
 }
 
 func extractWSLRunID(command string) string {
@@ -663,8 +671,13 @@ func shellCommand(ctx context.Context, backend, distro, command, wd string) (*ex
 		if wslDir != "" {
 			args = append(args, "--cd", wslDir)
 		}
-		args = append(args, "--", "bash", "-lc", command)
-		return exec.CommandContext(ctx, "wsl.exe", args...), nil
+		// Pass the script over stdin. Supplying a complex script as the final
+		// wsl.exe command-line argument lets the Windows/WSL boundary reinterpret
+		// quotes and expand $variables before Bash sees their assignments.
+		args = append(args, "--", "bash", "-l", "-s", "--")
+		cmd = exec.CommandContext(ctx, "wsl.exe", args...)
+		cmd.Stdin = strings.NewReader(command)
+		return cmd, nil
 	case "bash", "":
 		cmd = exec.CommandContext(ctx, "/bin/bash", "-lc", command)
 		cmd.Dir = NormalizeHostPath(wd)
@@ -678,6 +691,7 @@ func cloneCommandWithContext(ctx context.Context, cmd *exec.Cmd) *exec.Cmd {
 	next := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	next.Dir = cmd.Dir
 	next.Env = cmd.Env
+	next.Stdin = cmd.Stdin
 	applyHiddenWindow(next)
 	return next
 }

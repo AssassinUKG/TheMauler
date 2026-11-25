@@ -356,6 +356,22 @@ func (a *App) GetBrowserWorkflowStatus() BrowserWorkflowStatus {
 	return a.browserStatus(tools.GetBrowserWorkflowStatus(owner))
 }
 
+// ListBrowserEvidence returns workspace-scoped screenshot manifests after
+// re-hashing their current bytes. It never trusts a model-supplied path and
+// never replaces the original captured fingerprint when evidence is stale.
+func (a *App) ListBrowserEvidence() ([]tools.BrowserEvidenceRecord, error) {
+	a.mu.Lock()
+	root := ""
+	if a.cfg != nil {
+		root = a.cfg.Context.WorkspaceDir
+	}
+	a.mu.Unlock()
+	if strings.TrimSpace(root) == "" {
+		return []tools.BrowserEvidenceRecord{}, nil
+	}
+	return tools.ListBrowserEvidence(root)
+}
+
 func (a *App) StartBrowserWorkflow(url string) (BrowserWorkflowStatus, error) {
 	if !a.browserToolEnabled() {
 		status := a.GetBrowserWorkflowStatus()

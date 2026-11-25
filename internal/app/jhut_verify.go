@@ -45,6 +45,16 @@ type jhutCanvasMetrics struct {
 	Coverage float64 `json:"coverage"`
 }
 
+func captureChromedpValue[T any](dst *T, action chromedp.Action[T]) chromedp.Action[chromedp.Void] {
+	return func(ctx context.Context, target *chromedp.Target) (chromedp.Void, error) {
+		value, err := action(ctx, target)
+		if err == nil {
+			*dst = value
+		}
+		return chromedp.Void{}, err
+	}
+}
+
 func (a *App) RunJHUTBrowserVerification(workspace string) JHUTBrowserReport {
 	report, _ := verifyJHUTBrowser(context.Background(), workspace, "")
 	return report
@@ -75,46 +85,62 @@ func verifyJHUTBrowser(parent context.Context, workspace, evidenceDir string) (J
 	ctx, timeoutCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer timeoutCancel()
 	var eventMu sync.Mutex
-	chromedp.ListenTarget(ctx, func(event any) {
-		eventMu.Lock()
-		defer eventMu.Unlock()
-		switch ev := event.(type) {
-		case *runtime.EventExceptionThrown:
+	eventCtx, stopEvents := context.WithCancel(ctx)
+	exceptionEvents := chromedp.Events(eventCtx, runtime.ExceptionThrown)
+	consoleEvents := chromedp.Events(eventCtx, runtime.ConsoleAPICalled)
+	var eventWG sync.WaitGroup
+	eventWG.Add(2)
+	go func() {
+		defer eventWG.Done()
+		for ev, eventErr := range exceptionEvents {
+			if eventErr != nil {
+				return
+			}
+			eventMu.Lock()
 			report.RuntimeErrors = append(report.RuntimeErrors, ev.ExceptionDetails.Text)
-		case *runtime.EventConsoleAPICalled:
-			if ev.Type == runtime.APITypeError || ev.Type == runtime.APITypeWarning {
+			eventMu.Unlock()
+		}
+	}()
+	go func() {
+		defer eventWG.Done()
+		for ev, eventErr := range consoleEvents {
+			if eventErr != nil {
+				return
+			}
+			if ev.Type == runtime.ConsoleAPICalledTypeError || ev.Type == runtime.ConsoleAPICalledTypeWarning {
 				parts := make([]string, 0, len(ev.Args))
 				for _, arg := range ev.Args {
 					parts = append(parts, arg.Description)
 				}
+				eventMu.Lock()
 				report.ConsoleErrors = append(report.ConsoleErrors, strings.Join(parts, " "))
+				eventMu.Unlock()
 			}
 		}
-	})
+	}()
 	var desktop, mobile, canvasShot, afterOrbit []byte
 	var metrics jhutCanvasMetrics
 	var mobileMetrics jhutCanvasMetrics
 	var interactionDispatched bool
-	actions := []chromedp.Action{
-		chromedp.EmulateViewport(1440, 900), chromedp.Navigate(report.URL), chromedp.WaitVisible("canvas", chromedp.ByQuery), chromedp.Sleep(3 * time.Second),
-		chromedp.Evaluate(jhutMetricsJS, &metrics), chromedp.Screenshot("canvas", &canvasShot, chromedp.ByQuery), chromedp.FullScreenshot(&desktop, 90),
-		chromedp.ActionFunc(func(ctx context.Context) error { return input.DispatchMouseEvent(input.MouseMoved, 720, 450).Do(ctx) }),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return input.DispatchMouseEvent(input.MousePressed, 720, 450).WithButton(input.Left).WithClickCount(1).Do(ctx)
+	actions := []chromedp.Action[chromedp.Void]{
+		chromedp.EmulateViewport(1440, 900), chromedp.Navigate(report.URL), chromedp.WaitVisible(chromedp.CSS("canvas")), chromedp.Sleep(3 * time.Second),
+		captureChromedpValue(&metrics, chromedp.Evaluate[jhutCanvasMetrics](jhutMetricsJS)), captureChromedpValue(&canvasShot, chromedp.Screenshot(chromedp.CSS("canvas"))), captureChromedpValue(&desktop, chromedp.FullScreenshot(90)),
+		chromedp.MouseEvent(chromedp.MouseMoved, 720, 450),
+		chromedp.MouseEvent(chromedp.MousePressed, 720, 450, chromedp.ButtonLeft, chromedp.ClickCount(1)),
+		chromedp.MouseEvent(chromedp.MouseMoved, 860, 500, func(params *input.DispatchMouseEventParams) {
+			params.Button = input.MouseButtonLeft
+			params.Buttons = 1
 		}),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return input.DispatchMouseEvent(input.MouseMoved, 860, 500).WithButton(input.Left).WithButtons(1).Do(ctx)
-		}),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return input.DispatchMouseEvent(input.MouseReleased, 860, 500).WithButton(input.Left).Do(ctx)
-		}),
-		chromedp.Evaluate(`(() => { const c=document.querySelector('canvas'); if(!c)return false; const opts={bubbles:true,clientX:860,clientY:500,buttons:1,pointerId:1,pointerType:'mouse'}; c.dispatchEvent(new PointerEvent('pointermove',opts)); c.dispatchEvent(new MouseEvent('mousemove',opts)); return true; })()`, &interactionDispatched),
-		chromedp.Sleep(time.Second), chromedp.Screenshot("canvas", &afterOrbit, chromedp.ByQuery),
-		chromedp.EmulateViewport(390, 844), chromedp.Sleep(time.Second), chromedp.Evaluate(jhutMetricsJS, &mobileMetrics), chromedp.FullScreenshot(&mobile, 90),
+		chromedp.MouseEvent(chromedp.MouseReleased, 860, 500, chromedp.ButtonLeft),
+		captureChromedpValue(&interactionDispatched, chromedp.Evaluate[bool](`(() => { const c=document.querySelector('canvas'); if(!c)return false; const opts={bubbles:true,clientX:860,clientY:500,buttons:1,pointerId:1,pointerType:'mouse'}; c.dispatchEvent(new PointerEvent('pointermove',opts)); c.dispatchEvent(new MouseEvent('mousemove',opts)); return true; })()`)),
+		chromedp.Sleep(time.Second), captureChromedpValue(&afterOrbit, chromedp.Screenshot(chromedp.CSS("canvas"))),
+		chromedp.EmulateViewport(390, 844), chromedp.Sleep(time.Second), captureChromedpValue(&mobileMetrics, chromedp.Evaluate[jhutCanvasMetrics](jhutMetricsJS)), captureChromedpValue(&mobile, chromedp.FullScreenshot(90)),
 	}
-	if err := chromedp.Run(ctx, actions...); err != nil {
+	if err := chromedp.Do(ctx, actions...); err != nil {
 		report.Failures = append(report.Failures, "browser run: "+err.Error())
 	}
+	stopEvents()
+	eventWG.Wait()
 	variance, coverage := pngVisualMetrics(canvasShot)
 	report.CanvasWidth, report.CanvasHeight, report.PixelVariance, report.PixelCoverage = metrics.Width, metrics.Height, variance, coverage
 	report.OrbitChanged = len(canvasShot) > 0 && byteHash(canvasShot) != byteHash(afterOrbit)

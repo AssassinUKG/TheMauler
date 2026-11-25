@@ -47,27 +47,33 @@ type telegramRuntime struct {
 	client telegramAPI
 	cfg    settings.TelegramConfig
 
-	mu             sync.Mutex
-	progressSendMu sync.Mutex
-	offset         int64
-	lastProgress   map[int64]time.Time
-	progressIDs    map[int64]int64
-	progressChats  map[int64]bool
-	progressTasks  map[int64]string
-	progressStarts map[int64]time.Time
-	progressStates map[int64]string
-	progressDetail map[int64]string
-	progressChatID int64
-	lastPoll       time.Time
-	lastUpdate     time.Time
-	lastMessage    string
-	lastReject     string
-	seenMessages   map[string]bool
-	voiceChats     map[int64]bool
-	ttsVoice       map[int64]string
-	ttsSpeed       map[int64]float64
-	pollErrors     int
-	updateCount    int
+	mu                sync.Mutex
+	progressSendMu    sync.Mutex
+	offset            int64
+	lastProgress      map[int64]time.Time
+	progressIDs       map[int64]int64
+	progressChats     map[int64]bool
+	progressTasks     map[int64]string
+	progressStarts    map[int64]time.Time
+	progressStates    map[int64]string
+	progressDetail    map[int64]string
+	progressOwners    map[int64]telegram.Message
+	progressClaimants map[int64]string
+	progressSources   map[int64]string
+	progressFinal     map[int64]string
+	progressUncertain map[int64]bool
+	results           telegramResultStore
+	progressChatID    int64
+	lastPoll          time.Time
+	lastUpdate        time.Time
+	lastMessage       string
+	lastReject        string
+	seenMessages      map[string]bool
+	voiceChats        map[int64]bool
+	ttsVoice          map[int64]string
+	ttsSpeed          map[int64]float64
+	pollErrors        int
+	updateCount       int
 }
 
 func (a *App) restartTelegramRuntime(cfg settings.TelegramConfig) {
@@ -201,7 +207,7 @@ func (a *App) trackQueuedTelegramRun(env channelbus.Envelope, task string) (int6
 	if svc == nil {
 		return 0, false
 	}
-	svc.trackProgressChat(chatID, task)
+	svc.trackProgressEnvelope(env, task)
 	return chatID, true
 }
 
@@ -381,6 +387,10 @@ func (r *telegramRuntime) run(ctx context.Context) {
 		for _, update := range updates {
 			r.recordUpdate(update)
 			r.advanceOffset(update.UpdateID + 1)
+			if update.CallbackQuery != nil {
+				r.handleResultCallback(ctx, *update.CallbackQuery)
+				continue
+			}
 			if update.Message == nil {
 				continue
 			}
@@ -419,22 +429,24 @@ func (r *telegramRuntime) handleMessage(ctx context.Context, msg telegram.Messag
 	}
 	r.recordMessage(describeTelegramMessage(msg))
 	env := channelbus.Envelope{
+		ID:          fmt.Sprintf("telegram-%d-%d-%d", msg.Chat.ID, msg.MessageThreadID, msg.MessageID),
 		Source:      "telegram",
-		SessionID:   fmt.Sprintf("telegram:%d", msg.Chat.ID),
+		SessionID:   telegramSessionID(msg.Chat.ID, msg.MessageThreadID),
 		UserID:      telegramUserID(msg),
 		Username:    telegramUsername(msg),
 		Text:        text,
 		Attachments: attachments,
 		Metadata: map[string]string{
-			"chat_id":    strconv.FormatInt(msg.Chat.ID, 10),
-			"message_id": strconv.FormatInt(msg.MessageID, 10),
-			"chat_type":  msg.Chat.Type,
+			"chat_id":           strconv.FormatInt(msg.Chat.ID, 10),
+			"message_id":        strconv.FormatInt(msg.MessageID, 10),
+			"chat_type":         msg.Chat.Type,
+			"message_thread_id": strconv.FormatInt(msg.MessageThreadID, 10),
 		},
 	}
 	route := channelbus.RouteEnvelope(env)
 	pretracked := false
 	if route.Lane == channelbus.LaneWork && !r.app.isAgentRunning() {
-		r.trackProgressChat(msg.Chat.ID, route.Argument)
+		r.trackProgressEnvelope(env, route.Argument)
 		pretracked = true
 	}
 	resp, err := r.app.DispatchChannelMessage(env)
@@ -451,10 +463,19 @@ func (r *telegramRuntime) handleMessage(ctx context.Context, msg telegram.Messag
 			if resp.Data != nil && strings.TrimSpace(resp.Data["task"]) != "" {
 				task = resp.Data["task"]
 			}
-			r.trackProgressChat(msg.Chat.ID, task)
+			r.trackProgressEnvelope(env, task)
 		}
 	} else if pretracked {
 		r.untrackProgressChat(msg.Chat.ID)
+	}
+	if resp.RunStarted && r.cfg.SendProgress {
+		// The acknowledged start IS the first progress card, not a separate
+		// message followed by a second noisy status card ten seconds later.
+		r.mu.Lock()
+		state, detail, task := r.progressStates[msg.Chat.ID], r.progressDetail[msg.Chat.ID], r.progressTasks[msg.Chat.ID]
+		r.mu.Unlock()
+		r.sendTelegramProgressUpdate(ctx, msg.Chat.ID, state, formatTelegramRunProgressMessageForTask(state, detail, task, 0))
+		return
 	}
 	reply := resp.Message
 	if resp.Queued && resp.QueueID != "" {
@@ -472,7 +493,7 @@ func (r *telegramRuntime) sendTelegramReply(ctx context.Context, msg telegram.Me
 		}
 	}
 	start := time.Now()
-	messageID, err := r.client.SendMessage(ctx, msg.Chat.ID, text)
+	messageID, err := r.sendResult(ctx, msg, text, "", 0)
 	duration := time.Since(start)
 	if err != nil {
 		r.recordTelegramSendEvent(msg, status, "error", duration, 0, text, err.Error())
@@ -1184,6 +1205,12 @@ func (r *telegramRuntime) notifyRunStateWithTerminal(ctx context.Context, state,
 	}
 	targets := make([]progressTarget, 0, len(r.progressChats))
 	for chatID := range r.progressChats {
+		if terminal {
+			if r.progressFinal == nil {
+				r.progressFinal = map[int64]string{}
+			}
+			r.progressFinal[chatID] = detail
+		}
 		if r.progressStates == nil {
 			r.progressStates = map[int64]string{}
 		}
@@ -1216,7 +1243,10 @@ func (r *telegramRuntime) notifyRunStateWithTerminal(ctx context.Context, state,
 	for _, target := range targets {
 		msg := formatTelegramRunProgressMessageForTask(state, detail, target.task, target.elapsed)
 		if terminal && r.app != nil {
-			r.app.recordRemoteRunConversation(fmt.Sprintf("telegram:%d", target.chatID), target.task, state, detail)
+			r.mu.Lock()
+			owner := r.progressOwners[target.chatID]
+			r.mu.Unlock()
+			r.app.recordRemoteRunConversation(telegramSessionID(target.chatID, owner.MessageThreadID), target.task, state, detail)
 		}
 		r.sendTelegramProgressUpdateWithTerminal(ctx, target.chatID, state, msg, terminal)
 	}
@@ -1299,33 +1329,76 @@ func (r *telegramRuntime) sendTelegramProgressUpdateWithTerminal(ctx context.Con
 	start := time.Now()
 	r.mu.Lock()
 	existingID := r.progressIDs[chatID]
+	owner, owned := r.progressOwners[chatID]
+	sources := r.progressSources[chatID]
+	finalText := r.progressFinal[chatID]
+	uncertain := r.progressUncertain[chatID]
 	r.mu.Unlock()
+	if uncertain && !terminal {
+		return
+	}
+	if terminal {
+		defer func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			delete(r.progressOwners, chatID)
+			delete(r.progressClaimants, chatID)
+			delete(r.progressSources, chatID)
+			delete(r.progressFinal, chatID)
+			delete(r.progressUncertain, chatID)
+		}()
+	}
 	var messageID int64
 	var err error
 	sendStatus := "edited"
-	// Telegram can send a long answer as multiple messages, but one existing
-	// message cannot be edited into multiple chunks. Remove the short live status
-	// before sending the complete multi-part final answer, otherwise users are
-	// left with a stale "working" card above the real result.
-	if existingID > 0 && terminal && len(telegram.SplitTelegramHTML(telegram.TelegramHTMLFromMarkdownish(text))) > 1 {
-		if deleteErr := r.client.DeleteMessage(ctx, chatID, existingID); deleteErr == nil {
-			existingID = 0
-			sendStatus = "replaced"
+	if terminal && owned {
+		// A final answer is not a progress-stage dump. Jade-style compact
+		// presentation retains exact full text behind read-only result buttons.
+		result := text
+		if (state == "done" || state == "recovered") && strings.TrimSpace(finalText) != "" {
+			result = finalText
 		}
-	}
-	if existingID > 0 {
-		err = r.client.EditMessage(ctx, chatID, existingID, text)
-		messageID = existingID
-	}
-	if existingID == 0 || err != nil {
-		messageID, err = r.client.SendMessage(ctx, chatID, text)
-		sendStatus = "sent"
+		messageID, err = r.sendResult(ctx, owner, result, sources, existingID)
+	} else {
+		// Telegram can send a long answer as multiple messages, but one existing
+		// message cannot be edited into multiple chunks. Remove the short live status
+		// before sending the complete multi-part final answer, otherwise users are
+		// left with a stale "working" card above the real result.
+		if existingID > 0 && terminal && len(telegram.SplitTelegramHTML(telegram.TelegramHTMLFromMarkdownish(text))) > 1 {
+			if deleteErr := r.client.DeleteMessage(ctx, chatID, existingID); deleteErr == nil {
+				existingID = 0
+				sendStatus = "replaced"
+			}
+		}
+		if existingID > 0 {
+			err = r.client.EditMessage(ctx, chatID, existingID, text)
+			messageID = existingID
+		}
+		if telegram.IsNotModified(err) {
+			err = nil
+		}
+		if existingID == 0 || telegram.IsMissingMessage(err) {
+			if client, ok := r.client.(telegramRichAPI); ok && owned {
+				messageID, err = client.SendMessageWithOptions(ctx, chatID, text, telegram.MessageOptions{ThreadID: owner.MessageThreadID, ReplyToMessageID: owner.MessageID})
+			} else {
+				messageID, err = r.client.SendMessage(ctx, chatID, text)
+			}
+			sendStatus = "sent"
+		}
 	}
 	duration := time.Since(start)
 	detail := ""
 	if err != nil {
 		sendStatus = "error"
 		detail = err.Error()
+		if existingID == 0 && telegram.IsUncertain(err) {
+			r.mu.Lock()
+			if r.progressUncertain == nil {
+				r.progressUncertain = map[int64]bool{}
+			}
+			r.progressUncertain[chatID] = true
+			r.mu.Unlock()
+		}
 	} else {
 		r.mu.Lock()
 		if terminal {
@@ -1710,6 +1783,8 @@ func formatTelegramModelLoadDetail(detail string) string {
 func (r *telegramRuntime) trackProgressChat(chatID int64, task string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	delete(r.progressIDs, chatID)
+	delete(r.progressUncertain, chatID)
 	if r.progressChats == nil {
 		r.progressChats = map[int64]bool{}
 	}
@@ -1748,6 +1823,11 @@ func (r *telegramRuntime) untrackProgressChat(chatID int64) {
 	delete(r.progressDetail, chatID)
 	delete(r.lastProgress, chatID)
 	delete(r.progressIDs, chatID)
+	delete(r.progressOwners, chatID)
+	delete(r.progressClaimants, chatID)
+	delete(r.progressSources, chatID)
+	delete(r.progressFinal, chatID)
+	delete(r.progressUncertain, chatID)
 }
 
 func (r *telegramRuntime) setStatus(status string) {

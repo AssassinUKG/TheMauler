@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"html"
+	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -29,9 +31,15 @@ func TelegramHTMLFromMarkdownish(text string) string {
 			code.WriteByte('\n')
 			continue
 		}
-		escaped := html.EscapeString(line)
-		escaped = convertPairs(escaped, "**", "<b>", "</b>")
-		escaped = convertPairs(escaped, "`", "<code>", "</code>")
+		heading := strings.TrimLeft(line, "#")
+		isHeading := len(line)-len(heading) > 0 && len(line)-len(heading) <= 6 && strings.HasPrefix(heading, " ")
+		if isHeading {
+			line = strings.TrimSpace(heading)
+		}
+		escaped := telegramInline(line)
+		if isHeading {
+			escaped = "<b>" + escaped + "</b>"
+		}
 		out.WriteString(escaped)
 		out.WriteByte('\n')
 	}
@@ -44,38 +52,51 @@ func TelegramHTMLFromMarkdownish(text string) string {
 }
 
 func SplitTelegramHTML(text string) []string {
-	if len([]rune(text)) <= telegramChunkLimit {
-		if text == "" {
-			return []string{""}
-		}
-		return []string{text}
+	chunks, err := splitBalancedHTML(text, telegramChunkLimit)
+	if err != nil {
+		chunks, _ = splitBalancedHTML(html.EscapeString(text), telegramChunkLimit)
 	}
-	var chunks []string
-	var current strings.Builder
-	for _, line := range strings.Split(text, "\n") {
-		lineLen := len([]rune(line)) + 1
-		if current.Len() > 0 && len([]rune(current.String()))+lineLen > telegramChunkLimit {
-			chunks = append(chunks, strings.TrimRight(current.String(), "\n"))
-			current.Reset()
-		}
-		if lineLen > telegramChunkLimit {
-			for _, ch := range line {
-				if len([]rune(current.String())) >= telegramChunkLimit {
-					chunks = append(chunks, current.String())
-					current.Reset()
-				}
-				current.WriteRune(ch)
-			}
-			current.WriteByte('\n')
-			continue
-		}
-		current.WriteString(line)
-		current.WriteByte('\n')
-	}
-	if strings.TrimSpace(current.String()) != "" {
-		chunks = append(chunks, strings.TrimRight(current.String(), "\n"))
+	if len(chunks) == 0 {
+		return []string{""}
 	}
 	return chunks
+}
+
+var telegramLinkRE = regexp.MustCompile(`\[([^\]\n]{1,250})\]\((https?://[^\s)]+)\)`)
+
+func telegramProse(text string) string {
+	escaped := html.EscapeString(text)
+	escaped = telegramLinkRE.ReplaceAllStringFunc(escaped, func(match string) string {
+		parts := telegramLinkRE.FindStringSubmatch(match)
+		link := html.UnescapeString(parts[2])
+		u, err := url.Parse(link)
+		if err != nil || u.Host == "" || u.User != nil || len(link) > 4096 {
+			return match
+		}
+		return `<a href="` + html.EscapeString(link) + `">` + parts[1] + `</a>`
+	})
+	return convertPairs(escaped, "**", "<b>", "</b>")
+}
+
+func telegramInline(text string) string {
+	var out strings.Builder
+	for {
+		start := strings.IndexByte(text, '`')
+		if start < 0 {
+			out.WriteString(telegramProse(text))
+			break
+		}
+		end := strings.IndexByte(text[start+1:], '`')
+		if end < 0 {
+			out.WriteString(telegramProse(text))
+			break
+		}
+		end += start + 1
+		out.WriteString(telegramProse(text[:start]))
+		out.WriteString("<code>" + html.EscapeString(text[start+1:end]) + "</code>")
+		text = text[end+1:]
+	}
+	return out.String()
 }
 
 func convertPairs(text, marker, open, close string) string {

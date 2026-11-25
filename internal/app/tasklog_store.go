@@ -153,18 +153,22 @@ func replaceTaskRunTx(tx *sql.Tx, run TaskRun) error {
 	}
 	if _, err := tx.Exec(`
 insert into task_runs (
-  id, generation, conversation_epoch, parent_run_id, prompt, mode, profile, model, claimant_id, claimant_alias, origin,
+  id, generation, conversation_epoch, parent_run_id, prompt, routing_prompt, mode, agent_definition_id, agent_definition_version,
+  profile, model, claimant_id, claimant_alias, origin,
   contract_json, contract_digest, control_phase, control_state_json,
   status, state, stop_reason, stop_detail,
   started_at, ended_at, duration_ms, prompt_tokens, completion_tokens,
   total_tokens, summary, response, finalized_artifacts_json
-) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 on conflict(id) do update set
   generation=excluded.generation,
   conversation_epoch=excluded.conversation_epoch,
   parent_run_id=excluded.parent_run_id,
   prompt=excluded.prompt,
+  routing_prompt=excluded.routing_prompt,
   mode=excluded.mode,
+  agent_definition_id=excluded.agent_definition_id,
+  agent_definition_version=excluded.agent_definition_version,
   profile=excluded.profile,
   model=excluded.model,
   claimant_id=excluded.claimant_id,
@@ -187,7 +191,8 @@ on conflict(id) do update set
   summary=excluded.summary,
   response=excluded.response,
   finalized_artifacts_json=excluded.finalized_artifacts_json
-`, run.ID, run.Generation, run.ConversationEpoch, run.ParentRunID, run.Prompt, run.Mode, run.Profile, run.Model, run.ClaimantID, run.ClaimantAlias, run.Origin,
+`, run.ID, run.Generation, run.ConversationEpoch, run.ParentRunID, run.Prompt, run.RoutingPrompt, run.Mode, run.AgentDefinitionID, run.AgentDefinitionVersion,
+		run.Profile, run.Model, run.ClaimantID, run.ClaimantAlias, run.Origin,
 		contractJSON, contractDigest, controlPhase, controlJSON, run.Status, run.State, run.StopReason, run.StopDetail,
 		run.StartedAt, run.EndedAt, run.DurationMs, run.PromptTokens, run.CompletionTokens, run.TotalTokens, run.Summary, run.Response, finalizedArtifactsJSON); err != nil {
 		return err
@@ -209,7 +214,9 @@ on conflict(id) do update set
 
 func loadTaskRunsDB(db *sql.DB) ([]TaskRun, error) {
 	rows, err := db.Query(`
-select id, coalesce(generation, 0), coalesce(conversation_epoch, 0), coalesce(parent_run_id, ''), prompt, mode, profile, model, coalesce(claimant_id, ''), coalesce(claimant_alias, ''), coalesce(origin, ''), status, state, stop_reason, stop_detail,
+select id, coalesce(generation, 0), coalesce(conversation_epoch, 0), coalesce(parent_run_id, ''), prompt, coalesce(routing_prompt, ''), mode,
+       coalesce(agent_definition_id, ''), coalesce(agent_definition_version, ''),
+       profile, model, coalesce(claimant_id, ''), coalesce(claimant_alias, ''), coalesce(origin, ''), status, state, stop_reason, stop_detail,
        coalesce(contract_json, ''), coalesce(control_state_json, ''),
        started_at, ended_at, duration_ms, prompt_tokens, completion_tokens,
        total_tokens, summary, response, coalesce(finalized_artifacts_json, '[]')
@@ -223,7 +230,7 @@ order by started_at desc`)
 	for rows.Next() {
 		var run TaskRun
 		var contractJSON, controlJSON, finalizedArtifactsJSON string
-		if err := rows.Scan(&run.ID, &run.Generation, &run.ConversationEpoch, &run.ParentRunID, &run.Prompt, &run.Mode, &run.Profile, &run.Model, &run.ClaimantID, &run.ClaimantAlias, &run.Origin, &run.Status, &run.State,
+		if err := rows.Scan(&run.ID, &run.Generation, &run.ConversationEpoch, &run.ParentRunID, &run.Prompt, &run.RoutingPrompt, &run.Mode, &run.AgentDefinitionID, &run.AgentDefinitionVersion, &run.Profile, &run.Model, &run.ClaimantID, &run.ClaimantAlias, &run.Origin, &run.Status, &run.State,
 			&run.StopReason, &run.StopDetail, &contractJSON, &controlJSON, &run.StartedAt, &run.EndedAt, &run.DurationMs, &run.PromptTokens,
 			&run.CompletionTokens, &run.TotalTokens, &run.Summary, &run.Response, &finalizedArtifactsJSON); err != nil {
 			return nil, err

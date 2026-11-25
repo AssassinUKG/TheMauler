@@ -47,6 +47,16 @@ func (a *App) RunDoctor() DoctorResult {
 	var checks []DoctorCheck
 	add := func(c DoctorCheck) { checks = append(checks, c) }
 
+	nanoCyber := a.GetNanoCyberHealth()
+	switch {
+	case !nanoCyber.Enabled:
+		add(DoctorCheck{Name: "NanoCyber sandbox", Status: "info", Message: nanoCyber.Summary})
+	case nanoCyber.Compatible:
+		add(DoctorCheck{Name: "NanoCyber sandbox", Status: "ok", Message: nanoCyber.Summary, Detail: fmt.Sprintf("endpoint=%s\napi=%s\nlease_schema=%d\ncapabilities=%s", nanoCyber.Endpoint, nanoCyber.APIVersion, nanoCyber.LeaseSchemaVersion, strings.Join(nanoCyber.Capabilities, ", "))})
+	default:
+		add(DoctorCheck{Name: "NanoCyber sandbox", Status: "fail", Message: nanoCyber.Summary, Detail: nanoCyber.Detail})
+	}
+
 	// Repository intelligence is read-only here: Doctor reports the active or
 	// in-flight generation but never starts a potentially expensive scan.
 	if status, err := a.GetRepositoryIndexStatus(); err != nil {
@@ -104,6 +114,7 @@ func (a *App) RunDoctor() DoctorResult {
 				Detail:  "If InferenceBridge is running on this same Windows machine, localhost/127.0.0.1 is usually less fragile than a LAN IP.",
 			})
 		}
+		addProviderAuthenticationCheck(add, provider)
 		addInferenceBridgePortConfigCheck(add, provider)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1228,6 +1239,41 @@ func providerAPIKey(provider settings.Provider) string {
 	return settings.ResolveProviderAPIKey(provider.Name, provider.APIKeyEnv)
 }
 
+func addProviderAuthenticationCheck(add func(DoctorCheck), provider settings.Provider) {
+	status := settings.GetProviderAPIKeyStatus(provider.Name, provider.APIKeyEnv)
+	if status.EffectiveConfigured {
+		source := "Mauler's local provider secret store"
+		if status.EnvironmentConfigured {
+			source = "the configured environment variable"
+			if status.StoredConfigured {
+				source += " (a stored fallback is also present)"
+			}
+		}
+		add(DoctorCheck{
+			Name:    "Provider authentication",
+			Status:  "ok",
+			Message: "A provider credential is configured",
+			Detail:  "Credential source: " + source + ". Secret values are never returned by Doctor.",
+		})
+		return
+	}
+
+	parsed, _ := url.Parse(strings.TrimSpace(provider.BaseURL))
+	local := parsed != nil && (strings.EqualFold(parsed.Hostname(), "localhost") || parsed.Hostname() == "127.0.0.1" || parsed.Hostname() == "::1")
+	statusName := "info"
+	message := "No provider credential is configured"
+	if !local || strings.TrimSpace(provider.APIKeyEnv) != "" || strings.Contains(strings.ToLower(provider.BaseURL), "openrouter.ai") {
+		statusName = "warn"
+		message = "Provider authentication is not configured"
+	}
+	add(DoctorCheck{
+		Name:    "Provider authentication",
+		Status:  statusName,
+		Message: message,
+		Detail:  "Doctor reports credential presence only. If this endpoint requires a key, add it in Settings > Providers; the reachability check will then verify it without exposing the value.",
+	})
+}
+
 func firstJSONTextKey(value any, keys ...string) string {
 	for _, key := range keys {
 		if text := findTextJSONKey(value, key); text != "" {
@@ -2165,22 +2211,46 @@ func addInferenceBridgePortConfigCheck(add func(DoctorCheck), provider settings.
 	if wantPort == "" {
 		return
 	}
-	var mismatches []string
+	type portCandidate struct {
+		path string
+		port string
+	}
+	var candidates []portCandidate
 	for _, path := range inferenceBridgeConfigCandidates() {
 		port, ok := readInferenceBridgeConfigPort(path)
-		if !ok || port == "" || port == wantPort {
+		if !ok || port == "" {
 			continue
 		}
-		mismatches = append(mismatches, fmt.Sprintf("%s has server.port=%s", path, port))
+		candidates = append(candidates, portCandidate{path: path, port: port})
 	}
-	if len(mismatches) == 0 {
+	if len(candidates) == 0 {
+		return
+	}
+	primary := candidates[0]
+	var alternatives []string
+	for _, candidate := range candidates[1:] {
+		if candidate.port != primary.port {
+			alternatives = append(alternatives, fmt.Sprintf("inactive candidate %s has server.port=%s", candidate.path, candidate.port))
+		}
+	}
+	if primary.port == wantPort {
+		detail := fmt.Sprintf("Matched highest-precedence readable config: %s", primary.path)
+		if len(alternatives) > 0 {
+			detail += "\n" + strings.Join(alternatives, "\n") + "\nLower-precedence stale config candidates do not override the active endpoint."
+		}
+		add(DoctorCheck{
+			Name:    "InferenceBridge port config",
+			Status:  "ok",
+			Message: fmt.Sprintf("Mauler and the active InferenceBridge config both use port %s", wantPort),
+			Detail:  detail,
+		})
 		return
 	}
 	add(DoctorCheck{
 		Name:    "InferenceBridge port config",
 		Status:  "warn",
-		Message: fmt.Sprintf("Mauler provider points at %s but an InferenceBridge config uses a different port", provider.BaseURL),
-		Detail:  strings.Join(mismatches, "\n") + "\nKeep Mauler profiles.toml and InferenceBridge's active config on the same port, otherwise runs can fail after bridge restarts.",
+		Message: fmt.Sprintf("Mauler provider points at %s but the active InferenceBridge config uses port %s", provider.BaseURL, primary.port),
+		Detail:  fmt.Sprintf("Highest-precedence readable config: %s\nKeep Mauler profiles.toml and InferenceBridge's active config on the same port, otherwise runs can fail after bridge restarts.", primary.path),
 	})
 }
 
@@ -2199,6 +2269,9 @@ func inferenceBridgeConfigCandidates() []string {
 		seen[key] = true
 		paths = append(paths, clean)
 	}
+	// The first readable file is authoritative. This mirrors the Windows
+	// installation precedence and prevents an old roaming/repository copy from
+	// overriding a live LocalAppData endpoint in diagnostics.
 	if local := os.Getenv("LOCALAPPDATA"); local != "" {
 		add(filepath.Join(local, "InferenceBridge", "inference-bridge.toml"))
 	}

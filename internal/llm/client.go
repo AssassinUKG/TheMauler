@@ -51,6 +51,8 @@ type Message struct {
 	ToolCallID       string              `json:"tool_call_id,omitempty"`
 	ToolCalls        []ToolCallDef       `json:"tool_calls,omitempty"`
 	Name             string              `json:"name,omitempty"`
+	DeliveryStatus   string              `json:"delivery_status,omitempty"`
+	StopReason       string              `json:"stop_reason,omitempty"`
 }
 
 // NewTextMessage constructs a simple text-only message.
@@ -107,14 +109,39 @@ type Usage struct {
 	CompletionMilliseconds    float64
 }
 
+// ModelArchitecture describes the input and output modalities advertised by a
+// provider-owned model catalogue.
+type ModelArchitecture struct {
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
+}
+
+// ModelReasoningCapability describes provider-supported reasoning controls.
+// A nil capability on ModelMetadata means the provider did not advertise one.
+type ModelReasoningCapability struct {
+	Supported               bool     `json:"supported"`
+	SeparatesContent        bool     `json:"separates_content"`
+	EffortValues            []string `json:"effort_values,omitempty"`
+	SupportsReasoningTokens bool     `json:"supports_reasoning_tokens"`
+	DefaultEffort           string   `json:"default_effort,omitempty"`
+}
+
 // ModelMetadata is the provider-owned catalogue information Mauler can use to
-// choose safe profile defaults. ContextLength is the hard provider/model
-// ceiling, not the amount Mauler should fill on every request.
+// choose safe profile defaults and explain local runtime capabilities.
+// ContextLength is the hard provider/model ceiling, not the amount Mauler
+// should fill on every request.
 type ModelMetadata struct {
-	ID                  string   `json:"id"`
-	ContextLength       int      `json:"context_length,omitempty"`
-	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"`
-	SupportedParameters []string `json:"supported_parameters,omitempty"`
+	ID                  string                    `json:"id"`
+	ContextLength       int                       `json:"context_length,omitempty"`
+	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
+	SupportedParameters []string                  `json:"supported_parameters,omitempty"`
+	Active              bool                      `json:"active,omitempty"`
+	State               string                    `json:"state,omitempty"`
+	Architecture        *ModelArchitecture        `json:"architecture,omitempty"`
+	Reasoning           *ModelReasoningCapability `json:"reasoning,omitempty"`
+	SupportsVision      *bool                     `json:"supports_vision,omitempty"`
+	VisionRuntimeReady  *bool                     `json:"vision_runtime_ready,omitempty"`
+	MMProjStatus        string                    `json:"mmproj_status,omitempty"`
 }
 
 // ModelCatalogClient is implemented by backends whose model-list response
@@ -139,9 +166,8 @@ type Request struct {
 	// ToolChoice controls whether the model may call tools this turn.
 	// ""         → omit from request (backend default, equivalent to "auto")
 	// "auto"     → model decides (default when tools are present)
-	// "none"     → model must reply in plain text; tool definitions are still
-	//              sent so the backend can cache the prefix (better KV-cache
-	//              hit rate than removing tools entirely, per OpenAI guidance)
+	// "none"     → model must reply in plain text; backends omit tool schemas so
+	//              a provider/template cannot accidentally emit executable calls
 	// "required" → model must call at least one tool
 	ToolChoice string
 	// Thinking-mode controls (llama.cpp only)

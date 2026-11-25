@@ -116,7 +116,8 @@ func currentTargetIP(events []ledger.Event) string {
 }
 
 func authoritativeTargetIPForRun(run TaskRun, configuredTarget string) string {
-	if ip := labelledTargetIP(run.Prompt); ip != "" {
+	trustedPrompt := taskRoutingPrompt(run)
+	if ip := labelledTargetIP(trustedPrompt); ip != "" {
 		return ip
 	}
 	if ip := currentRunFactTargetIP(run); ip != "" {
@@ -125,7 +126,7 @@ func authoritativeTargetIPForRun(run TaskRun, configuredTarget string) string {
 	if ip := firstIPv4(configuredTarget); ip != "" {
 		return ip
 	}
-	if ip := firstIPv4(run.Prompt); ip != "" {
+	if ip := firstIPv4(trustedPrompt); ip != "" {
 		return ip
 	}
 	return ""

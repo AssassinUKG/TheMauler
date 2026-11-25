@@ -1,7 +1,11 @@
 # TheMauler Agentic Reliability Issues
 
-Last reviewed: 2026-07-15
-Status: MAULER-AR-001 through MAULER-AR-005 are closed; keep this register as the verification record.
+Last reviewed: 2026-11-17
+Status: MAULER-AR-001 through MAULER-AR-005 retain their historical closures. MAULER-AR-006 through MAULER-AR-008 are fixed with bounded local-model qualification; MAULER-AR-009 remains open.
+
+Native follow-up: MAULER-AR-009 has bounded Windows native-process evidence, not reboot closure.
+MAULER-AR-010/011 are repaired with native evidence; MAULER-AR-012's executable/waiter defect is
+repaired while wider descendant containment remains open.
 
 This is the canonical issue register for failures that can make an autonomous run act on incorrect terminal state, lose evidence, interfere with another run, or approve incomplete work.
 
@@ -12,6 +16,13 @@ This is the canonical issue register for failures that can make an autonomous ru
 3. MAULER-AR-003 - isolate agent evaluation from live process state
 4. MAULER-AR-004 - make completion evidence independent and reviewer failures explicit
 5. MAULER-AR-005 - add the shared JHUT end-to-end scenario to Agent Eval
+6. MAULER-AR-006 - distinguish ordinary chat, file actions, and live-data requests
+7. MAULER-AR-007 - bind literal file completion to independently observed bytes
+8. MAULER-AR-008 - cancel only the request owned by this run
+9. MAULER-AR-009 - qualify broader native lifecycle and crash recovery
+10. MAULER-AR-010 - preserve saved-chat identity across workspace/recovery changes
+11. MAULER-AR-011 - retain complete replies and label genuine response limits
+12. MAULER-AR-012 - resolve native PTY executables and own their waiter
 
 ## MAULER-AR-001 - Terminal session state has confirmed data races [P0]
 
@@ -159,7 +170,97 @@ Required fix:
 
 Closure criteria: one command from the Benchmark page runs the same end-to-end JHUT contract for any selected profile.
 
+## MAULER-AR-006 - Chat/file/live-data intent collisions [P1]
+
+Status: fixed; bounded local qualification passed 2026-11-17.
+
+Normal greetings, arithmetic, composition and advice-only requests no longer need a task/tool loop.
+Short observed answers are accepted only for a tool-free, no-deliverable contract. Explicit file
+actions retain file tools even when their final answer belongs in Chat. Whole-word live-data and
+repair matching prevents `fixture`, `suffix`, `deliverable` and `planet` from accidentally selecting
+web tools, Fixer or Planner. Quoted data is not treated as a new file-action instruction.
+
+Evidence: five repeats of 13 scored cases passed (65/65) against the already loaded local RVN model.
+The 20 ordinary-chat cases used one model call and no tools each. This is not native Wails acceptance
+or a general semantic-answer accuracy certification. See `mauler-local-reliability-2026-11-17.json`.
+
+## MAULER-AR-007 - Literal file completion and review-budget integrity [P1]
+
+Status: fixed for the bounded explicit-literal grammar; local qualification passed 2026-11-17.
+
+An explicit JSON-string create/append request now seals expected size and SHA-256 into the original
+task contract before actions. Append also captures the original prefix. Completion requires current
+matching bytes and this run's controller-emitted native write witness; matching pre-existing bytes
+or an assistant declaration are insufficient. Contract validation and run/revision ownership are
+checked before completion. Exclusive literal tasks avoid bogus keyword requirements, while mixed
+goals retain ordinary semantic rails. Exhausted budgets cannot skip blocking verification or a
+required reviewer: unresolved work stops as `review_incomplete`.
+
+Evidence: 10/10 live create/append cases, with readback and finalized receipts; regressions reject
+wrong bytes, missing native evidence, changed expectations, malformed scope and budget bypass.
+A final guard-only audit admitted all 80 retained run snapshots and rechecked 10 current artifacts
+without any action replay or model call. No atomic-filesystem or broad containment claim is made.
+
+## MAULER-AR-008 - Request-owned local cancellation [P1]
+
+Status: fixed; bounded local qualification passed 2026-11-17.
+
+Cancellation closes the exact HTTP response body under its captured request context. It no longer
+sends a delayed, server-wide inference-stop call that could affect a newer or unrelated request.
+The unit fixture confirms the owned connection closes and no global cancel endpoint is called.
+Five startup cancellations and five streaming cancellations all stopped, joined and then completed
+a fresh, model-proven recovery reply in the same conversation. The loaded model/context stayed
+unchanged and the runtime ended idle.
+
+## MAULER-AR-009 - Broader native lifecycle and crash qualification [P1]
+
+Status: Windows native-process slice qualified; broader acceptance remains open.
+
+The native Wails checks exercised Send/Stop/New chat/saved-chat reopen, active transition refusal,
+workspace identity retention and safe checkpoint resume. Whole-app text-stream and post-append
+hard kills exposed missing initial snapshots and unsafe replay boundaries; those are repaired.
+Interrupted effects require review, not automatic replay. See
+`mauler-native-lifecycle-reliability-2026-11-17.json` for exact observations and gates.
+
+Physical reboot/power loss, terminal descendants, browser/remote work and long unattended mixed
+tasks remain unqualified. No host reboot was performed. Retain the existing fresh
+12/12 UI Gate 1 requirement before full Agent Eval x5; this smaller matrix is not that gate.
+
+## MAULER-AR-010 - Saved-chat identity across workspace/recovery changes [P1]
+
+Status: fixed with bounded Windows native qualification.
+
+Clearing frontend Chat on workspace switch previously left `activeConversationName` pointing at
+the old workspace's session. A later autosave overwrote it. Both backend workspace-change paths
+now clear that identity, and recovery uses a collision-safe fork. The native A/B autosave check
+keeps the original A transcript SHA-256 unchanged; repeated tests cover both switching paths.
+
+## MAULER-AR-011 - Output limits, partial delivery and text continuation [P1]
+
+Status: fixed with bounded qualification; not a model-quality guarantee.
+
+A 1,024-token no-thinking cap and a 2,048-token direct-answer cap could truncate a long answer;
+discarding the truncation flag then marked it complete. Thinking depth and response length are now
+separate. Explicit long answers get up to the 8K context reserve, with three bounded text-only
+continuations, exact-history assembly, cancellation and visible partial outcomes. Real limits,
+no-progress output and insufficient context still stop honestly. File tasks retain evidence gates.
+
+## MAULER-AR-012 - Native Windows PTY executable/waiter ownership [P1]
+
+Status: executable startup and waiter race fixed; descendant containment remains open.
+
+Resolve the shell executable before applying `Cmd.Dir`. Use one explicit Kill/Close/Wait owner,
+not the dependency's additional `CommandContext` waiter, which races on its command error field.
+The owned Windows ConPTY marker and focused repeated race tests pass. This is not qualification of
+every interactive shell, browser child, descendant process tree or reboot recovery.
+
 ## Verification Baseline
+
+2026-11-17: current-source full Go tests, vet, app/tools/control-plane/backend race checks and the
+offline Windows Wails production build passed. Model-backed matrix: 65/65; final completion-admission
+audit: 80/80 snapshots and 10/10 current exact artifacts. Production settings/credentials were
+unchanged, dependencies were not upgraded, and the rebuilt app was left stopped. Logs and hashes:
+`mauler-local-reliability-2026-11-17.json`.
 
 Review verification on 2026-07-15:
 

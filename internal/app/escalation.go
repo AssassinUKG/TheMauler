@@ -73,7 +73,11 @@ func (a *App) tryEscalation(ctx context.Context, cfg *settings.Settings, current
 		out.WriteString(delta.Content)
 		calls = append(calls, delta.ToolCalls...)
 	}
-	text := strings.TrimSpace(out.String())
+	visibleText, promptEchoSuppressed := sanitizeVisibleModelOutput(out.String(), msgs)
+	text := strings.TrimSpace(visibleText)
+	if promptEchoSuppressed {
+		run.addEvent("prompt_echo_suppressed", "Suppressed an escalation-model prompt echo before delivery", fmt.Sprintf("profile=%s", name))
+	}
 	for i := range calls {
 		calls[i] = normalizeToolCallArguments(calls[i])
 	}

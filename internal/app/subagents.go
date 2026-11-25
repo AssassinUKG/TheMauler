@@ -25,17 +25,18 @@ const (
 )
 
 type subagentSpec struct {
-	ToolName      string
-	ModeName      string
-	Kind          subagentKind
-	Toolset       string
-	TimeoutSecs   int
-	MaxTurns      int
-	MaxToolCalls  int
-	MaxOutput     int
-	ContextBudget int
-	Destructive   bool
-	Contract      string
+	ToolName           string
+	ModeName           string
+	Kind               subagentKind
+	Toolset            string
+	TimeoutSecs        int
+	MaxTurns           int
+	MaxToolCalls       int
+	MaxOutput          int
+	ContextBudget      int
+	Destructive        bool
+	EnvironmentProfile string
+	Contract           string
 }
 
 type subagentTool struct {
@@ -81,6 +82,18 @@ func (a *App) registerAppTools() {
 	if a.engagements != nil {
 		a.registry.Register(&engagementTool{app: a})
 	}
+	a.syncMCPToolRegistration()
+}
+
+func (a *App) syncMCPToolRegistration() {
+	if a == nil || a.registry == nil {
+		return
+	}
+	if a.mcpManager != nil && a.mcpManager.Enabled() {
+		a.registry.Register(&mcpTool{app: a})
+		return
+	}
+	a.registry.Unregister("mcp")
 }
 
 func subagentSpecs() []subagentSpec {
@@ -122,17 +135,18 @@ func subagentSpecs() []subagentSpec {
 			Contract:      "Return: Findings ordered by severity, Evidence with file/path references, Open questions, Residual risk.",
 		},
 		{
-			ToolName:      "subagent_testfix",
-			ModeName:      "Fixer",
-			Kind:          subagentTestFix,
-			Toolset:       "local-code",
-			TimeoutSecs:   240,
-			MaxTurns:      6,
-			MaxToolCalls:  12,
-			MaxOutput:     2200,
-			ContextBudget: 32768,
-			Destructive:   true,
-			Contract:      "Return: Root cause, Changes made, Verification run, Remaining risk. Keep edits narrow.",
+			ToolName:           "subagent_testfix",
+			ModeName:           "Fixer",
+			Kind:               subagentTestFix,
+			Toolset:            "local-code",
+			TimeoutSecs:        240,
+			MaxTurns:           6,
+			MaxToolCalls:       12,
+			MaxOutput:          2200,
+			ContextBudget:      32768,
+			Destructive:        true,
+			EnvironmentProfile: "offline-code",
+			Contract:           "Return: Root cause, Changes made, Verification run, Remaining risk. Keep edits narrow.",
 		},
 		{
 			ToolName:      "subagent_summarize",
@@ -152,7 +166,11 @@ func subagentSpecs() []subagentSpec {
 func (t *subagentTool) Name() string { return t.spec.ToolName }
 
 func (t *subagentTool) Description() string {
-	return fmt.Sprintf("Run a bounded %s subagent with its own scratch context, %s toolset, timeout, and output contract.", t.spec.Kind, t.spec.Toolset)
+	description := fmt.Sprintf("Run a bounded %s subagent with its own scratch context, %s toolset, timeout, and output contract.", t.spec.Kind, t.spec.Toolset)
+	if t.spec.EnvironmentProfile != "" {
+		description += fmt.Sprintf(" When NanoCyber sandboxing is enabled, execution requires a compatible %s environment and cannot fall back to local host tools.", t.spec.EnvironmentProfile)
+	}
+	return description
 }
 
 func (t *subagentTool) Schema() json.RawMessage {
@@ -242,6 +260,9 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 	cfg := *a.cfg
 	profiles := *a.profiles
 	a.mu.Unlock()
+	if err := a.enforceSubagentEnvironment(parent, spec, cfg); err != nil {
+		return "", err
+	}
 
 	profile := activeProfile(&cfg, &profiles)
 	timeout := boundedValue(args.TimeoutSeconds, spec.TimeoutSecs, 10, spec.TimeoutSecs)
@@ -413,6 +434,12 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 			return report, nil
 		}
 		for _, call := range calls {
+			if parent := runControlFromContext(ctx); parent != nil {
+				if blocked := guardExplicitToolInputExclusions(*parent, call); blocked != "" {
+					a.recordLedger(ledger.Event{Kind: "policy_block", Source: "subagent", Tool: call.Function.Name, Status: "blocked", Message: blocked})
+					return finalSubagentReport(spec, final.String(), evidence, toolCallsUsed, blocked), fmt.Errorf("%w: %s", errToolInputConstraint, blocked)
+				}
+			}
 			if maxToolCalls >= 0 && toolCallsUsed >= maxToolCalls {
 				msgs = append(msgs, newToolResultMsg(call.ID, call.Function.Name, "subagent tool-call budget exhausted; finish with current evidence."))
 				continue
@@ -468,6 +495,34 @@ func (a *App) runBoundedSubagent(parent context.Context, spec subagentSpec, args
 		Output:  report,
 	})
 	return report, nil
+}
+
+func (a *App) enforceSubagentEnvironment(ctx context.Context, spec subagentSpec, cfg settings.Settings) error {
+	if strings.TrimSpace(spec.EnvironmentProfile) == "" || !cfg.NanoCyber.Enabled {
+		return nil
+	}
+	health := a.GetNanoCyberHealth()
+	detail := health.Summary
+	if strings.TrimSpace(health.Detail) != "" {
+		detail += ": " + health.Detail
+	}
+	runID := ""
+	if run := runControlFromContext(ctx); run != nil {
+		runID = run.ID
+	}
+	a.recordLedger(ledger.Event{
+		RunID: runID, Kind: "nanocyber_subagent_admission", Source: "subagent",
+		Tool: spec.ToolName, Status: "blocked", Message: string(spec.Kind), Detail: detail,
+		Metadata: map[string]string{
+			"environment_profile": spec.EnvironmentProfile,
+			"compatible":          fmt.Sprintf("%t", health.Compatible),
+			"host_fallback":       "false",
+		},
+	})
+	if !health.Compatible {
+		return fmt.Errorf("NanoCyber %s environment unavailable; no local host fallback: %s", spec.EnvironmentProfile, detail)
+	}
+	return fmt.Errorf("NanoCyber %s admission and lifecycle transports are staged, but engagement mapping, typed-job, receipt, and terminal-status handoff are not qualified; no local host fallback", spec.EnvironmentProfile)
 }
 
 func (a *App) subagentEngagementAssignment(ctx context.Context, args subagentArgs) (string, bool, error) {

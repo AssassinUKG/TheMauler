@@ -24,7 +24,7 @@ func (t *WebSearch) Name() string      { return "web_search" }
 func (t *WebSearch) Destructive() bool { return false }
 
 func (t *WebSearch) Description() string {
-	return "Search the web and return compact result titles, URLs, and snippets. Supports local SearXNG, DuckDuckGo HTML, and Brave Search when configured. For current events, CVEs, PoCs, exploit paths, service-version research, or changing facts, include the current year/date in the query, rank official/vendor/GitHub sources above mirrors, then fetch promising sources with fetch_url."
+	return "Search the web and return compact result titles, URLs, and snippets. General news/headline queries can read dated publisher feeds directly; article bodies are not thereby read. Supports local SearXNG, DuckDuckGo HTML, and Brave Search when configured. For current events, CVEs, PoCs, exploit paths, service-version research, or changing facts, include the current year/date in the query, rank official/vendor/GitHub sources above mirrors, then fetch promising sources with fetch_url."
 }
 
 func (t *WebSearch) Schema() json.RawMessage {
@@ -63,6 +63,15 @@ func (t *WebSearch) Run(ctx context.Context, raw json.RawMessage) (string, error
 
 	cfg, _ := settings.Load()
 	engine := strings.ToLower(strings.TrimSpace(cfg.Tools.WebEngine))
+	// Preserve explicitly configured search services. Default/DDG headline
+	// retrieval avoids home-page directories; feed failure retains normal search.
+	if (engine == "" || engine == "auto" || engine == "ddg" || engine == "duckduckgo") && strings.TrimSpace(cfg.Tools.WebBaseURL) == "" && strings.TrimSpace(cfg.Tools.BraveAPIKey) == "" && strings.TrimSpace(cfg.Tools.WebAPIKeyEnv) == "" {
+		if feeds := publisherNewsFeeds(p.Query); len(feeds) > 0 {
+			if result, err := publisherHeadlines(ctx, feeds, limit); err == nil {
+				return result, nil
+			}
+		}
+	}
 	switch engine {
 	case "", "auto":
 		if strings.TrimSpace(cfg.Tools.WebBaseURL) != "" {

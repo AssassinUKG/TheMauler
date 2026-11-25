@@ -61,6 +61,14 @@ export interface Settings {
     presets: Record<string, AgentModePreset>
   }
   environment: EnvironmentConfig
+  nanocyber: {
+    enabled: boolean
+    endpoint: string
+    api_version: string
+    credential_env: string
+    credential_ref: string
+  }
+  mcp: MCPConfig
   context: {
     auto_inject_file: boolean
     auto_inject_cursor: boolean
@@ -133,6 +141,42 @@ export interface Settings {
     max_runs: number
   }
   log_level: string
+}
+
+export interface MCPConfig {
+  enabled: boolean
+  servers: MCPServerConfig[]
+}
+
+export interface MCPServerConfig {
+  id: string
+  name: string
+  enabled: boolean
+  transport: 'stdio' | 'sse' | 'streamable_http' | string
+  command: string
+  args: string[]
+  working_dir: string
+  url: string
+  bearer_token_env: string
+  http_host_header: string
+  http_origin: string
+  env_allowlist: string[]
+  timeout_seconds: number
+}
+
+export interface MCPServerStatus {
+  id: string
+  name: string
+  transport: string
+  configured: boolean
+  connected: boolean
+  state: string
+  tool_count: number
+  protocol_version?: string
+  server_name?: string
+  server_version?: string
+  last_error?: string
+  updated_at?: string
 }
 
 export interface AudioConfig {
@@ -382,6 +426,25 @@ export interface BrowserCheckpointStatus {
   title?: string
   visible: boolean
   created_at: string
+}
+
+export interface BrowserEvidenceRecord {
+  version: number
+  id: string
+  kind: 'screenshot' | string
+  captured_at: string
+  workspace_file: string
+  manifest_file: string
+  sha256: string
+  size: number
+  width: number
+  height: number
+  full_page: boolean
+  url?: string
+  title?: string
+  fresh: boolean
+  current_sha256?: string
+  review_detail?: string
 }
 
 export interface JHUTBrowserReport {
@@ -678,11 +741,52 @@ export interface ProviderAPIKeyStatus {
   effective_configured: boolean
 }
 
+export interface ServiceCredentialStatus {
+  service: string
+  environment_configured: boolean
+  stored_configured: boolean
+  effective_configured: boolean
+}
+
+export interface NanoCyberHealth {
+  enabled: boolean
+  compatible: boolean
+  endpoint?: string
+  api_version?: string
+  credential_configured: boolean
+  status: string
+  summary: string
+  detail?: string
+  capabilities?: string[]
+  environment_profiles?: string[]
+  lease_schema_version?: number
+}
+
 export interface ModelMetadata {
   id: string
   context_length?: number
   max_completion_tokens?: number
   supported_parameters?: string[]
+  active?: boolean
+  state?: string
+  architecture?: ModelArchitecture
+  reasoning?: ModelReasoningCapability
+  supports_vision?: boolean
+  vision_runtime_ready?: boolean
+  mmproj_status?: string
+}
+
+export interface ModelArchitecture {
+  input_modalities?: string[]
+  output_modalities?: string[]
+}
+
+export interface ModelReasoningCapability {
+  supported: boolean
+  separates_content: boolean
+  effort_values?: string[]
+  supports_reasoning_tokens: boolean
+  default_effort?: string
 }
 
 export interface ModelProfileTemplateResult {
@@ -724,6 +828,8 @@ export interface SessionChatMessage {
   role: ChatRole
   content: string
   thinking?: string
+  delivery_status?: string
+  stop_reason?: string
   tool_name?: string
   tool_call_id?: string
   images?: string[]
@@ -912,7 +1018,10 @@ export interface TaskRun {
   conversation_epoch?: number
   parent_run_id?: string
   prompt: string
+  routing_prompt?: string
   mode: string
+  agent_definition_id?: string
+  agent_definition_version?: string
   profile: string
   model?: string
   claimant_id?: string
@@ -1151,6 +1260,8 @@ export interface RunCheckpoint {
   conversation_name?: string
   conversation_mode?: 'adaptive' | 'direct' | 'agent' | string
   explicit?: boolean
+  recovery_version?: number
+  resume_blocked_reason?: string
   prompt: string
   mode: string
   profile: string
@@ -1598,6 +1709,8 @@ export const StartConversation = (title: string): Promise<string> =>
 
 export const GetConversationMode = (): Promise<string> =>
   call('app.App.GetConversationMode')
+export const GetActiveConversationName = (): Promise<string> =>
+  call('app.App.GetActiveConversationName')
 
 export const SetConversationMode = (sessionName: string, mode: string): Promise<void> =>
   call('app.App.SetConversationMode', sessionName, mode)
@@ -1854,6 +1967,9 @@ export const SetRepositoryIndexWatch = (enabled: boolean): Promise<RepositoryInd
 export const GetBrowserWorkflowStatus = (): Promise<BrowserWorkflowStatus> =>
   call('app.App.GetBrowserWorkflowStatus')
 
+export const ListBrowserEvidence = (): Promise<BrowserEvidenceRecord[]> =>
+  call('app.App.ListBrowserEvidence')
+
 export const StartBrowserWorkflow = (url: string): Promise<BrowserWorkflowStatus> =>
   call('app.App.StartBrowserWorkflow', url)
 
@@ -2026,6 +2142,27 @@ export const SetProviderAPIKey = (providerName: string, apiKey: string): Promise
 
 export const ClearProviderAPIKey = (providerName: string): Promise<void> =>
   call('app.App.ClearProviderAPIKey', providerName)
+
+export const GetNanoCyberCredentialStatus = (): Promise<ServiceCredentialStatus> =>
+  call('app.App.GetNanoCyberCredentialStatus')
+
+export const SetNanoCyberCredential = (credential: string): Promise<void> =>
+  call('app.App.SetNanoCyberCredential', credential)
+
+export const ClearNanoCyberCredential = (): Promise<void> =>
+  call('app.App.ClearNanoCyberCredential')
+
+export const GetNanoCyberHealth = (): Promise<NanoCyberHealth> =>
+  call('app.App.GetNanoCyberHealth')
+
+export const GetMCPStatus = (): Promise<MCPServerStatus[]> =>
+  call('app.App.GetMCPStatus')
+
+export const TestMCPServer = (serverID: string): Promise<MCPServerStatus> =>
+  call('app.App.TestMCPServer', serverID)
+
+export const DisconnectMCPServer = (serverID: string): Promise<void> =>
+  call('app.App.DisconnectMCPServer', serverID)
 
 export const ListWSLDistros = (): Promise<string[]> =>
   call('app.App.ListWSLDistros')

@@ -4,6 +4,14 @@ Run from the repository root. Start focused, then widen in proportion to the cha
 
 ## Standard production gate
 
+Latest Telegram/news qualification: `../telegram-news-parity-2026-11-23.json`. Normal tests use
+loopback fake Bot API transport, ownership/expiry/replay checks and deterministic dated feeds.
+`MAULER_LIVE_NEWS=1` opts into public publisher-feed reads. `TestLocalTelegramNewsPipeline` additionally
+requires explicit `MAULER_NEWS_LOCAL_URL`/`MAULER_NEWS_LOCAL_KEY`, refuses non-loopback inference and
+requires the current model to be idle. It uses isolated app state and never contacts a real bot.
+Live tests must run sequentially across frameworks; a busy-model preflight is a rejection, not a
+qualification pass. Source buttons are checked from tool observations, not model-generated links.
+
 ```powershell
 go test ./... -count=1
 go vet ./...
@@ -33,6 +41,12 @@ exercise WSL/relay portability rather than being replaced with a Windows-only ru
 - Context Inspector/pinning: `go test ./internal/app -run 'ContextInspector|ContextPacketPin|MessagesWithPrimary|RepositoryContextDocuments' -count=1`
 - Context M5 deterministic/repeated harness: `go test ./internal/app -run 'ContextQuality|AgentEval|HashToolDefs|ShellRoutingDoesNotTreatKeeping' -count=1`
 - Repository intelligence: `go test -race ./internal/repoindex ./internal/store ./internal/app -run 'Repo|RepositoryIndex|MemoryTool|Store' -count=1`
+- Rich extractors/OCR/7z: `go test ./internal/repoindex -run 'SevenZip|OCR|Rich' -count=1`
+- Browser viewport/evidence: `go test ./internal/tools -run 'Browser.*(Screenshot|Evidence|Workflow)' -count=1`
+- MCP boundary/transports: `go test ./internal/mcpclient ./internal/settings -run 'MCP|Manager' -count=1`
+  (requires loopback listener/process permission for Streamable HTTP, legacy SSE, and stdio fixtures)
+- Dependency security: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` and
+  `npm audit --prefix frontend`
 
 Run `gofmt` on changed Go files and `git diff --check` on the files in scope. Do not format or revert
 unrelated user work.
@@ -63,6 +77,120 @@ components. It is not green and must not be presented as passing. Frontend produ
 checking is the current gate unless a task explicitly scopes lint cleanup.
 
 ## Latest recorded baseline
+
+- 2026-11-24 tool-input/verification hardening: explicit operator IP-literal exclusions are compiled
+  from the sealed trusted objective and checked against decoded arguments before dispatch, including
+  `todo_write` plan/details and delegated calls. A violation stops the run and remains a rejected
+  proposal in the audit; it cannot mutate the plan or retry through another tool. The control prompt
+  explains how to refer to an excluded target without copying it. Completion evidence now recognizes
+  direct checks and failure-propagating `&&` chains, including standalone `go vet` for Go type errors.
+  Masking fallbacks, pipes, unconditional continuations, substitutions, nested shells, help/dry-run
+  modes, and quoted success claims cannot certify a model-selected check. Configured project checks
+  with ambiguous shell control flow return a blocking inconclusive verdict. Focused regressions,
+  the full Go suite, vet, app/tools race tests, frontend type drift, and the Wails production build
+  pass. Native report `agent-eval-20261124-204231` used the same RVN/35K/thinking-preserved/MTP
+  `n=2` profile and finished 9/12 (`not pass^1`), with 0% unsupported completions, 11.48% duplicates,
+  3.28% tool errors, 0% measured recovery, zero policy blocks, and zero human interventions.
+  `off-target-ip-guard` passed using only a notes read. `edit-then-verify` correctly remained blocked:
+  the model used a fallback check and then `go build ...; echo "exit=$?"`, neither of which preserves
+  the compiler's exit status as the shell exit. `grep-then-edit` produced the correct artifact but
+  exceeded its auto-continue limit (3 > 2). The third failure exposed a parser false negative:
+  content verification with `tail/head -n` was incorrectly treated as a Go dry run. That flag check
+  is now command-specific and covered by a completion-rail regression. The final rebuilt scorer
+  has not received another live Gate 1; no revised live score is claimed. x5 was not started.
+
+- 2026-11-24 InferenceBridge catalogue follow-up: Mauler's OpenAI-compatible model metadata now
+  accepts the local bridge's `max_context_length`, active/load state, modalities, reasoning controls,
+  and vision readiness while preserving the smaller non-zero OpenRouter route limit. The model picker
+  exposes the local capabilities, and the guided Qwen card recognizes the exact RVN artifact and
+  displays its explicit MTP draft depth without changing the saved value. Focused backend tests, the
+  full Go suite, `go vet ./...`, the required app/tools/backend race gate, frontend binding/type build,
+  and Wails production build pass. The catalogue change alone adds no live reliability claim; the
+  separately recorded RVN gate below owns that evidence.
+
+- 2026-11-24 RVN settings/reliability follow-up: saving an unrelated settings/profile change no
+  longer fails solely because the unchanged persisted workspace points to a deleted directory;
+  newly selected workspace paths remain strictly validated. The saved
+  `qwen3.8-uncensored-agent-stability` profile used exact
+  `RVN-Q4_K_M-multilingual-mtp.gguf` through InferenceBridge at 35K with thinking/preservation on and
+  draft-MTP `n=2`. After completion-rail repairs, native UI Gate 1 report
+  `agent-eval-20261124-184627` passed 12/12 (`pass^1`) with 0% unsupported completions, 0% tool
+  errors, 100% recovery, zero policy violations, and zero human interventions. The required native
+  x5 report `agent-eval-20261124-185651` then finished 54/60 attempts and only 8/12 fixtures across
+  every round: `not pass^5`, 1.67% unsupported completions, 6.43% duplicate actions, 0.71% tool
+  errors, 100% recovery, zero policy violations, and zero human interventions. Inspection found four
+  scorer false negatives: an alternate valid one-line compile repair, successful `wc`/`tail`/`grep`
+  verification, and two runs where a plan preceded the required grep-before-edit order. Those are
+  regression-fixed; replay-equivalent accounting would be 58/60 and 10/12 fixtures, but no corrected
+  live x5 is claimed. The two residual failures are genuine: one masked verification with
+  `go vet ... || true`, and one leaked the explicitly forbidden stale IP into `todo_write` input.
+  Full Go tests, vet, app/tools/backend race tests, frontend type drift, focused completion-rail and
+  fixture tests, and the Wails production build pass. A new model/profile/control change, fresh
+  12/12 Gate 1, and a full clean x5 are still required for closure.
+
+- 2026-11-17 native follow-up: isolated Windows Wails lifecycle and two process-crash boundaries,
+  original task/contract recovery, single append/no replay, saved A/B transcript identity, real
+  2,374-word complete output and close-during-stream were observed. The latest offline Go/vet/race
+  gate and Wails production build pass. UI output-limit/cancel outcomes and bounded continuation
+  have focused regressions. Native run/evidence IDs, executable/log hashes, diagnostic failures and
+  explicit reboot/descendant/Gate 1 limits are in
+  `../mauler-native-lifecycle-reliability-2026-11-17.json`. Do not count these native observations as
+  a full unattended Agent Eval pass or a physical reboot test.
+
+- 2026-11-17: opt-in `scripts/run-local-reliability.ps1` passed 65/65 with the already-loaded local
+  RVN GGUF (35,072 context), no model loading, no cloud, disposable workspaces/config and unchanged
+  production settings/keys. This headless production-loop matrix includes 10 verified file handoffs
+  and 10 cancellation/recovery pairs. A guard-only final-source audit admitted 80 retained run
+  snapshots and 10 current exact artifacts with zero action replay/model calls. Full Go tests, vet,
+  `go test -race ./internal/app ./internal/tools ./internal/controlplane ./internal/llm/backends -count=1`
+  and `wails build -m -nosyncgomod -nocolour` passed offline. The app was not started. Reproduction,
+  diagnostic failures, final hashes and remaining native/crash/Gate 1 limits are recorded in
+  `../mauler-local-reliability-2026-11-17.json`; do not equate this with full Agent Eval x5.
+
+- 2026-10-25 fixes-recent candidate: Go 1.27.3, Wails 2.17.0, the ordered direct-module migrations,
+  DOMPurify 3.4.17, Monaco 0.57, and lazy editor routing are implemented on the dedicated migration
+  branch. Repository intelligence adds bounded local scanned-PDF OCR and metadata-only 7z inventory;
+  browser screenshots add exact multi-size native acceptance plus workspace-owned SHA-256 manifests,
+  stale review, and explicit Engagement promotion; Doctor adds presence-only provider authentication
+  and precedence-correct 8804 diagnosis. CI includes `govulncheck`, production npm audit, the required
+  race gate, and a Windows Wails build. Final wide-gate results and the rebuilt binary hash are recorded
+  in `../fixes-recent-execution-2026-10-25.md`; the InferenceBridge credential transfer and live
+  Gate 1/pass^5 remain explicitly pending.
+
+- 2026-09-27 dirty editor/workspace guard: App-level editor state retains an independent draft and
+  saved baseline for every tab; dirty markers remain visible across tab switches; and closing a dirty
+  tab or replacing the workspace offers Save all, Discard changes, and Keep editing as applicable.
+  Chat, Explorer, Projects, scratch/project creation, project removal, and Settings share the same
+  pre-transition guard. Five deterministic editor-state tests cover tab isolation, saved baselines,
+  in-flight-save keystrokes, path-backed filtering, and Windows path equivalence. The focused tests,
+  clean rerun of `go test ./... -count=1`, `go vet ./...`, required app/tools race tests, frontend
+  production type/build, and `wails build` passed. A 15-second hidden launch with an isolated
+  temporary `MAULER_CONFIG_DIR` stayed alive and left persisted user state untouched. Interactive
+  native dialog clicking remains pending because the available computer-use bridge returned no
+  native app/window inventory even after launch; no coordinates were guessed. Canonical output is
+  `build/bin/TheMauler.exe` (SHA-256
+  `8833DF0A99DC0939A322DE63406C0770C1D46BFD48B1F73546FD85F9ED616D87`).
+
+- 2026-09-26 conversational completion repair: greetings, thanks, and capability openers may return
+  a complete response that invites the operator to provide a real task without being rejected for
+  phrases such as “I'll dig in.” The exemption is deliberately narrower than the direct-answer lane:
+  an unanswered factual question or requested action that merely promises later work remains invalid.
+  Focused positive/negative completion tests, `go test ./... -count=1`, `go vet ./...`, required
+  app/tools race tests, frontend production type/build, and `wails build` passed. A 15-second hidden
+  launch with an isolated temporary `MAULER_CONFIG_DIR` stayed alive and left the user's persisted
+  state untouched. Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `6CFCD1EEBF8D1DB4F9790FE104ABFBD034C95B17978E3E7873820308EB269F8F`).
+
+- 2026-09-24 automatic conversation history: startup now owns a real blank New chat; the first
+  prompt receives a bounded collision-safe identity; end-of-run autosave writes that named transcript
+  before the completion event refreshes the existing sidebar; and New chat preserves the current row
+  while opening a clean transcript. The internal recovery autosave is reserved and hidden, startup no
+  longer marks an unloaded saved row current, and deleting the active row clears its in-memory history.
+  Focused lifecycle tests, `go test ./... -count=1`, `go vet ./...`, required app/tools race tests,
+  frontend production type/build, and `wails build` passed. A 15-second hidden launch with an isolated
+  temporary `MAULER_CONFIG_DIR` stayed alive without touching the user's persisted chat library.
+  Canonical output is `build/bin/TheMauler.exe` (SHA-256
+  `E0DFBFD39516198DF5084ECA1F591390D01DF397AE1E3F86009E456266DE6D04`).
 
 - 2026-09-24 repository-intelligence M4 metadata extractors: TAR/TGZ files contribute bounded,
   deterministic inventories; SQLite contributes read-only schema/object/column metadata; and PE/ELF

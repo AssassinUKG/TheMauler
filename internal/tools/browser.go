@@ -1,11 +1,13 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"net/url"
 	"os"
@@ -214,11 +216,13 @@ func (s *browserSession) ensure(parent context.Context, owner string, visible bo
 	}
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(binary),
-		chromedp.Flag("headless", !visible),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
 	)
+	if visible {
+		opts = append(opts, chromedp.VisibleWindow)
+	}
 	s.allocCtx, s.allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
 	s.ctx, s.cancel = chromedp.NewContext(s.allocCtx)
 	s.owner = owner
@@ -237,7 +241,7 @@ func (s *browserSession) ensure(parent context.Context, owner string, visible bo
 	// If the first navigation did this through its per-action timeout, cancelling
 	// that action would also tear down Chromium and every later action would see
 	// only context.Canceled.
-	if err := chromedp.Run(s.ctx); err != nil {
+	if err := chromedp.Do(s.ctx); err != nil {
 		s.state = "failed"
 		s.lastError = err.Error()
 		s.updatedAt = time.Now().Format(time.RFC3339)
@@ -295,12 +299,22 @@ func (s *browserSession) closeLocked() {
 	s.signalLocked()
 }
 
-func runBrowser(parent context.Context, actions ...chromedp.Action) error {
+func captureBrowserValue[T any](dst *T, action chromedp.Action[T]) chromedp.Action[chromedp.Void] {
+	return func(ctx context.Context, target *chromedp.Target) (chromedp.Void, error) {
+		value, err := action(ctx, target)
+		if err == nil {
+			*dst = value
+		}
+		return chromedp.Void{}, err
+	}
+}
+
+func runBrowser(parent context.Context, actions ...chromedp.Action[chromedp.Void]) error {
 	_, err := sharedBrowser.run(parent, "browser action", false, actions...)
 	return err
 }
 
-func (s *browserSession) run(parent context.Context, action string, visible bool, actions ...chromedp.Action) (BrowserRuntimeStatus, error) {
+func (s *browserSession) run(parent context.Context, action string, visible bool, actions ...chromedp.Action[chromedp.Void]) (BrowserRuntimeStatus, error) {
 	s.actionMu.Lock()
 	defer s.actionMu.Unlock()
 	owner := browserSessionOwner(parent)
@@ -324,8 +338,11 @@ func (s *browserSession) run(parent context.Context, action string, visible bool
 	stopParentCancel := context.AfterFunc(parent, cancel)
 	defer stopParentCancel()
 	var title, loc string
-	actions = append(actions, chromedp.Title(&title), chromedp.Location(&loc))
-	err = chromedp.Run(runCtx, actions...)
+	actions = append(actions,
+		captureBrowserValue(&title, chromedp.Title()),
+		captureBrowserValue(&loc, chromedp.Location()),
+	)
+	err = chromedp.Do(runCtx, actions...)
 	s.mu.Lock()
 	s.title = title
 	s.url = loc
@@ -503,22 +520,19 @@ func (t *BrowserNewTab) Run(ctx context.Context, raw json.RawMessage) (string, e
 	sharedBrowser.mu.Unlock()
 	runCtx, cancel := browserActionContext(ctx, root)
 	defer cancel()
-	var targetID cdptarget.ID
-	if err := chromedp.Run(runCtx, chromedp.ActionFunc(func(actionCtx context.Context) error {
-		var createErr error
-		targetID, createErr = cdptarget.CreateTarget(u).Do(actionCtx)
-		return createErr
-	})); err != nil {
+	created, err := chromedp.CallBrowser(runCtx, cdptarget.CreateTarget, cdptarget.CreateTargetParams{URL: u})
+	if err != nil {
 		return "", err
 	}
+	targetID := created.TargetID
 	tabCtx, tabCancel := chromedp.NewContext(root, chromedp.WithTargetID(targetID))
-	if err := chromedp.Run(tabCtx, chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Do(tabCtx, chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 		tabCancel()
-		_ = chromedp.Run(root, chromedp.ActionFunc(func(actionCtx context.Context) error { return cdptarget.CloseTarget(targetID).Do(actionCtx) }))
+		_, _ = chromedp.CallBrowser(root, cdptarget.CloseTarget, cdptarget.CloseTargetParams{TargetID: targetID})
 		return "", err
 	}
-	var title, loc string
-	_ = chromedp.Run(tabCtx, chromedp.Title(&title), chromedp.Location(&loc))
+	title, _ := chromedp.Run(tabCtx, chromedp.Title())
+	loc, _ := chromedp.Run(tabCtx, chromedp.Location())
 	sharedBrowser.mu.Lock()
 	sharedBrowser.tabs[ref] = targetID
 	sharedBrowser.tabContexts[ref] = tabCtx
@@ -613,10 +627,14 @@ func (t *BrowserSwitchTab) Run(ctx context.Context, raw json.RawMessage) (string
 	sharedBrowser.currentTab = ref
 	sharedBrowser.clearElementsLocked()
 	sharedBrowser.mu.Unlock()
-	var title, loc string
 	runCtx, cancel := browserActionContext(ctx, selectedCtx)
 	defer cancel()
-	if err := chromedp.Run(runCtx, chromedp.Title(&title), chromedp.Location(&loc)); err != nil {
+	title, err := chromedp.Run(runCtx, chromedp.Title())
+	if err != nil {
+		return "", err
+	}
+	loc, err := chromedp.Run(runCtx, chromedp.Location())
+	if err != nil {
 		return "", err
 	}
 	sharedBrowser.mu.Lock()
@@ -983,7 +1001,7 @@ func (t *BrowserOpen) Run(ctx context.Context, raw json.RawMessage) (string, err
 	sharedBrowser.mu.Lock()
 	sharedBrowser.clearElementsLocked()
 	sharedBrowser.mu.Unlock()
-	status, err := sharedBrowser.run(ctx, "open", p.Visible, chromedp.Navigate(u), chromedp.WaitReady("body", chromedp.ByQuery))
+	status, err := sharedBrowser.run(ctx, "open", p.Visible, chromedp.Navigate(u), chromedp.WaitReady(chromedp.CSS("body")))
 	if err != nil {
 		return "", err
 	}
@@ -1021,7 +1039,12 @@ func (t *BrowserSnapshot) Run(ctx context.Context, raw json.RawMessage) (string,
 	}
 	var title, loc, body string
 	var elements []BrowserPageElement
-	if _, err := sharedBrowser.run(ctx, "snapshot", false, chromedp.Title(&title), chromedp.Location(&loc), chromedp.Text("body", &body, chromedp.ByQuery), chromedp.Evaluate(browserElementsScript, &elements)); err != nil {
+	if _, err := sharedBrowser.run(ctx, "snapshot", false,
+		captureBrowserValue(&title, chromedp.Title()),
+		captureBrowserValue(&loc, chromedp.Location()),
+		captureBrowserValue(&body, chromedp.Text(chromedp.CSS("body"))),
+		captureBrowserValue(&elements, chromedp.Evaluate[[]BrowserPageElement](browserElementsScript)),
+	); err != nil {
 		return "", err
 	}
 	if err := sharedBrowser.setElements(browserSessionOwner(ctx), elements); err != nil {
@@ -1065,7 +1088,7 @@ func (t *BrowserClick) Run(ctx context.Context, raw json.RawMessage) (string, er
 	if err != nil {
 		return "", fmt.Errorf("browser_click: %w", err)
 	}
-	status, err := sharedBrowser.run(ctx, "click", false, chromedp.Click(selector, chromedp.ByQuery), chromedp.Sleep(500*time.Millisecond))
+	status, err := sharedBrowser.run(ctx, "click", false, chromedp.Click(chromedp.CSS(selector)), chromedp.Sleep(500*time.Millisecond))
 	if err != nil {
 		return "", err
 	}
@@ -1122,12 +1145,12 @@ func (t *BrowserType) Run(ctx context.Context, raw json.RawMessage) (string, err
   element.value = "";
   element.dispatchEvent(new Event("input", { bubbles: true }));
 })()`, selectorJSON)
-	actions := []chromedp.Action{
-		chromedp.Evaluate(clearExpression, nil),
-		chromedp.SendKeys(selector, p.Text, chromedp.ByQuery),
+	actions := []chromedp.Action[chromedp.Void]{
+		chromedp.Evaluate[chromedp.Void](clearExpression),
+		chromedp.SendKeys(chromedp.CSS(selector), p.Text),
 	}
 	if p.Submit {
-		actions = append(actions, chromedp.SendKeys(selector, "\n", chromedp.ByQuery))
+		actions = append(actions, chromedp.SendKeys(chromedp.CSS(selector), "\n"))
 	}
 	actions = append(actions, chromedp.Sleep(500*time.Millisecond))
 	status, err := sharedBrowser.run(ctx, "type", false, actions...)
@@ -1190,7 +1213,7 @@ func (t *BrowserExtract) Run(ctx context.Context, raw json.RawMessage) (string, 
 		maxChars = 30000
 	}
 	var text string
-	if _, err := sharedBrowser.run(ctx, "extract", false, chromedp.Text(selector, &text, chromedp.ByQuery)); err != nil {
+	if _, err := sharedBrowser.run(ctx, "extract", false, captureBrowserValue(&text, chromedp.Text(chromedp.CSS(selector)))); err != nil {
 		return "", err
 	}
 	text = cleanText(text)
@@ -1301,7 +1324,7 @@ func (t *BrowserUpload) Run(ctx context.Context, raw json.RawMessage) (string, e
 	if err != nil {
 		return "", fmt.Errorf("browser_upload: hash file: %w", err)
 	}
-	if _, err := sharedBrowser.run(ctx, "upload", false, chromedp.SetUploadFiles(selector, []string{abs}, chromedp.ByQuery)); err != nil {
+	if _, err := sharedBrowser.run(ctx, "upload", false, chromedp.SetUploadFiles(chromedp.CSS(selector), []string{abs})); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("[browser_upload_evidence]\nworkspace_file: %s\nsize: %d\nsha256: %s\nFile selected in the page. Observe before any separate submit action.", rel, info.Size(), hash), nil
@@ -1449,12 +1472,17 @@ func (t *BrowserDownload) Run(ctx context.Context, raw json.RawMessage) (string,
 	}
 	before := browserDirectoryStamps(dir)
 	var downloaded string
-	actions := []chromedp.Action{
-		chromedp.ActionFunc(func(actionCtx context.Context) error {
-			return cdpbrowser.SetDownloadBehavior(cdpbrowser.SetDownloadBehaviorBehaviorAllow).WithDownloadPath(dir).WithEventsEnabled(true).Do(actionCtx)
+	actions := []chromedp.Action[chromedp.Void]{
+		chromedp.Func(func(actionCtx context.Context, _ *chromedp.Target) error {
+			_, callErr := chromedp.CallBrowser(actionCtx, cdpbrowser.SetDownloadBehavior, cdpbrowser.SetDownloadBehaviorParams{
+				Behavior:      cdpbrowser.SetDownloadBehaviorBehaviorAllow,
+				DownloadPath:  dir,
+				EventsEnabled: new(true),
+			})
+			return callErr
 		}),
-		chromedp.Click(selector, chromedp.ByQuery),
-		chromedp.ActionFunc(func(actionCtx context.Context) error {
+		chromedp.Click(chromedp.CSS(selector)),
+		chromedp.Func(func(actionCtx context.Context, _ *chromedp.Target) error {
 			var waitErr error
 			downloaded, waitErr = waitForBrowserDownload(actionCtx, dir, before, timeout)
 			return waitErr
@@ -1479,31 +1507,73 @@ func (t *BrowserDownload) Run(ctx context.Context, raw json.RawMessage) (string,
 	return fmt.Sprintf("[browser_download_evidence]\nworkspace_file: %s\nsize: %d\nsha256: %s\nurl: %s\nstate: %s", filepath.ToSlash(rel), info.Size(), hash, status.URL, status.State), nil
 }
 
-// BrowserScreenshot saves a full-page screenshot and returns the path.
+// BrowserScreenshot saves a hash-sealed screenshot inside the authoritative
+// workspace. Optional viewport dimensions support deterministic responsive
+// acceptance without changing the persistent browser ownership model.
 type BrowserScreenshot struct{}
 
 func (t *BrowserScreenshot) Name() string      { return "browser_screenshot" }
 func (t *BrowserScreenshot) Destructive() bool { return false }
 func (t *BrowserScreenshot) Description() string {
-	return "Save a full-page browser screenshot to a temporary PNG and return its local path."
+	return "Capture a full-page or bounded viewport screenshot, seal it with SHA-256 evidence in the workspace, and return its reviewable evidence record."
 }
 func (t *BrowserScreenshot) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
-  "properties": {},
+  "properties": {
+    "viewport_width": {"type": "integer", "minimum": 320, "maximum": 3840},
+    "viewport_height": {"type": "integer", "minimum": 240, "maximum": 2160},
+    "full_page": {"type": "boolean", "description": "Defaults to true unless viewport dimensions are supplied"}
+  },
   "additionalProperties": false
 }`)
 }
 func (t *BrowserScreenshot) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args struct {
+		ViewportWidth  int   `json:"viewport_width"`
+		ViewportHeight int   `json:"viewport_height"`
+		FullPage       *bool `json:"full_page"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return "", fmt.Errorf("browser_screenshot: bad params: %w", err)
+		}
+	}
+	if (args.ViewportWidth == 0) != (args.ViewportHeight == 0) {
+		return "", fmt.Errorf("browser_screenshot: viewport_width and viewport_height must be supplied together")
+	}
+	if args.ViewportWidth != 0 && (args.ViewportWidth < 320 || args.ViewportWidth > 3840 || args.ViewportHeight < 240 || args.ViewportHeight > 2160) {
+		return "", fmt.Errorf("browser_screenshot: viewport must be within 320x240 and 3840x2160")
+	}
+	fullPage := args.ViewportWidth == 0
+	if args.FullPage != nil {
+		fullPage = *args.FullPage
+	}
+	actions := make([]chromedp.Action[chromedp.Void], 0, 2)
+	if args.ViewportWidth > 0 {
+		actions = append(actions, chromedp.EmulateViewport(int64(args.ViewportWidth), int64(args.ViewportHeight)))
+	}
 	var buf []byte
-	if _, err := sharedBrowser.run(ctx, "screenshot", false, chromedp.FullScreenshot(&buf, 90)); err != nil {
+	if fullPage {
+		actions = append(actions, captureBrowserValue(&buf, chromedp.FullScreenshot(90)))
+	} else {
+		actions = append(actions, captureBrowserValue(&buf, chromedp.CaptureScreenshot()))
+	}
+	if _, err := sharedBrowser.run(ctx, "screenshot", false, actions...); err != nil {
 		return "", err
 	}
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("themauler-browser-%d.png", time.Now().UnixNano()))
-	if err := os.WriteFile(path, buf, 0o600); err != nil {
+	config, err := png.DecodeConfig(bytes.NewReader(buf))
+	if err != nil {
+		return "", fmt.Errorf("browser_screenshot: decode PNG dimensions: %w", err)
+	}
+	status := GetBrowserWorkflowStatus(browserSessionOwner(ctx))
+	record, err := saveBrowserScreenshotEvidence(ctx, buf, config.Width, config.Height, fullPage, status)
+	if err != nil {
 		return "", err
 	}
-	return "screenshot saved: " + path, nil
+	return fmt.Sprintf("[browser_screenshot_evidence]\nid: %s\nworkspace_file: %s\nmanifest_file: %s\nsize: %d\nsha256: %s\ndimensions: %dx%d\nfull_page: %t\nurl: %s\ntitle: %s",
+		record.ID, record.WorkspaceFile, record.ManifestFile, record.Size, record.SHA256,
+		record.Width, record.Height, record.FullPage, record.URL, record.Title), nil
 }
 
 // BrowserClose closes the browser automation session.

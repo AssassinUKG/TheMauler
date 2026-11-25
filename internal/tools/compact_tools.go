@@ -418,6 +418,9 @@ func (t *Browser) Schema() json.RawMessage {
     "selector": {"type": "string"},
     "text": {"type": "string"},
 	"path": {"type": "string", "description": "Workspace-contained file for upload"},
+	"viewport_width": {"type": "integer", "minimum": 320, "maximum": 3840, "description": "Screenshot viewport width"},
+	"viewport_height": {"type": "integer", "minimum": 240, "maximum": 2160, "description": "Screenshot viewport height"},
+	"full_page": {"type": "boolean", "description": "Screenshot full page; defaults true without viewport dimensions"},
 	"tab_ref": {"type": "string", "description": "Stable conversation-owned tab ref"},
 	"name": {"type": "string", "description": "Named metadata-only browser checkpoint"},
     "submit": {"type": "boolean"},
@@ -431,19 +434,22 @@ func (t *Browser) Schema() json.RawMessage {
 }
 func (t *Browser) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p struct {
-		Action      string `json:"action"`
-		URL         string `json:"url"`
-		Visible     bool   `json:"visible"`
-		Ref         string `json:"ref"`
-		Selector    string `json:"selector"`
-		Text        string `json:"text"`
-		Path        string `json:"path"`
-		TabRef      string `json:"tab_ref"`
-		Name        string `json:"name"`
-		Submit      bool   `json:"submit"`
-		MaxChars    int    `json:"max_chars"`
-		Task        string `json:"task"`
-		TimeoutSecs int    `json:"timeout_secs"`
+		Action         string `json:"action"`
+		URL            string `json:"url"`
+		Visible        bool   `json:"visible"`
+		Ref            string `json:"ref"`
+		Selector       string `json:"selector"`
+		Text           string `json:"text"`
+		Path           string `json:"path"`
+		TabRef         string `json:"tab_ref"`
+		Name           string `json:"name"`
+		Submit         bool   `json:"submit"`
+		MaxChars       int    `json:"max_chars"`
+		Task           string `json:"task"`
+		TimeoutSecs    int    `json:"timeout_secs"`
+		ViewportWidth  int    `json:"viewport_width"`
+		ViewportHeight int    `json:"viewport_height"`
+		FullPage       *bool  `json:"full_page"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("browser: bad params: %w", err)
@@ -471,7 +477,11 @@ func (t *Browser) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	case "download":
 		out, runErr = (&BrowserDownload{}).Run(ctx, compactArgs(map[string]any{"ref": p.Ref, "selector": p.Selector, "timeout_secs": p.TimeoutSecs}))
 	case "screenshot":
-		out, runErr = (&BrowserScreenshot{}).Run(ctx, compactArgs(map[string]any{}))
+		args := map[string]any{"viewport_width": p.ViewportWidth, "viewport_height": p.ViewportHeight}
+		if p.FullPage != nil {
+			args["full_page"] = *p.FullPage
+		}
+		out, runErr = (&BrowserScreenshot{}).Run(ctx, compactArgs(args))
 	case "tabs":
 		out, runErr = (&BrowserTabs{}).Run(ctx, compactArgs(map[string]any{}))
 	case "new_tab":

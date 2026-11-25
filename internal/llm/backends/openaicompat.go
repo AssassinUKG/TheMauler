@@ -591,10 +591,11 @@ func (c *OpenAICompat) Ping(ctx context.Context) error {
 	return nil
 }
 
-// ModelMetadata returns model IDs plus any provider-owned catalogue limits.
-// OpenRouter supplies both a model-level context length and, when routing has
-// selected a provider, a top-provider limit. Use the smaller non-zero value so
-// Mauler never advertises a window larger than the active route supports.
+// ModelMetadata returns model IDs plus provider-owned limits and capabilities.
+// InferenceBridge advertises max_context_length and local runtime state, while
+// OpenRouter can supply both a model-level context length and a selected
+// top-provider limit. Use the smaller non-zero limit so Mauler never advertises
+// a window larger than the active route supports.
 func (c *OpenAICompat) ModelMetadata(ctx context.Context) ([]llm.ModelMetadata, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -617,10 +618,18 @@ func (c *OpenAICompat) ModelMetadata(ctx context.Context) ([]llm.ModelMetadata, 
 
 	var result struct {
 		Data []struct {
-			ID                  string   `json:"id"`
-			ContextLength       int      `json:"context_length"`
-			MaxCompletionTokens int      `json:"max_completion_tokens"`
-			SupportedParameters []string `json:"supported_parameters"`
+			ID                  string                        `json:"id"`
+			ContextLength       int                           `json:"context_length"`
+			MaxContextLength    int                           `json:"max_context_length"`
+			MaxCompletionTokens int                           `json:"max_completion_tokens"`
+			SupportedParameters []string                      `json:"supported_parameters"`
+			Active              bool                          `json:"active"`
+			State               string                        `json:"state"`
+			Architecture        *llm.ModelArchitecture        `json:"architecture"`
+			Reasoning           *llm.ModelReasoningCapability `json:"reasoning"`
+			SupportsVision      *bool                         `json:"supports_vision"`
+			VisionRuntimeReady  *bool                         `json:"vision_runtime_ready"`
+			MMProjStatus        string                        `json:"mmproj_status"`
 			TopProvider         struct {
 				ContextLength       int `json:"context_length"`
 				MaxCompletionTokens int `json:"max_completion_tokens"`
@@ -632,13 +641,21 @@ func (c *OpenAICompat) ModelMetadata(ctx context.Context) ([]llm.ModelMetadata, 
 	}
 	models := make([]llm.ModelMetadata, len(result.Data))
 	for i, m := range result.Data {
-		contextLength := smallerNonZero(m.ContextLength, m.TopProvider.ContextLength)
+		contextLength := smallerNonZero(m.ContextLength, m.MaxContextLength)
+		contextLength = smallerNonZero(contextLength, m.TopProvider.ContextLength)
 		maxCompletionTokens := smallerNonZero(m.MaxCompletionTokens, m.TopProvider.MaxCompletionTokens)
 		models[i] = llm.ModelMetadata{
 			ID:                  m.ID,
 			ContextLength:       contextLength,
 			MaxCompletionTokens: maxCompletionTokens,
 			SupportedParameters: m.SupportedParameters,
+			Active:              m.Active,
+			State:               m.State,
+			Architecture:        m.Architecture,
+			Reasoning:           m.Reasoning,
+			SupportsVision:      m.SupportsVision,
+			VisionRuntimeReady:  m.VisionRuntimeReady,
+			MMProjStatus:        m.MMProjStatus,
 		}
 	}
 	return models, nil
@@ -709,34 +726,11 @@ func (c *OpenAICompat) watchStreamingCancel(ctx context.Context, body io.Closer,
 	select {
 	case <-ctx.Done():
 		_ = body.Close()
-		c.cancelActiveInference()
 	case <-done:
-		// ParseSSE can observe the closed response body and finish at the same
-		// time as ctx is cancelled. If the done case wins that race, the
-		// backend still needs the explicit llama.cpp cancellation request.
-		if ctx.Err() != nil {
-			c.cancelActiveInference()
-		}
+		// The request context and this exact body own cancellation. Never send
+		// a delayed, unscoped server-wide stop: another client/request may now
+		// own the local backend slot.
 	}
-}
-
-func (c *OpenAICompat) cancelActiveInference() {
-	if c.clientName != "llamacpp" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/inference/cancel", nil)
-	if err != nil {
-		return
-	}
-	c.setHeaders(httpReq)
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }
 
 // --- request building ---
@@ -835,7 +829,11 @@ func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
 		s := req.Seed
 		body.Seed = &s
 	}
-	if len(req.Tools) > 0 {
+	// A text-only boundary is represented by the absence of tool schemas as well
+	// as tool_choice=none. Some local templates/providers have emitted native
+	// calls despite the string choice; stripping the catalogue makes the boundary
+	// unambiguous and mirrors InferenceBridge's current normalisation.
+	if len(req.Tools) > 0 && !strings.EqualFold(strings.TrimSpace(req.ToolChoice), "none") {
 		body.Tools = req.Tools
 		parallel := false
 		body.ParallelToolCalls = &parallel
@@ -846,6 +844,8 @@ func (c *OpenAICompat) buildBody(req llm.Request) ([]byte, error) {
 			parse := true
 			body.ParseToolCalls = &parse
 		}
+	} else if strings.EqualFold(strings.TrimSpace(req.ToolChoice), "none") {
+		body.ToolChoice = "none"
 	}
 
 	// thinking kwargs + MTP — llama.cpp only

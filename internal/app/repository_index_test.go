@@ -44,6 +44,26 @@ func TestRepositoryIndexRuntimeStatusDoesNotQueryDatabase(t *testing.T) {
 	}
 }
 
+func TestRepositoryIndexStartingStatusPreservesCommittedGeneration(t *testing.T) {
+	startedAt := time.Date(2026, time.October, 18, 12, 0, 0, 0, time.UTC)
+	previous := RepositoryIndexStatus{
+		Available: true, Active: true, Complete: true, Workspace: "C:/workspace",
+		GenerationID: "generation-1", ManifestDigest: "manifest-1", PolicyDigest: "policy-1",
+		Status: "complete", FilesSeen: 2, FilesIndexed: 2, ChunkCount: 2, RefreshMode: "full",
+	}
+
+	status := repositoryIndexStartingStatus(&previous, "C:/workspace", nil, "incremental", startedAt)
+	if !status.Active || !status.Complete || status.GenerationID != previous.GenerationID {
+		t.Fatalf("replacement lost committed generation: %#v", status)
+	}
+	if !status.Indexing || !status.CanCancel || status.Status != "starting" || status.RefreshMode != "incremental" {
+		t.Fatalf("replacement run status = %#v", status)
+	}
+	if status.StartedAt != startedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("started_at = %q", status.StartedAt)
+	}
+}
+
 func TestRepositoryIndexWatcherActivatesIncrementalGeneration(t *testing.T) {
 	t.Setenv("MAULER_CONFIG_DIR", t.TempDir())
 	restoreWorkingDir(t)
@@ -85,11 +105,13 @@ func TestRepositoryIndexWatcherActivatesIncrementalGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(3*repositoryIndexWatchInterval + 3*time.Second)
 	var refreshed RepositoryIndexStatus
 	for time.Now().Before(deadline) {
 		refreshed, err = a.GetRepositoryIndexStatus()
-		if err == nil && refreshed.GenerationID != initial.GenerationID && refreshed.RefreshMode == "incremental" {
+		if err == nil && refreshed.Active && refreshed.Complete && !refreshed.Indexing &&
+			refreshed.GenerationID != "" && refreshed.GenerationID != initial.GenerationID &&
+			refreshed.RefreshMode == "incremental" && refreshed.WatchState == "watching" && refreshed.WatchLastCheck != "" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)

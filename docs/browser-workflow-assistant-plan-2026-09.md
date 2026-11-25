@@ -1,6 +1,6 @@
 # Browser workflow assistant plan
 
-Updated: 2026-09-14
+Updated: 2026-10-25
 
 ## Objective
 
@@ -183,15 +183,28 @@ Verification on 2026-09-14:
 - scoped handwritten diff check — pass
 - `wails build` — pass; canonical output `build/bin/TheMauler.exe`
 
+## Implemented slice 5: multi-size immutable screenshot evidence
+
+- The compact screenshot action accepts bounded viewport width/height and full-page mode while
+  retaining safe defaults. Actual PNG dimensions are decoded rather than inferred from the request.
+- Captures are stored under the active workspace in `.mauler/browser-evidence/<owner>` alongside an
+  exclusive-write JSON manifest containing the captured SHA-256, size, dimensions, mode, timestamp,
+  and sanitized URL/title metadata. Query strings, fragments, and userinfo are not retained.
+- Evidence review resolves and revalidates workspace containment, refuses symlink/path escape, caps
+  manifest size/count, and rehashes every screenshot. A modified artifact remains visible as stale
+  while preserving its original captured fingerprint.
+- Engagement Grid displays fresh/stale capture state and allows only a fresh capture to be promoted
+  explicitly into the existing immutable Engagement evidence flow.
+- The native Chromium fixture verifies exact 375x667, 1024x768, and 1440x900 viewport captures,
+  manifest hashes, URL sanitization, and stale-evidence detection.
+
 ## Next slice
 
-1. Connect browser artifacts to the stronger immutable evidence promotion/review surface rather than
-   relying only on RunLedger tool-result hashes.
-2. Run a supervised end-to-end local-model browser scenario, then repeat it as pass^k. This is
+1. Run a supervised end-to-end local-model browser scenario, then repeat it as pass^k. This is
    separate from the deterministic native-browser 5/5 and must not be conflated with Agent Eval x5.
-3. Add optional compact tab/checkpoint management to the new Chat browser surface after operator
+2. Add optional compact tab/checkpoint management to the new Chat browser surface after operator
    testing confirms which controls are useful outside Services.
-4. Benchmark the optional Python browser agent only after the native path's expanded tests are stable.
+3. Benchmark the optional Python browser agent only after the native path's expanded tests are stable.
    Keep it opt-in unless it materially improves success without weakening ownership or evidence rules.
 
 ## Operator repair — visible intent and blocked-host repetition

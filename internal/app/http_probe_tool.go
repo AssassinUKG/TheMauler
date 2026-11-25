@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -198,12 +199,13 @@ func buildHTTPProbeCommand(base string, paths, headers []string, timeout int, sh
 	if strings.TrimSpace(shellArtifactPath) == "" {
 		shellArtifactPath = displayArtifactPath
 	}
+	artifact := terminalShellQuote(shellArtifactPath)
 	var sb strings.Builder
 	sb.WriteString("set -o pipefail 2>/dev/null || true; ")
-	sb.WriteString("out=" + terminalShellQuote(shellArtifactPath) + "; mkdir -p \"$(dirname \"$out\")\"; : > \"$out\"; ")
+	sb.WriteString("probe_rc=0; mkdir -p \"$(dirname " + artifact + ")\" || probe_rc=$?; : > " + artifact + " || probe_rc=$?; ")
 	for _, p := range paths {
 		target := joinProbeURL(base, p)
-		sb.WriteString("printf '%s\\n' " + terminalShellQuote("=== "+p+" "+target+" ===") + " | tee -a \"$out\" >/dev/null; ")
+		sb.WriteString("printf '%s\\n' " + terminalShellQuote("=== "+p+" "+target+" ===") + " | tee -a " + artifact + "; ")
 		sb.WriteString("curl -skS -i -L --path-as-is --max-time ")
 		sb.WriteString(fmt.Sprintf("%d ", timeout))
 		for _, header := range headers {
@@ -214,9 +216,9 @@ func buildHTTPProbeCommand(base string, paths, headers []string, timeout int, sh
 			sb.WriteString("-H " + terminalShellQuote(header) + " ")
 		}
 		sb.WriteString(terminalShellQuote(target))
-		sb.WriteString(" 2>&1 | tee -a \"$out\"; printf '\\n' | tee -a \"$out\" >/dev/null; ")
+		sb.WriteString(" 2>&1 | tee -a " + artifact + "; probe_status=$?; if [ \"$probe_status\" -ne 0 ]; then probe_rc=$probe_status; fi; printf '\\n' | tee -a " + artifact + "; ")
 	}
-	sb.WriteString("printf '%s\\n' " + terminalShellQuote("__MAULER_HTTP_PROBE_ARTIFACT__="+displayArtifactPath))
+	sb.WriteString("printf '%s\\n' " + terminalShellQuote("__MAULER_HTTP_PROBE_ARTIFACT__="+displayArtifactPath) + "; exit \"$probe_rc\"")
 	return sb.String()
 }
 
@@ -306,7 +308,91 @@ func summarizeHTTPProbeOutput(out, artifactPath string) string {
 		sb.WriteString(strings.Join(parts, "; ") + "\n")
 	}
 	sb.WriteString("Artifact: " + artifactPath)
+	if warning := httpProbeFallbackWarning(out); warning != "" {
+		sb.WriteString("\n" + warning)
+	}
 	return strings.TrimSpace(sb.String())
+}
+
+type httpProbeFingerprint struct {
+	path   string
+	status string
+	body   string
+}
+
+// httpProbeFallbackWarning compares the actual captured response bodies for
+// distinct paths. Routers and SPAs often return their index page with HTTP 200
+// for every unknown route; without a negative-control check an agent can mistake
+// those fallbacks for real admin/API endpoints.
+func httpProbeFallbackWarning(out string) string {
+	var fingerprints []httpProbeFingerprint
+	var current *httpProbeFingerprint
+	var section []string
+	flush := func() {
+		if current == nil {
+			return
+		}
+		raw := strings.TrimSpace(strings.Join(section, "\n"))
+		if idx := strings.LastIndex(raw, "\n\n"); idx >= 0 {
+			current.body = strings.TrimSpace(raw[idx+2:])
+		} else {
+			current.body = raw
+		}
+		current.body = regexp.MustCompile(`(?m)^__MAULER_HTTP_PROBE_ARTIFACT__=.*$`).ReplaceAllString(current.body, "")
+		current.body = regexp.MustCompile(`(?m)^\[(?:powershell|pwsh|wsl|bash|cmd|shared_terminal/)[^\]]*(?:exit|stopped)[^\]]*\]\s*$`).ReplaceAllString(current.body, "")
+		current.body = strings.TrimSpace(current.body)
+		fingerprints = append(fingerprints, *current)
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "=== ") {
+			flush()
+			fields := strings.Fields(trimmed)
+			pathValue := ""
+			if len(fields) >= 2 {
+				pathValue = fields[1]
+			}
+			current = &httpProbeFingerprint{path: pathValue}
+			section = nil
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "HTTP/") {
+			current.status = trimmed
+		}
+		section = append(section, line)
+	}
+	flush()
+
+	type signatureInfo struct {
+		count  int
+		status string
+		bytes  int
+		hash   string
+	}
+	bySignature := map[string]signatureInfo{}
+	for _, item := range fingerprints {
+		if item.path == "" || item.status == "" || item.body == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(item.body))
+		hash := fmt.Sprintf("%x", sum[:6])
+		key := item.status + "\x00" + hash
+		info := bySignature[key]
+		info.count++
+		info.status = item.status
+		info.bytes = len(item.body)
+		info.hash = hash
+		bySignature[key] = info
+	}
+	for _, info := range bySignature {
+		if info.count >= 2 {
+			return fmt.Sprintf("[http_fallback_warning] %d distinct paths returned indistinguishable final responses (%s; body_bytes=%d; body_sha256=%s). Treat path existence and authentication routing as unverified until a random nonexistent control path differs or browser/API traffic identifies the real endpoint.", info.count, info.status, info.bytes, info.hash)
+		}
+	}
+	return ""
 }
 
 func statusFromErr(err error) string {

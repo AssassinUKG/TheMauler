@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "id": "todo-1",
+      "text": "Verify artifact.txt content with a fresh read",
+      "status": "in_progress",
+      "created_at": "2026-11-17T20:08:29Z",
+      "updated_at": "2026-11-17T20:08:29Z"
+    },
+    {
+      "id": "todo-2",
+      "text": "Use edit to confirm the exact decoded JSON string text is present",
+      "status": "pending",
+      "created_at": "2026-11-17T20:08:29Z",
+      "updated_at": "2026-11-17T20:08:29Z"
+    },
+    {
+      "id": "todo-3",
+      "text": "Report final verification evidence",
+      "status": "pending",
+      "created_at": "2026-11-17T20:08:29Z",
+      "updated_at": "2026-11-17T20:08:29Z"
+    }
+  ]
+}

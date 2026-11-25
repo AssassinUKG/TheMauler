@@ -59,6 +59,13 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Name()] = t
 }
 
+// Unregister removes a dynamically owned boundary tool. Callers coordinate
+// this with the agent lifecycle so registry iteration cannot overlap the map
+// mutation.
+func (r *Registry) Unregister(name string) {
+	delete(r.tools, name)
+}
+
 // Get looks up a tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]

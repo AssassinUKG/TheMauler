@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "todo-1",
+      "text": "Create artifact.txt with the exact decoded JSON string content",
+      "status": "done",
+      "detail": "artifact.txt written (103 bytes)",
+      "created_at": "2026-11-17T20:31:02Z",
+      "updated_at": "2026-11-17T20:31:13Z"
+    },
+    {
+      "id": "todo-2",
+      "text": "Read back artifact.txt and verify all lines/bytes",
+      "status": "done",
+      "detail": "Read back confirmed all 5 lines exactly: LOCAL_WRITE_5 / Quoted: \"alpha\"; path: C:\\work\\fixture / Unicode: café / λ / 日本語 / END_LOCAL_WRITE_5 / trailing newline",
+      "created_at": "2026-11-17T20:31:02Z",
+      "updated_at": "2026-11-17T20:31:16Z"
+    },
+    {
+      "id": "todo-3",
+      "text": "Report verified handoff in chat",
+      "status": "done",
+      "detail": "Handoff reported in chat",
+      "created_at": "2026-11-17T20:31:02Z",
+      "updated_at": "2026-11-17T20:31:21Z"
+    }
+  ]
+}

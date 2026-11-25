@@ -20,6 +20,7 @@ func TestMatchQwen38OfficialAndUncensoredProfiles(t *testing.T) {
 	for _, modelID := range []string{
 		"Qwen3.8-27B-Q4_K_M.gguf",
 		"Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+		"RVN-Q4_K_M-multilingual-mtp.gguf",
 	} {
 		rp, ok := Match(settings.Profile{Name: "local-import", ModelID: modelID})
 		if !ok {

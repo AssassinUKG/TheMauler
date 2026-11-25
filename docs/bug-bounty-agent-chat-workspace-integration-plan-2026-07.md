@@ -26,14 +26,21 @@ The first usable slice is now implemented:
   restores that workspace's agent, clears transient chat/todo/rollback state, closes path-backed
   editor tabs, retains scratch tabs, and leaves saved sessions, files, memory, evidence, and logs
   intact.
+- Landed 2026-10-25: task-run state and every run-owned RunLedger event persist the exact agent
+  definition ID/version. SQLite schema v19 preserves that identity across restart/export/resume,
+  Logs renders it directly, and configured custom agents no longer collapse to Auto. Legacy runs
+  remain readable with empty provenance and are labelled as such.
+- Landed 2026-10-25: a persisted trusted routing prompt separates the operator's request from
+  untrusted attachment bodies. Three hostile origins (JavaScript comment, HTTP header, and HTML
+  body) repeat five times without changing agent identity, advertised tools, or the sealed task
+  contract; the existing bug-bounty fixture separately repeats three paraphrases five times.
 - Composer popovers render above the workbench boundary, so Workspace and Agent menus remain usable
   when the Terminal/AI Commands area is tall.
 
 Focused settings, routing, prompt-contract, policy, registry, and A -> B -> A preference tests are
 green. This does not close the whole plan. Remaining work is the full repeated/paraphrased hostile
-fixture programme; explicit definition-version recording in RunLedger; named conversation
-checkpoint/resume and dirty-tab save/discard handling; terminal/target/Engagement isolation audit;
-M4 WSTG/Engagement actions; and M5 Files & Knowledge manifest/split-review integration.
+Remaining work is the terminal/target/Engagement isolation audit; M4 WSTG/Engagement actions; and M5
+Files & Knowledge manifest/split-review integration.
 
 ## Executive decision
 

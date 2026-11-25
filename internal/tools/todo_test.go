@@ -13,6 +13,7 @@ import (
 func withTempHome(t *testing.T) {
 	t.Helper()
 	SetTodoDB(nil)
+	t.Setenv("MAULER_CONFIG_DIR", "")
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 }

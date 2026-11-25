@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "todo-1",
+      "text": "Create artifact.txt with the exact decoded JSON string content",
+      "status": "done",
+      "detail": "artifact.txt written (103 bytes)",
+      "created_at": "2026-11-17T20:30:11Z",
+      "updated_at": "2026-11-17T20:30:22Z"
+    },
+    {
+      "id": "todo-2",
+      "text": "Read back artifact.txt and verify all lines/bytes",
+      "status": "done",
+      "detail": "Read back confirmed all 4 content lines plus trailing newline; 103 bytes matches expected UTF-8 length",
+      "created_at": "2026-11-17T20:30:11Z",
+      "updated_at": "2026-11-17T20:30:25Z"
+    },
+    {
+      "id": "todo-3",
+      "text": "Report verified handoff in chat",
+      "status": "done",
+      "detail": "Handoff reported in chat with verification evidence",
+      "created_at": "2026-11-17T20:30:11Z",
+      "updated_at": "2026-11-17T20:30:27Z"
+    }
+  ]
+}

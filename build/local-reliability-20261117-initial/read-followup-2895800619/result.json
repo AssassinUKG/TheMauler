@@ -1,0 +1,461 @@
+{
+  "case": "read-followup",
+  "evidence": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\read-followup-2895800619",
+  "followup": {
+    "id": "task-2026-11-17T19-45-35.0920292Z-a",
+    "generation": 1794944735092,
+    "conversation_epoch": 1,
+    "prompt": "What did that file say?",
+    "routing_prompt": "What did that file say?",
+    "mode": "Auto",
+    "agent_definition_id": "auto",
+    "agent_definition_version": "1",
+    "profile": "local-qualification",
+    "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+    "origin": "desktop",
+    "contract": {
+      "version": 1,
+      "revision": 1,
+      "run_id": "task-2026-11-17T19-45-35.0920292Z-a",
+      "objective": "What did that file say?",
+      "workspace_root": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\read-followup-2895800619\\workspace",
+      "constraints": [
+        "Do not mutate outside the authoritative workspace or an explicitly approved scope."
+      ],
+      "risk": "low",
+      "instruction_revision": 1,
+      "plan_required": false,
+      "budgets": {
+        "max_tool_calls": 16,
+        "max_run_seconds": 90
+      },
+      "approval_policy": "tool_policy_and_scope_gates",
+      "completion_policy": "evidence_owned",
+      "created_at": "2026-11-17T19:45:35.0920292Z",
+      "digest": "sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe"
+    },
+    "control": {
+      "version": 1,
+      "contract_digest": "sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe",
+      "contract_revision": 1,
+      "phase": "complete",
+      "revision": 5,
+      "plan_required": false,
+      "plan_accepted": true,
+      "last_event": "verification_passed",
+      "last_detail": "all blocking acceptance checks have immutable evidence ids",
+      "updated_at": "2026-11-17T19:45:42.477109Z"
+    },
+    "status": "done",
+    "state": "done",
+    "started_at": "2026-11-17T19:45:35Z",
+    "ended_at": "2026-11-17T19:45:42Z",
+    "duration_ms": 7385,
+    "prompt_tokens": 6319,
+    "completion_tokens": 60,
+    "total_tokens": 6379,
+    "summary": "The file `notes.txt` contained exactly one line:\n\n```\nMAULER_NOTE_1794944722507998700_1\n```\n\nThat was the only content — a single marker string followed by a blank line.",
+    "response": "The file `notes.txt` contained exactly one line:\n\n```\nMAULER_NOTE_1794944722507998700_1\n```\n\nThat was the only content — a single marker string followed by a blank line.",
+    "events": [
+      {
+        "kind": "start",
+        "message": "Run started",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "mode=Auto agent_definition_id=auto agent_definition_version=1 profile=local-qualification model=RVN-Q4_K_M-multilingual-mtp.gguf autonomous=true thinking_mode=off claimant=task-2026-11-17T19-45-35.0920292Z-a origin=desktop"
+      },
+      {
+        "kind": "thinking_mode",
+        "message": "Resolved Chat thinking override",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "requested=off effective=off supported=true profile_thinking=false preserve_thinking=false"
+      },
+      {
+        "kind": "task_contract",
+        "message": "Validated and sealed task contract",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "revision=1 digest=sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe risk=low plan_required=false blocking_checks="
+      },
+      {
+        "kind": "control_transition",
+        "message": "contract_validated",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "from=intake to=planning machine_revision=2 contract_revision=1 contract_digest=sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe"
+      },
+      {
+        "kind": "control_transition",
+        "message": "plan_accepted",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "from=planning to=acting machine_revision=3 contract_revision=1 contract_digest=sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe"
+      },
+      {
+        "kind": "context_packet",
+        "message": "Selected task-aware project context",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "{\n  \"policy\": \"relevant_workspace\",\n  \"requested_class\": \"auto\",\n  \"effective_class\": \"relevant\",\n  \"sources\": [\n    \"C:/Users/richa/Desktop/TheMauler/AGENTS.md\",\n    \"C:/Users/richa/Desktop/TheMauler/docs/context/non-negotiables.md\",\n    \"C:/Users/richa/Desktop/TheMauler/docs/context/current-state.md\"\n  ],\n  \"source_bytes\": 58182,\n  \"prompt_bytes\": 13209,\n  \"estimated_tokens\": 3303,\n  \"packet_limit_bytes\": 16000,\n  \"packet_limit_tokens\": 4000,\n  \"manifest_status\": \"active\",\n  \"manifest_path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/manifest.json\",\n  \"manifest_sha256\": \"8ba16dfc71742cbfd60b6e299bcd764ee35765f5813aee5d1df116f5c7b97ed5\",\n  \"provenance\": [\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/AGENTS.md\",\n      \"sha256\": \"6f72bf49705fc9acba67b68610685ea16d015434905b6524244ad85013d17ecf\",\n      \"reason\": \"default packet relevant_workspace\",\n      \"source_bytes\": 13645,\n      \"prompt_bytes\": 4176,\n      \"estimated_tokens\": 1044,\n      \"partial\": true,\n      \"excerpt_ranges\": [\n        {\n          \"start_line\": 1,\n          \"end_line\": 7\n        },\n        {\n          \"start_line\": 8,\n          \"end_line\": 16\n        },\n        {\n          \"start_line\": 146,\n          \"end_line\": 187\n        }\n      ]\n    },\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/non-negotiables.md\",\n      \"sha256\": \"79021624dc3e68cff2d750d47b88f469c9a0e0fa4b96d3e1c66b8688a2b27713\",\n      \"reason\": \"default packet relevant_workspace\",\n      \"source_bytes\": 5991,\n      \"prompt_bytes\": 2454,\n      \"estimated_tokens\": 614,\n      \"partial\": true,\n      \"excerpt_ranges\": [\n        {\n          \"start_line\": 1,\n          \"end_line\": 5\n        },\n        {\n          \"start_line\": 6,\n          \"end_line\": 14\n        },\n        {\n          \"start_line\": 54,\n          \"end_line\": 62\n        },\n        {\n          \"start_line\": 64,\n          \"end_line\": 77\n        }\n      ]\n    },\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/current-state.md\",\n \n..."
+      },
+      {
+        "kind": "state",
+        "message": "model_loading",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "model",
+        "message": "Model ready",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "runtime_lock",
+        "message": "Saved runtime lock",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "{\"updated_at\":\"2026-11-17T19:45:35Z\",\"profile_name\":\"local-qualification\",\"provider_name\":\"local-qualification\",\"backend\":\"llamacpp\",\"base_url\":\"http://127.0.0.1:8804/v1\",\"model_id\":\"RVN-Q4_K_M-multilingual-mtp.gguf\",\"model_hash\":\"3b84cb4774ed03a0\",\"adapter\":\"qwen38\",\"tool_protocol\":\"native-openai\",\"ctx_tokens\":35072,\"thinking\":false,\"preserve_thinking\":false,\"kv_cache_precision\":\"f16\",\"kv_cache_type_k\":\"f16\",\"kv_cache_type_v\":\"f16\",\"launch_signature\":\"local-qualification | local-qualification | llamacpp | http://127.0.0.1:8804/v1 | RVN-Q4_K_M-multilingual-mtp.gguf |  | f16 | f16 | f16 |  | \"}"
+      },
+      {
+        "kind": "reasoning_effort",
+        "message": "Initial reasoning effort",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "none"
+      },
+      {
+        "kind": "tool_routing",
+        "message": "Tool routing state",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "phase=default\nrouting_mode=auto\ntool_choice=auto\ntool_count=6\nterminal_state=missing\ntools=edit, glob, grep, read, todo_write, write"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 7498\u003e3000, system+tools over 20 percent",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "turn=1\nestimated_total_tokens=9231\nsystem_tokens=7498\nsystem_target_tokens=3000\ntool_schema_tokens=1038\ntool_schema_target_tokens=1500\nconversation_tokens=183\ncontext_window=35072\nsystem_plus_tools_pct=0.243\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=true\nsystem_prompt_hash=e615a569ea074792\nprompt_hash=a1bc31096bf55269\ntool_schema_hash=589b4cce1dafa0be\nselected_tools=edit,glob,grep,read,todo_write,write"
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "tool_choice=auto messages=8 tools=6 no_think=false effort=none"
+      },
+      {
+        "kind": "tool_protocol_request",
+        "message": "Chat request tool protocol",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "client=llamacpp model=RVN-Q4_K_M-multilingual-mtp.gguf runtime_tool_protocol=native-openai tool_choice=auto tools=6 grammar=off thinking=false preserve_thinking=false force_no_think=false reasoning_effort= max_tokens=1024"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T19:45:42Z",
+        "detail": "turn=1\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=skipped\ntool_choice=auto\ntools=6\nselected_tools=edit,glob,grep,read,todo_write,write\nttft_ms=6216\nduration_ms=7220\navg_inter_delta_ms=17\ndeltas=57\ncontent_deltas=55\nprompt_tokens=6319\ncached_prompt_tokens=0\ncompletion_tokens=60\ntotal_tokens=6379\nprompt_tokens_per_second=1051.63\ntokens_per_second=58.80\nsystem_prompt_hash=e615a569ea074792\nprompt_hash=a1bc31096bf55269\ntool_schema_hash=589b4cce1dafa0be"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_requested",
+        "timestamp": "2026-11-17T19:45:42Z",
+        "detail": "from=acting to=verifying machine_revision=4 contract_revision=1 contract_digest=sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_passed",
+        "timestamp": "2026-11-17T19:45:42Z",
+        "detail": "from=verifying to=complete machine_revision=5 contract_revision=1 contract_digest=sha256:3602e025c37b8063bb4b35dcd5b24406595e63242031baf058cbd0159f51a7fe"
+      },
+      {
+        "kind": "state",
+        "message": "done",
+        "timestamp": "2026-11-17T19:45:42Z",
+        "detail": "The file `notes.txt` contained exactly one line:\n\n```\nMAULER_NOTE_1794944722507998700_1\n```\n\nThat was the only content — a single marker string followed by a blank line."
+      },
+      {
+        "kind": "finish",
+        "message": "Run completed",
+        "timestamp": "2026-11-17T19:45:42Z"
+      },
+      {
+        "kind": "loop_metrics",
+        "message": "Loop-health metrics",
+        "timestamp": "2026-11-17T19:45:42Z",
+        "detail": "{\"tool_calls\":0,\"auto_continues\":0,\"truncations\":0,\"tool_errors\":0,\"compactions\":0,\"context_clears\":0,\"verifier_prompts\":0,\"review_cycles\":0,\"verify_gate_fails\":0,\"completion_rail_fails\":0,\"reviewer_change_requests\":0,\"repeated_tool_inputs\":0,\"repeated_identical_outcomes\":0,\"repeated_skips\":0,\"tool_cycle_detected\":false,\"tool_routing_events\":1,\"max_routed_tools\":6,\"prompt_warnings\":1,\"stability_score\":95,\"prompt_tokens\":6319,\"completion_tokens\":60}"
+      },
+      {
+        "kind": "progress",
+        "message": "Progress artifact update",
+        "timestamp": "2026-11-17T19:45:42Z",
+        "detail": "section=Run Finish\nstatus=done\nprogress appended: .mauler/progress.md"
+      }
+    ]
+  },
+  "joined": true,
+  "modelCalls": 2,
+  "pass": true,
+  "repetition": 1,
+  "run": {
+    "id": "task-2026-11-17T19-45-22.5089968Z-9",
+    "generation": 1794944722508,
+    "conversation_epoch": 1,
+    "prompt": "Read notes.txt and tell me the exact marker stored in it.",
+    "routing_prompt": "Read notes.txt and tell me the exact marker stored in it.",
+    "mode": "Auto",
+    "agent_definition_id": "auto",
+    "agent_definition_version": "1",
+    "profile": "local-qualification",
+    "model": "RVN-Q4_K_M-multilingual-mtp.gguf",
+    "origin": "desktop",
+    "contract": {
+      "version": 1,
+      "revision": 1,
+      "run_id": "task-2026-11-17T19-45-22.5089968Z-9",
+      "objective": "Read notes.txt and tell me the exact marker stored in it.",
+      "workspace_root": "C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\read-followup-2895800619\\workspace",
+      "constraints": [
+        "Do not mutate outside the authoritative workspace or an explicitly approved scope."
+      ],
+      "risk": "low",
+      "instruction_revision": 1,
+      "plan_required": false,
+      "budgets": {
+        "max_tool_calls": 16,
+        "max_run_seconds": 90
+      },
+      "approval_policy": "tool_policy_and_scope_gates",
+      "completion_policy": "evidence_owned",
+      "created_at": "2026-11-17T19:45:22.5089968Z",
+      "digest": "sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+    },
+    "control": {
+      "version": 1,
+      "contract_digest": "sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437",
+      "contract_revision": 1,
+      "phase": "complete",
+      "revision": 8,
+      "plan_required": false,
+      "plan_accepted": true,
+      "last_event": "verification_passed",
+      "last_detail": "all blocking acceptance checks have immutable evidence ids",
+      "updated_at": "2026-11-17T19:45:35.055304Z"
+    },
+    "status": "done",
+    "state": "done",
+    "started_at": "2026-11-17T19:45:22Z",
+    "ended_at": "2026-11-17T19:45:35Z",
+    "duration_ms": 12547,
+    "prompt_tokens": 5837,
+    "completion_tokens": 42,
+    "total_tokens": 5879,
+    "summary": "The exact marker stored in `notes.txt` is:\n\n```\nMAULER_NOTE_1794944722507998700_1\n```",
+    "response": "The exact marker stored in `notes.txt` is:\n\n```\nMAULER_NOTE_1794944722507998700_1\n```",
+    "tools": [
+      {
+        "name": "read",
+        "input": "{\"path\":\"notes.txt\"}",
+        "result": "# notes.txt  (lines 1-2 of 2)\n   1\tMAULER_NOTE_1794944722507998700_1\n   2",
+        "status": "done",
+        "timestamp": "2026-11-17T19:45:28Z"
+      }
+    ],
+    "events": [
+      {
+        "kind": "start",
+        "message": "Run started",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "mode=Auto agent_definition_id=auto agent_definition_version=1 profile=local-qualification model=RVN-Q4_K_M-multilingual-mtp.gguf autonomous=true thinking_mode=off claimant=task-2026-11-17T19-45-22.5089968Z-9 origin=desktop"
+      },
+      {
+        "kind": "thinking_mode",
+        "message": "Resolved Chat thinking override",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "requested=off effective=off supported=true profile_thinking=false preserve_thinking=false"
+      },
+      {
+        "kind": "task_contract",
+        "message": "Validated and sealed task contract",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "revision=1 digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437 risk=low plan_required=false blocking_checks="
+      },
+      {
+        "kind": "control_transition",
+        "message": "contract_validated",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "from=intake to=planning machine_revision=2 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "control_transition",
+        "message": "plan_accepted",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "from=planning to=acting machine_revision=3 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "context_packet",
+        "message": "Selected task-aware project context",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "{\n  \"policy\": \"relevant_workspace\",\n  \"requested_class\": \"auto\",\n  \"effective_class\": \"relevant\",\n  \"sources\": [\n    \"C:/Users/richa/Desktop/TheMauler/AGENTS.md\",\n    \"C:/Users/richa/Desktop/TheMauler/docs/context/non-negotiables.md\",\n    \"C:/Users/richa/Desktop/TheMauler/docs/context/current-state.md\"\n  ],\n  \"source_bytes\": 58182,\n  \"prompt_bytes\": 13212,\n  \"estimated_tokens\": 3303,\n  \"packet_limit_bytes\": 16000,\n  \"packet_limit_tokens\": 4000,\n  \"manifest_status\": \"active\",\n  \"manifest_path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/manifest.json\",\n  \"manifest_sha256\": \"8ba16dfc71742cbfd60b6e299bcd764ee35765f5813aee5d1df116f5c7b97ed5\",\n  \"provenance\": [\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/AGENTS.md\",\n      \"sha256\": \"6f72bf49705fc9acba67b68610685ea16d015434905b6524244ad85013d17ecf\",\n      \"reason\": \"default packet relevant_workspace\",\n      \"source_bytes\": 13645,\n      \"prompt_bytes\": 4176,\n      \"estimated_tokens\": 1044,\n      \"partial\": true,\n      \"excerpt_ranges\": [\n        {\n          \"start_line\": 1,\n          \"end_line\": 7\n        },\n        {\n          \"start_line\": 112,\n          \"end_line\": 118\n        },\n        {\n          \"start_line\": 146,\n          \"end_line\": 187\n        }\n      ]\n    },\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/non-negotiables.md\",\n      \"sha256\": \"79021624dc3e68cff2d750d47b88f469c9a0e0fa4b96d3e1c66b8688a2b27713\",\n      \"reason\": \"default packet relevant_workspace\",\n      \"source_bytes\": 5991,\n      \"prompt_bytes\": 2032,\n      \"estimated_tokens\": 508,\n      \"partial\": true,\n      \"excerpt_ranges\": [\n        {\n          \"start_line\": 1,\n          \"end_line\": 5\n        },\n        {\n          \"start_line\": 17,\n          \"end_line\": 25\n        },\n        {\n          \"start_line\": 54,\n          \"end_line\": 62\n        },\n        {\n          \"start_line\": 80,\n          \"end_line\": 87\n        }\n      ]\n    },\n    {\n      \"path\": \"C:/Users/richa/Desktop/TheMauler/docs/context/current-state.md\n..."
+      },
+      {
+        "kind": "state",
+        "message": "model_loading",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "model",
+        "message": "Model ready",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "llamacpp\u0000http://127.0.0.1:8804/v1\u0000RVN-Q4_K_M-multilingual-mtp.gguf\u000035072\u0000f16\u0000f16\u0000f16\u0000MAULER_LOCAL_EVAL_KEY"
+      },
+      {
+        "kind": "runtime_lock",
+        "message": "Could not save runtime lock",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "open C:\\Users\\richa\\Desktop\\TheMauler\\build\\local-reliability-20261117-initial\\read-followup-2895800619\\config\\runtime-lock.json: The system cannot find the path specified."
+      },
+      {
+        "kind": "context_budget",
+        "message": "Applied agent working context budget",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "budget=26880 preset=32768 profile_ctx=35072"
+      },
+      {
+        "kind": "reasoning_effort",
+        "message": "Initial reasoning effort",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "none"
+      },
+      {
+        "kind": "tool_routing",
+        "message": "Tool routing state",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "phase=default\nrouting_mode=auto\ntool_choice=required\ntool_count=4\nterminal_state=missing\ntools=glob, grep, read, todo_write"
+      },
+      {
+        "kind": "session_repair",
+        "message": "Repaired 1 malformed history message(s)",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "phase=3 action=merge_consecutive_system index=1"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 7385\u003e3000, system+tools over 20 percent",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "turn=1\nestimated_total_tokens=8658\nsystem_tokens=7385\nsystem_target_tokens=3000\ntool_schema_tokens=732\ntool_schema_target_tokens=1500\nconversation_tokens=29\ncontext_window=35072\nsystem_plus_tools_pct=0.231\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=true\nsystem_prompt_hash=c2b1bc55a76babae\nprompt_hash=1e47342d680a9293\ntool_schema_hash=b2551cacf7ac5bd7\nselected_tools=glob,grep,read,todo_write"
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "tool_choice=required messages=3 tools=4 no_think=false effort=none"
+      },
+      {
+        "kind": "tool_protocol_request",
+        "message": "Chat request tool protocol",
+        "timestamp": "2026-11-17T19:45:22Z",
+        "detail": "client=llamacpp model=RVN-Q4_K_M-multilingual-mtp.gguf runtime_tool_protocol=native-openai tool_choice=required tools=4 grammar=off thinking=false preserve_thinking=false force_no_think=false reasoning_effort= max_tokens=1024"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "turn=1\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=skipped\ntool_choice=required\ntools=4\nselected_tools=glob,grep,read,todo_write\nttft_ms=5967\nduration_ms=5969\navg_inter_delta_ms=1\ndeltas=2\ncontent_deltas=0\nprompt_tokens=5747\ncached_prompt_tokens=0\ncompletion_tokens=25\ntotal_tokens=5772\nprompt_tokens_per_second=1076.78\ntokens_per_second=64.48\nsystem_prompt_hash=c2b1bc55a76babae\nprompt_hash=1e47342d680a9293\ntool_schema_hash=b2551cacf7ac5bd7"
+      },
+      {
+        "kind": "tool_protocol_native",
+        "message": "Backend returned structured tool_calls",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "converted_calls=1 names=read\nenabled_tools=4\nmarkers=\nraw_tail="
+      },
+      {
+        "kind": "state",
+        "message": "reading",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "read"
+      },
+      {
+        "kind": "tool_call",
+        "message": "read",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "{\"path\":\"notes.txt\"}"
+      },
+      {
+        "kind": "control_transition",
+        "message": "action_started",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "from=acting to=acting machine_revision=4 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "control_transition",
+        "message": "action_succeeded",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "from=acting to=observing machine_revision=5 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "control_transition",
+        "message": "observation_recorded",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "from=observing to=acting machine_revision=6 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "tool_routing",
+        "message": "Tool routing state",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "phase=default\nrouting_mode=auto\ntool_choice=auto\ntool_count=4\nterminal_state=missing\ntools=glob, grep, read, todo_write"
+      },
+      {
+        "kind": "prompt_budget",
+        "message": "Prompt budget over target: system 7384\u003e3000, system+tools over 20 percent",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "turn=2\nestimated_total_tokens=8755\nsystem_tokens=7384\nsystem_target_tokens=3000\ntool_schema_tokens=732\ntool_schema_target_tokens=1500\nconversation_tokens=127\ncontext_window=35072\nsystem_plus_tools_pct=0.231\nover_system_target=true\nover_tool_schema_target=false\nover_20_pct=true\nsystem_prompt_hash=bee131bc67e32d2a\nprompt_hash=858cd39e00117d54\ntool_schema_hash=b2551cacf7ac5bd7\nselected_tools=glob,grep,read,todo_write"
+      },
+      {
+        "kind": "state",
+        "message": "thinking",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "tool_choice=auto messages=5 tools=4 no_think=false effort=none"
+      },
+      {
+        "kind": "tool_protocol_request",
+        "message": "Chat request tool protocol",
+        "timestamp": "2026-11-17T19:45:28Z",
+        "detail": "client=llamacpp model=RVN-Q4_K_M-multilingual-mtp.gguf runtime_tool_protocol=native-openai tool_choice=auto tools=4 grammar=off thinking=false preserve_thinking=false force_no_think=false reasoning_effort= max_tokens=1024"
+      },
+      {
+        "kind": "model_call",
+        "message": "Model call completed",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "turn=2\nclient=llamacpp\nmodel=RVN-Q4_K_M-multilingual-mtp.gguf\nstatus=ok\nmodel_load=reused\ntool_choice=auto\ntools=4\nselected_tools=glob,grep,read,todo_write\nttft_ms=5665\nduration_ms=6277\navg_inter_delta_ms=15\ndeltas=40\ncontent_deltas=38\nprompt_tokens=5837\ncached_prompt_tokens=0\ncompletion_tokens=42\ntotal_tokens=5879\nprompt_tokens_per_second=1095.81\ntokens_per_second=67.09\nsystem_prompt_hash=bee131bc67e32d2a\nprompt_hash=858cd39e00117d54\ntool_schema_hash=b2551cacf7ac5bd7"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_requested",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "from=acting to=verifying machine_revision=7 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "control_transition",
+        "message": "verification_passed",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "from=verifying to=complete machine_revision=8 contract_revision=1 contract_digest=sha256:15dd6094b4080126bcbab1786cd704bdd95c9b33b83c857f16a55814e60f5437"
+      },
+      {
+        "kind": "state",
+        "message": "done",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "The exact marker stored in `notes.txt` is:\n\n```\nMAULER_NOTE_1794944722507998700_1\n```"
+      },
+      {
+        "kind": "finish",
+        "message": "Run completed",
+        "timestamp": "2026-11-17T19:45:35Z"
+      },
+      {
+        "kind": "loop_metrics",
+        "message": "Loop-health metrics",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "{\"tool_calls\":1,\"auto_continues\":0,\"truncations\":0,\"tool_errors\":0,\"compactions\":0,\"context_clears\":0,\"verifier_prompts\":0,\"review_cycles\":0,\"verify_gate_fails\":0,\"completion_rail_fails\":0,\"reviewer_change_requests\":0,\"repeated_tool_inputs\":0,\"repeated_identical_outcomes\":0,\"repeated_skips\":0,\"tool_cycle_detected\":false,\"tool_routing_events\":2,\"max_routed_tools\":4,\"prompt_warnings\":2,\"stability_score\":90,\"prompt_tokens\":5837,\"completion_tokens\":42}"
+      },
+      {
+        "kind": "progress",
+        "message": "Progress artifact update",
+        "timestamp": "2026-11-17T19:45:35Z",
+        "detail": "section=Run Finish\nstatus=done\nprogress appended: .mauler/progress.md"
+      }
+    ]
+  }
+}

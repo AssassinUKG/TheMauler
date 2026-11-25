@@ -235,6 +235,46 @@ type EnvironmentConfig struct {
 	UserCorrectionPolicy string `toml:"user_correction_policy" json:"user_correction_policy"` // latest_user_wins | normal
 }
 
+// MCPConfig declares external Model Context Protocol servers. The server
+// boundary is opt-in and lazy: configuring a server never starts a child
+// process or opens a network connection until the operator tests it or the
+// confirmation-gated mcp tool is invoked.
+type MCPConfig struct {
+	Enabled bool              `toml:"enabled" json:"enabled"`
+	Servers []MCPServerConfig `toml:"servers" json:"servers"`
+}
+
+// MCPServerConfig describes one MCP server without carrying secret values.
+// HTTP authentication is resolved from BearerTokenEnv at request time. A
+// stdio child receives only Mauler's bounded base environment plus the names
+// explicitly listed in EnvAllowlist.
+type MCPServerConfig struct {
+	ID             string   `toml:"id" json:"id"`
+	Name           string   `toml:"name" json:"name"`
+	Enabled        bool     `toml:"enabled" json:"enabled"`
+	Transport      string   `toml:"transport" json:"transport"` // stdio | sse | streamable_http
+	Command        string   `toml:"command" json:"command"`
+	Args           []string `toml:"args" json:"args"`
+	WorkingDir     string   `toml:"working_dir" json:"working_dir"`
+	URL            string   `toml:"url" json:"url"`
+	BearerTokenEnv string   `toml:"bearer_token_env" json:"bearer_token_env"`
+	HTTPHostHeader string   `toml:"http_host_header" json:"http_host_header"`
+	HTTPOrigin     string   `toml:"http_origin" json:"http_origin"`
+	EnvAllowlist   []string `toml:"env_allowlist" json:"env_allowlist"`
+	TimeoutSeconds int      `toml:"timeout_seconds" json:"timeout_seconds"`
+}
+
+// NanoCyberConfig declares the optional local sandbox service boundary. The
+// credential reference is an opaque key into the protected service-secret
+// store; the credential itself never enters settings.toml or React state.
+type NanoCyberConfig struct {
+	Enabled       bool   `toml:"enabled" json:"enabled"`
+	Endpoint      string `toml:"endpoint" json:"endpoint"`
+	APIVersion    string `toml:"api_version" json:"api_version"`
+	CredentialEnv string `toml:"credential_env" json:"credential_env"`
+	CredentialRef string `toml:"credential_ref" json:"credential_ref"`
+}
+
 // ContextConfig holds context window and compaction settings.
 type ContextConfig struct {
 	AutoInjectFile              bool                       `toml:"auto_inject_file" json:"auto_inject_file"`
@@ -366,6 +406,8 @@ type Settings struct {
 	Tools         ToolsConfig       `toml:"tools" json:"tools"`
 	Agents        AgentsConfig      `toml:"agents" json:"agents"`
 	Environment   EnvironmentConfig `toml:"environment" json:"environment"`
+	NanoCyber     NanoCyberConfig   `toml:"nanocyber" json:"nanocyber"`
+	MCP           MCPConfig         `toml:"mcp" json:"mcp"`
 	Context       ContextConfig     `toml:"context" json:"context"`
 	Memory        MemoryConfig      `toml:"memory" json:"memory"`
 	Skills        SkillsConfig      `toml:"skills" json:"skills"`
